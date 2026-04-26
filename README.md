@@ -1,6 +1,6 @@
 # Tantalum IDE
 
-Tantalum IDE is an Electron desktop app with a React + TypeScript renderer for editing Arduino sketches, managing local workspaces, compiling firmware with the bundled `arduino-cli`, and shipping OTA releases through Appwrite.
+Tantalum IDE is an Electron desktop app with a React + TypeScript renderer for editing Arduino sketches, managing local workspaces, compiling firmware with the bundled `arduino-cli`, and shipping OTA releases through Appwrite. The IDE powered by agentic AI for coding also.
 
 ## What changed
 
