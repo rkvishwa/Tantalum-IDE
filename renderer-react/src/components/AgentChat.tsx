@@ -1,7 +1,7 @@
 import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { Models } from 'appwrite';
 import { DiffEditor } from '@monaco-editor/react';
-import { 
+import {
   Bot,
   Check,
   KeyRound,
@@ -15,11 +15,6 @@ import {
   ShieldAlert,
   Trash2,
   X,
-  History,
-  ChevronLeft,
-  Plus,
-  Settings,
-  LogOut
 } from 'lucide-react';
 
 import {
@@ -58,22 +53,9 @@ type AgentPanelProps = {
   onRefreshWorkspace: () => void;
   pushConsole: (message: string, level?: 'info' | 'success' | 'error') => void;
   pushToast: (message: string, tone?: 'info' | 'success' | 'error') => void;
-  defaultView?: AgentView;
-  hideChat?: boolean;
-  chatOnly?: boolean;
-  onOpenSettings?: () => void;
-  onSignedOut?: () => void;
 };
 
-type AgentView = 'chat' | 'settings' | 'usage' | 'history';
-
-type ChatThread = {
-  id: string;
-  title: string;
-  messages: AgentUiMessage[];
-  updatedAt: number;
-};
-
+type AgentView = 'chat' | 'settings' | 'usage';
 
 type CredentialFormState = {
   credentialId: string | null;
@@ -133,61 +115,9 @@ export function AgentPanel({
   onRefreshWorkspace,
   pushConsole,
   pushToast,
-  defaultView = 'chat',
-  hideChat = false,
-  chatOnly = false,
-  onOpenSettings,
-  onSignedOut,
 }: AgentPanelProps) {
-  const [view, setView] = useState<AgentView>(defaultView);
-  const [threads, setThreads] = useState<ChatThread[]>(() => {
-    try {
-      const stored = localStorage.getItem('tantalum-agent-threads');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // Ignore malformed persisted thread state and start fresh.
-    }
-    return [{ id: Date.now().toString(), title: 'New Chat', messages: [INITIAL_MESSAGE], updatedAt: Date.now() }];
-  });
-  const [activeThreadId, setActiveThreadId] = useState<string>(() => {
-    try {
-      const stored = localStorage.getItem('tantalum-agent-threads-active');
-      if (stored) return stored;
-    } catch {
-      // Ignore malformed persisted thread state and start fresh.
-    }
-    return '';
-  });
-
-  useEffect(() => {
-    localStorage.setItem('tantalum-agent-threads', JSON.stringify(threads));
-    localStorage.setItem('tantalum-agent-threads-active', activeThreadId);
-  }, [threads, activeThreadId]);
-
-  const activeThread = useMemo(() => threads.find(t => t.id === activeThreadId) || threads[0], [threads, activeThreadId]);
-  const messages = activeThread?.messages || [];
-
-  const updateActiveThreadMessages = useCallback((updater: (prev: AgentUiMessage[]) => AgentUiMessage[]) => {
-    setThreads(current => current.map(t => {
-      if (t.id === activeThreadId) {
-        const newMessages = updater(t.messages);
-        const title = newMessages.length > 1 ? newMessages[1].content.substring(0, 30) + '...' : t.title;
-        return { ...t, messages: newMessages, title, updatedAt: Date.now() };
-      }
-      return t;
-    }));
-  }, [activeThreadId]);
-
-  const createNewThread = useCallback(() => {
-    const newThread = { id: Date.now().toString(), title: 'New Chat', messages: [INITIAL_MESSAGE], updatedAt: Date.now() };
-    setThreads(current => [newThread, ...current]);
-    setActiveThreadId(newThread.id);
-    setView('chat');
-  }, []);
-
+  const [view, setView] = useState<AgentView>('chat');
+  const [messages, setMessages] = useState<AgentUiMessage[]>([INITIAL_MESSAGE]);
   const [draftPrompt, setDraftPrompt] = useState('');
   const [settings, setSettings] = useState<AgentSettingsState>(() => createDefaultAgentSettings());
   const [loadingSettings, setLoadingSettings] = useState(true);
@@ -239,7 +169,7 @@ export function AgentPanel({
 
   const appendUiMessage = useCallback((message: AgentUiMessage) => {
     startTransition(() => {
-      updateActiveThreadMessages(current => [...current, message]);
+      setMessages((current) => [...current, message]);
     });
   }, []);
 
@@ -528,7 +458,7 @@ export function AgentPanel({
               className="ghost-button compact"
               type="button"
               onClick={() => {
-                updateActiveThreadMessages(() => [INITIAL_MESSAGE]);
+                setMessages([INITIAL_MESSAGE]);
                 setPendingApproval(null);
               }}
             >
@@ -538,24 +468,20 @@ export function AgentPanel({
           </div>
         </div>
 
-        {!chatOnly && (
-          <div className="agent-tabs">
-            {!hideChat && (
-              <button className={view === 'chat' ? 'active' : ''} type="button" onClick={() => setView('chat')}>
-                <MessageSquare size={14} />
-                Chat
-              </button>
-            )}
-            <button className={view === 'settings' ? 'active' : ''} type="button" onClick={() => setView('settings')}>
-              <Settings2 size={14} />
-              Settings
-            </button>
-            <button className={view === 'usage' ? 'active' : ''} type="button" onClick={() => setView('usage')}>
-              <Bot size={14} />
-              Usage
-            </button>
-          </div>
-        )}
+        <div className="agent-tabs">
+          <button className={view === 'chat' ? 'active' : ''} type="button" onClick={() => setView('chat')}>
+            <MessageSquare size={14} />
+            Chat
+          </button>
+          <button className={view === 'settings' ? 'active' : ''} type="button" onClick={() => setView('settings')}>
+            <Settings2 size={14} />
+            Settings
+          </button>
+          <button className={view === 'usage' ? 'active' : ''} type="button" onClick={() => setView('usage')}>
+            <Bot size={14} />
+            Usage
+          </button>
+        </div>
 
         <div className="agent-status-strip">
           <span className="release-badge">
@@ -584,49 +510,8 @@ export function AgentPanel({
 
         {agentSetupMessage ? <div className="agent-setup-note">{agentSetupMessage}</div> : null}
 
-        {view === 'history' ? (
-          <div className="thread-history-view">
-            <div className="chat-panel-header">
-              <button onClick={() => setView('chat')}><ChevronLeft size={16} /> Back</button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <button className="primary-button compact" onClick={createNewThread}><Plus size={14} /> New Chat</button>
-                {onOpenSettings && (
-                  <button onClick={onOpenSettings} title="Settings">
-                    <Settings size={16} strokeWidth={1.5} />
-                  </button>
-                )}
-                {onSignedOut && (
-                  <button onClick={() => void onSignedOut()} title="Sign out">
-                    <LogOut size={16} strokeWidth={1.5} />
-                  </button>
-                )}
-              </div>
-            </div>
-            {threads.map(thread => (
-              <div key={thread.id} className={`thread-item ${thread.id === activeThreadId ? 'active' : ''}`} onClick={() => { setActiveThreadId(thread.id); setView('chat'); }}>
-                <div className="thread-item-title">{thread.title}</div>
-                <div className="thread-item-date">{new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(thread.updatedAt))}</div>
-              </div>
-            ))}
-          </div>
-        ) : view === 'chat' ? (
+        {view === 'chat' ? (
           <>
-            <div className="chat-panel-header">
-              <button onClick={() => setView('history')}><History size={16} /> History</button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <button className="primary-button compact" onClick={createNewThread}><Plus size={14} /> New Chat</button>
-                {onOpenSettings && (
-                  <button onClick={onOpenSettings} title="Settings">
-                    <Settings size={16} strokeWidth={1.5} />
-                  </button>
-                )}
-                {onSignedOut && (
-                  <button onClick={() => void onSignedOut()} title="Sign out">
-                    <LogOut size={16} strokeWidth={1.5} />
-                  </button>
-                )}
-              </div>
-            </div>
             <div className="agent-mode-grid">
               <div className="agent-mode-group">
                 <p className="eyebrow">Model source</p>

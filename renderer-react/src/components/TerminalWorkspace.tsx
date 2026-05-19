@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
-import { FolderOpen, Plus, TerminalSquare, X } from 'lucide-react';
+import { FolderOpen, Plus, X } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
+import type { UiPreferences } from '@/lib/uiPreferences';
 import { fileNameFromPath } from '@/lib/utils';
 import type { TerminalDataEvent, TerminalExitEvent } from '@/types/electron';
 
 type TerminalWorkspaceProps = {
   active: boolean;
   currentFolderPath: string | null;
+  uiPreferences: UiPreferences;
 };
 
 type TerminalTabState = {
@@ -38,7 +40,7 @@ function labelForPath(targetPath: string) {
   return fileNameFromPath(normalized) || targetPath;
 }
 
-export function TerminalWorkspace({ active, currentFolderPath }: TerminalWorkspaceProps) {
+export function TerminalWorkspace({ active, currentFolderPath, uiPreferences }: TerminalWorkspaceProps) {
   const [tabs, setTabs] = useState<TerminalTabState[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [notice, setNotice] = useState<WorkspaceNotice | null>(null);
@@ -90,10 +92,10 @@ export function TerminalWorkspace({ active, currentFolderPath }: TerminalWorkspa
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: 'IBM Plex Mono, monospace',
-      fontSize: 13,
+      fontFamily: 'ui-monospace, Consolas, "Cascadia Code", "Cascadia Mono", "Fira Mono", monospace',
+      fontSize: uiPreferences.fontSize,
       theme: {
-        background: '#0b1117',
+        background: '#00000000',
         foreground: '#e3eaf2',
         cursor: '#6ca6ff',
         selectionBackground: '#182434',
@@ -120,7 +122,14 @@ export function TerminalWorkspace({ active, currentFolderPath }: TerminalWorkspa
     });
 
     fitTerminal(sessionId);
-  }, [fitTerminal]);
+  }, [fitTerminal, uiPreferences.fontFamily, uiPreferences.fontSize]);
+
+  useEffect(() => {
+    terminalRefs.current.forEach((terminal, sessionId) => {
+      terminal.options.fontSize = uiPreferences.fontSize;
+      fitTerminal(sessionId);
+    });
+  }, [fitTerminal, uiPreferences.fontSize]);
 
   const createTerminalTab = useCallback(async (cwd?: string) => {
     setNotice(null);
@@ -259,13 +268,13 @@ export function TerminalWorkspace({ active, currentFolderPath }: TerminalWorkspa
 
     hasInitializedRef.current = true;
     const handle = window.setTimeout(() => {
-      void createTerminalTab();
+      void createTerminalTab(currentFolderPath ?? undefined);
     }, 0);
 
     return () => {
       window.clearTimeout(handle);
     };
-  }, [active, createTerminalTab]);
+  }, [active, createTerminalTab, currentFolderPath]);
 
   useEffect(() => {
     if (!active || !activeTabId) {
@@ -354,47 +363,30 @@ export function TerminalWorkspace({ active, currentFolderPath }: TerminalWorkspa
       </div>
 
       <div className="terminal-workspace-stage">
-        {tabs.length === 0 ? (
-          <div className="empty-panel terminal-empty-state">
-            <TerminalSquare size={24} />
-            <p>All terminal tabs are closed. Start a fresh root shell or jump straight into the current folder.</p>
-            <div className="terminal-workspace-actions">
-              <button className="primary-button compact" type="button" onClick={() => void createTerminalTab()}>
-                <Plus size={16} />
-                New root tab
-              </button>
-              <button className="secondary-button compact" type="button" onClick={() => void openCurrentFolderInTerminal()} disabled={!currentFolderPath}>
-                <FolderOpen size={16} />
-                Open current folder
-              </button>
-            </div>
-          </div>
-        ) : (
-          tabs.map((tab) => (
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`terminal-session-panel ${activeTabId === tab.id ? 'active' : ''}`}
+          >
             <div
-              key={tab.id}
-              className={`terminal-session-panel ${activeTabId === tab.id ? 'active' : ''}`}
-            >
-              <div
-                ref={(node) => {
-                  if (node) {
-                    stageRefs.current.set(tab.id, node);
-                    ensureTerminalInstance(tab.id);
-                    return;
-                  }
+              ref={(node) => {
+                if (node) {
+                  stageRefs.current.set(tab.id, node);
+                  ensureTerminalInstance(tab.id);
+                  return;
+                }
 
-                  stageRefs.current.delete(tab.id);
-                }}
-                className="terminal-session-shell"
-              />
-              {tab.exited ? (
-                <div className="terminal-session-overlay">
-                  <p>This shell has exited. You can close the tab or open a new session.</p>
-                </div>
-              ) : null}
-            </div>
-          ))
-        )}
+                stageRefs.current.delete(tab.id);
+              }}
+              className="terminal-session-shell"
+            />
+            {tab.exited ? (
+              <div className="terminal-session-overlay">
+                <p>This shell has exited. You can close the tab or open a new session.</p>
+              </div>
+            ) : null}
+          </div>
+        ))}
       </div>
     </section>
   );

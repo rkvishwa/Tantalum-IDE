@@ -4,7 +4,7 @@ import type { Models } from 'appwrite';
 import { getCurrentUser } from '@/lib/auth';
 
 import { AuthScreen } from './components/AuthScreen';
-import { IDEWorkspace } from './components/IDEWorkspace';
+import { AppShell } from './components/AppShell';
 
 type AppInfo = {
   appName: string;
@@ -62,7 +62,7 @@ function App() {
     return <AuthScreen appName={appInfo.appName} onAuthenticated={setUser} />;
   }
 
-  return <IDEWorkspace appName={appInfo.appName} version={appInfo.version} user={user} onSignedOut={() => setUser(null)} />;
+  return <AppShell appName={appInfo.appName} version={appInfo.version} user={user} onSignedOut={() => setUser(null)} />;
 }
 
 type AppInfoResult =

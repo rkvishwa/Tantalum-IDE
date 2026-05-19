@@ -1,17 +1,21 @@
 {
   "name": "tantalum-ide",
   "version": "1.0.0",
+  "private": true,
   "description": "Tantalum IDE desktop app with Arduino tooling, Appwrite-backed auth, OTA workflows, and a React + TypeScript UI.",
   "main": "main.js",
+  "workspaces": [
+    "renderer-react"
+  ],
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
-    "dev:renderer": "npm --prefix renderer-react run dev -- --host 127.0.0.1 --port 5173",
+    "dev:renderer": "npm run dev --workspace renderer-react -- --host 127.0.0.1 --port 5173 --strictPort",
     "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "start": "node scripts/start-electron.js",
     "start:foreground": "electron .",
     "start:fresh": "npm run build:renderer && npm run start",
-    "build:renderer": "npm --prefix renderer-react run build",
-    "lint:renderer": "npm --prefix renderer-react run lint",
+    "build:renderer": "npm run build --workspace renderer-react",
+    "lint:renderer": "npm run lint --workspace renderer-react",
     "dist": "npm run build:renderer && electron-builder",
     "build:mac": "npm run build:renderer && electron-builder --mac"
   },

@@ -10,7 +10,6 @@ function deriveCollections(config) {
     boards: tables.find((table) => table.$id === 'boards')?.$id || 'boards',
     firmwares: tables.find((table) => table.$id === 'firmwares')?.$id || 'firmwares',
     sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches',
-    settings: tables.find((table) => table.$id === 'settings')?.$id || 'settings',
   };
 }
 
@@ -48,11 +47,11 @@ function getRendererCloudConfig() {
     boardsCollectionId: String(collections.boards || '').trim(),
     firmwareCollectionId: String(collections.firmwares || '').trim(),
     sketchesCollectionId: String(collections.sketches || '').trim(),
-    agentSettingsCollectionId: String(collections.settings || '').trim(),
     firmwareBucketId: deriveFirmwareBucketId(appwriteManifest),
     boardAdminFunctionId: deriveFunctionId(appwriteManifest, 'board-admin'),
     deviceGatewayFunctionId: deriveFunctionId(appwriteManifest, 'device-gateway'),
-    proxyAiRequestFunctionId: deriveFunctionId(appwriteManifest, 'proxy-ai-request'),
+    agentSettingsFunctionId: deriveFunctionId(appwriteManifest, 'agent-settings'),
+    agentGatewayFunctionId: deriveFunctionId(appwriteManifest, 'agent-gateway'),
   };
 }
 

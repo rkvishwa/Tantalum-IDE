@@ -26,11 +26,12 @@ contextBridge.exposeInMainWorld("tantalum", {
   app: {
     cloudConfig: readCloudConfig(),
     getInfo: () => ipcRenderer.invoke("app:get-info"),
+    controlWindow: (action) => ipcRenderer.invoke("app:window-control", action),
     onMenuAction: (callback) => subscribe("app:menu-action", callback)
   },
   agent: {
-    getContext: () => ipcRenderer.invoke("agent:get-context"),
-    invokeTool: (payload) => ipcRenderer.invoke("agent:invoke-tool", payload),
+    getStatus: () => ipcRenderer.invoke("agent:get-status"),
+    run: (payload) => ipcRenderer.invoke("agent:run", payload),
     resolveApproval: (payload) => ipcRenderer.invoke("agent:resolve-approval", payload),
   },
   cloud: {
@@ -62,6 +63,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     openFolder: () => ipcRenderer.invoke("fs:open-folder"),
     setWorkspace: (folderPath) => ipcRenderer.invoke("fs:set-workspace", folderPath),
     getLastWorkspace: () => ipcRenderer.invoke("fs:get-last-workspace"),
+    getRecentWorkspaces: () => ipcRenderer.invoke("fs:get-recent-workspaces"),
     showSaveDialog: (options) => ipcRenderer.invoke("fs:show-save-dialog", options),
     readDirectory: (dirPath) => ipcRenderer.invoke("fs:read-directory", dirPath),
     readFile: (filePath) => ipcRenderer.invoke("fs:read-file", filePath),

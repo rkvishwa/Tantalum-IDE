@@ -3,14 +3,16 @@ import { RefreshCcw } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
+import type { UiPreferences } from '@/lib/uiPreferences';
 import type { TerminalDataEvent, TerminalExitEvent } from '@/types/electron';
 
 type ConsoleTerminalProps = {
   active: boolean;
   currentFolderPath: string | null;
+  uiPreferences: UiPreferences;
 };
 
-export function ConsoleTerminal({ active, currentFolderPath }: ConsoleTerminalProps) {
+export function ConsoleTerminal({ active, currentFolderPath, uiPreferences }: ConsoleTerminalProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionCwd, setSessionCwd] = useState<string | null>(null);
   const [pristine, setPristine] = useState(true);
@@ -108,8 +110,8 @@ export function ConsoleTerminal({ active, currentFolderPath }: ConsoleTerminalPr
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: 'IBM Plex Mono, monospace',
-      fontSize: 12.5,
+      fontFamily: uiPreferences.fontFamily,
+      fontSize: uiPreferences.fontSize,
       theme: {
         background: '#0b1117',
         foreground: '#e3eaf2',
@@ -148,7 +150,18 @@ export function ConsoleTerminal({ active, currentFolderPath }: ConsoleTerminalPr
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, []);
+  }, [uiPreferences.fontFamily, uiPreferences.fontSize]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    terminal.options.fontFamily = uiPreferences.fontFamily;
+    terminal.options.fontSize = uiPreferences.fontSize;
+    fitTerminal();
+  }, [fitTerminal, uiPreferences.fontFamily, uiPreferences.fontSize]);
 
   useEffect(() => {
     const offData = window.tantalum.terminal.onData((event) => {

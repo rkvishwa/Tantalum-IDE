@@ -1,13 +1,11 @@
 import '@knurdz/jack-file-tree/keyboard-shield';
 
-import { startTransition, useDeferredValue, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { startTransition, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import type { Models } from 'appwrite';
 import {
   EditorTabs,
   closeEditorTab,
-  markEditorTabDirty,
-  markEditorTabSaved,
   openEditorTab,
   reorderEditorTabs,
   type EditorTabItem,
@@ -15,33 +13,27 @@ import {
 import { FileTree, type FileTreeFsAdapter, type FileTreeItemType, type FileTreeNode, type FileTreeTheme } from '@knurdz/jack-file-tree';
 import Editor, { type Monaco, type OnMount } from '@monaco-editor/react';
 import {
-  Bot,
-  BellDot,
   BookOpen,
   ChevronDown,
   ChevronUp,
-  ChevronsUpDown,
   Cpu,
   FolderOpen,
-  HardDriveDownload,
   HardDriveUpload,
   Library,
   LoaderCircle,
-  LogOut,
   Plus,
   RefreshCcw,
-  Save,
   Search,
   TerminalSquare,
   Trash2,
 } from 'lucide-react';
 import type { editor } from 'monaco-editor';
 
-import { signOut } from '@/lib/auth';
 import { createBoard, deleteBoard, listBoards, rotateBoardToken, updateBoard } from '@/lib/boards';
 import { appwriteConfig, hasBoardAdminFunction, hasDeviceGatewayFunction, hasRequiredCloudConfiguration } from '@/lib/config';
 import { deleteFirmwareRelease, listFirmwareHistory, markFirmwareAsCurrent, uploadFirmwareRelease } from '@/lib/firmware';
 import type { BoardDocument, BoardInput, BoardSecret, FirmwareDocument } from '@/lib/models';
+import { VS_CODE_FONT_FAMILY, type UiPreferences } from '@/lib/uiPreferences';
 import {
   calculateBoardStatus,
   fileNameFromPath,
@@ -65,18 +57,53 @@ type IDEWorkspaceProps = {
   version: string;
   user: Models.User<Models.Preferences>;
   onSignedOut: () => void;
+  onOpenSettings?: () => void;
+  leftPanelOpen: boolean;
+  rightPanelOpen: boolean;
+  bottomPanelOpen: boolean;
+  onBottomPanelOpenChange: (open: boolean) => void;
+  onWorkspaceTitleChange?: (title: string) => void;
+  uiPreferences: UiPreferences;
+  resolvedTheme: 'dark' | 'light';
 };
 
 type SidebarView = 'explorer' | 'boards' | 'libraries' | 'platforms' | 'terminal';
 type ConsoleView = 'output' | 'terminal';
 type FileTabState = 'temporary' | 'preview' | 'saved';
-type InspectorView = 'agent' | 'board';
 
 type FileTab = EditorTabItem & {
   id: string;
   content: string;
+  savedContent: string;
   fileState: FileTabState;
 };
+
+function getFileTabSavedContent(tab: FileTab) {
+  return typeof tab.savedContent === 'string' ? tab.savedContent : tab.content;
+}
+
+function syncFileTabDirtyState(tab: FileTab): FileTab {
+  const savedContent = getFileTabSavedContent(tab);
+  const isDirty = tab.content !== savedContent;
+
+  if (tab.savedContent === savedContent && tab.isDirty === isDirty) {
+    return tab;
+  }
+
+  return {
+    ...tab,
+    savedContent,
+    isDirty,
+  };
+}
+
+function normalizeFileTabPath(tabPath: string) {
+  return tabPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function isSameFileTabPath(leftPath: string, rightPath: string) {
+  return normalizeFileTabPath(leftPath) === normalizeFileTabPath(rightPath);
+}
 
 type ConsoleEntry = {
   id: number;
@@ -168,8 +195,8 @@ void loop() {
 const FILE_TREE_INTERNAL_TRASH_DIR = '.tantalum-file-tree-trash';
 
 const FILE_TREE_THEME: FileTreeTheme = {
-  backgroundPrimary: '#0b1117',
-  backgroundSecondary: '#101720',
+  backgroundPrimary: 'rgba(18, 18, 18, 0.42)',
+  backgroundSecondary: 'rgba(28, 28, 28, 0.34)',
   backgroundHover: 'rgba(108, 166, 255, 0.08)',
   textPrimary: '#f3f7fb',
   textSecondary: '#9baaba',
@@ -177,7 +204,7 @@ const FILE_TREE_THEME: FileTreeTheme = {
   accent: '#6ca6ff',
   accentTransparent: 'rgba(108, 166, 255, 0.16)',
   danger: '#ff7b72',
-  menuBackground: '#121a23',
+  menuBackground: 'rgba(18, 18, 18, 0.72)',
   menuBorder: 'rgba(255, 255, 255, 0.08)',
   menuHover: 'rgba(108, 166, 255, 0.12)',
   menuText: '#edf3f9',
@@ -186,7 +213,7 @@ const FILE_TREE_THEME: FileTreeTheme = {
   openFolderButtonBackgroundHover: '#82b5ff',
   openFolderButtonText: '#081018',
   openFolderButtonBorder: 'rgba(108, 166, 255, 0.32)',
-  fontFamily: "'Space Grotesk', 'Aptos', 'Segoe UI', sans-serif",
+  fontFamily: VS_CODE_FONT_FAMILY,
 };
 
 let untitledTabCounter = 0;
@@ -236,6 +263,7 @@ function createUntitledTab(name = 'sketch.ino', content = DEFAULT_TAB_CONTENT): 
     path,
     name,
     content,
+    savedContent: content,
     isDirty: false,
     type: 'file',
     fileState: 'temporary',
@@ -250,6 +278,7 @@ function createSavedTab(path: string, content: string, options?: { isPreview?: b
     path,
     name: fileNameFromPath(path),
     content,
+    savedContent: content,
     isDirty: false,
     isPreviewFile: isPreview,
     type: 'file',
@@ -258,13 +287,157 @@ function createSavedTab(path: string, content: string, options?: { isPreview?: b
   };
 }
 
-export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspaceProps) {
+function defineTantalumEditorThemes(monaco: Monaco, accentColor: string) {
+  const accent = accentColor.replace('#', '');
+
+  monaco.editor.defineTheme('tantalum-minimal-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: '6a737d' },
+      { token: 'keyword', foreground: '569cd6' },
+      { token: 'string', foreground: 'ce9178' },
+    ],
+    colors: {
+      'editor.background': '#1e1e1e',
+      'editor.foreground': '#d4d4d4',
+      'editorLineNumber.foreground': '#858585',
+      'editorLineNumber.activeForeground': '#c6c6c6',
+      'editorIndentGuide.background1': '#404040',
+      'editor.selectionBackground': '#264f78',
+      'editor.lineHighlightBackground': '#2a2d2e',
+      'editorCursor.foreground': `#${accent}`,
+      'editorWhitespace.foreground': '#3b3b3b',
+    },
+  });
+
+  monaco.editor.defineTheme('tantalum-minimal-light', {
+    base: 'vs',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: '008000' },
+      { token: 'keyword', foreground: '0000ff' },
+      { token: 'string', foreground: 'a31515' },
+    ],
+    colors: {
+      'editor.background': '#ffffff',
+      'editor.foreground': '#1f1f1f',
+      'editorLineNumber.foreground': '#6e7681',
+      'editorLineNumber.activeForeground': '#24292f',
+      'editorIndentGuide.background1': '#d0d7de',
+      'editor.selectionBackground': '#add6ff',
+      'editor.lineHighlightBackground': '#f6f8fa',
+      'editorCursor.foreground': `#${accent}`,
+      'editorWhitespace.foreground': '#d8dee4',
+    },
+  });
+}
+
+function getEditorLanguage(filePath?: string) {
+  const extension = (filePath?.split('.').pop() ?? '').toLowerCase();
+  const languageByExtension: Record<string, string> = {
+    bash: 'shell',
+    c: 'c',
+    cc: 'cpp',
+    cjs: 'javascript',
+    cpp: 'cpp',
+    cs: 'csharp',
+    css: 'css',
+    cxx: 'cpp',
+    go: 'go',
+    h: 'cpp',
+    hh: 'cpp',
+    hpp: 'cpp',
+    htm: 'html',
+    html: 'html',
+    ini: 'ini',
+    ino: 'cpp',
+    java: 'java',
+    js: 'javascript',
+    json: 'json',
+    jsonc: 'json',
+    jsx: 'javascript',
+    less: 'less',
+    mjs: 'javascript',
+    md: 'markdown',
+    ps1: 'powershell',
+    py: 'python',
+    rs: 'rust',
+    scss: 'scss',
+    sh: 'shell',
+    sql: 'sql',
+    svg: 'xml',
+    toml: 'toml',
+    ts: 'typescript',
+    tsx: 'typescript',
+    xml: 'xml',
+    yaml: 'yaml',
+    yml: 'yaml',
+  };
+
+  return languageByExtension[extension] ?? 'plaintext';
+}
+
+function toMonacoPath(filePath?: string) {
+  if (!filePath || filePath.startsWith('untitled:')) {
+    return undefined;
+  }
+
+  return `file:///${filePath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
+}
+
+function configureMonacoFeatures(monaco: Monaco, accentColor: string, themeName: string) {
+  defineTantalumEditorThemes(monaco, accentColor);
+  monaco.editor.setTheme(themeName);
+
+  monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+    noSemanticValidation: false,
+    noSyntaxValidation: false,
+  });
+  monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+    noSemanticValidation: false,
+    noSyntaxValidation: false,
+  });
+  monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+    allowJs: true,
+    allowNonTsExtensions: true,
+    checkJs: true,
+    jsx: monaco.languages.typescript.JsxEmit.React,
+    moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+    target: monaco.languages.typescript.ScriptTarget.Latest,
+  });
+  monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
+    allowJs: true,
+    allowNonTsExtensions: true,
+    checkJs: true,
+    jsx: monaco.languages.typescript.JsxEmit.React,
+    moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+    target: monaco.languages.typescript.ScriptTarget.Latest,
+  });
+  monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
+    allowComments: true,
+    validate: true,
+  });
+}
+
+export function IDEWorkspace({
+  appName,
+  version,
+  user,
+  onSignedOut,
+  onOpenSettings,
+  leftPanelOpen,
+  rightPanelOpen,
+  bottomPanelOpen,
+  onBottomPanelOpenChange,
+  onWorkspaceTitleChange,
+  uiPreferences,
+  resolvedTheme,
+}: IDEWorkspaceProps) {
   const [sidebar, setSidebar] = useState<SidebarView>('explorer');
   const [consoleView, setConsoleView] = useState<ConsoleView>('output');
-  const [consolePanelOpen, setConsolePanelOpen] = useState(true);
   const [panelSizes, setPanelSizes] = useState<PanelSizes>(() => normalizePanelSizes(DEFAULT_PANEL_SIZES));
   const [activeResizePanel, setActiveResizePanel] = useState<ResizablePanel | null>(null);
-  const [inspectorView, setInspectorView] = useState<InspectorView>('agent');
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [fileTreeRefreshKey, setFileTreeRefreshKey] = useState(0);
   const [tabs, setTabs] = useState<FileTab[]>([]);
@@ -303,17 +476,40 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
 
   const deferredLibraryQuery = useDeferredValue(libraryQuery);
   const deferredPlatformQuery = useDeferredValue(platformQuery);
-  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null;
+  const syncedTabs = useMemo(() => tabs.map(syncFileTabDirtyState), [tabs]);
+  const activeTab = syncedTabs.find((tab) => tab.id === activeTabId) ?? syncedTabs[0] ?? null;
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<Monaco | null>(null);
+  const tabsRef = useRef<FileTab[]>(tabs);
+  const activeTabIdRef = useRef<string | null>(activeTabId);
+  const editorValueRef = useRef(editorValue);
+  const saveInProgressRef = useRef(false);
   const consoleOutputRef = useRef<HTMLDivElement | null>(null);
   const toastCounterRef = useRef(1);
   const treeTrashMapRef = useRef<Map<string, string>>(new Map());
-  const previousSidebarRef = useRef<Exclude<SidebarView, 'terminal'>>('explorer');
   const panelSizesRef = useRef<PanelSizes>(panelSizes);
   const resizeSessionRef = useRef<ResizeSession | null>(null);
+  const editorThemeName = resolvedTheme === 'light' ? 'tantalum-minimal-light' : 'tantalum-minimal-dark';
+  const activeEditorLanguage = getEditorLanguage(activeTab?.path);
+  const activeEditorPath = toMonacoPath(activeTab?.path);
+  const fileTreeTheme = useMemo<FileTreeTheme>(
+    () => ({
+      ...FILE_TREE_THEME,
+      fontFamily: uiPreferences.fontFamily,
+      accent: uiPreferences.accentColor,
+      accentTransparent: 'color-mix(in srgb, var(--accent) 16%, transparent)',
+    }),
+    [uiPreferences.accentColor, uiPreferences.fontFamily],
+  );
+
+  useEffect(() => {
+    onWorkspaceTitleChange?.(workspacePath ? fileNameFromPath(workspacePath) : '');
+  }, [onWorkspaceTitleChange, workspacePath]);
 
   function activateTab(nextTab: FileTab) {
+    activeTabIdRef.current = nextTab.id;
+    editorValueRef.current = nextTab.content;
     setActiveTabId(nextTab.id);
     setEditorValue(nextTab.content);
   }
@@ -332,11 +528,11 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       setConsoleView(nextView);
     }
 
-    setConsolePanelOpen(true);
+    onBottomPanelOpenChange(true);
   }
 
   function toggleConsolePanel() {
-    setConsolePanelOpen((current) => !current);
+    onBottomPanelOpenChange(!bottomPanelOpen);
   }
 
   function applyPanelSizes(updater: (current: PanelSizes) => PanelSizes) {
@@ -433,10 +629,6 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     }
   }
 
-  function toggleTerminalWorkspace() {
-    setSidebar((current) => (current === 'terminal' ? previousSidebarRef.current : 'terminal'));
-  }
-
   function pushConsole(message: string, level: ConsoleEntry['level'] = 'info') {
     if (!message.trim()) {
       return;
@@ -459,6 +651,20 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 4000);
   }
+
+  useEffect(() => {
+    if (!monacoRef.current) {
+      return;
+    }
+
+    configureMonacoFeatures(monacoRef.current, uiPreferences.accentColor, editorThemeName);
+    editorRef.current?.updateOptions({
+      fontFamily: uiPreferences.editorFontFamily,
+      fontSize: uiPreferences.editorFontSize,
+      tabSize: uiPreferences.editorTabSize,
+      wordWrap: uiPreferences.editorWordWrap,
+    });
+  }, [editorThemeName, uiPreferences.accentColor, uiPreferences.editorFontFamily, uiPreferences.editorFontSize, uiPreferences.editorTabSize, uiPreferences.editorWordWrap]);
 
   function normalizeTreePath(targetPath: string) {
     return targetPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
@@ -532,6 +738,7 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
         return !isPathInsideRoot(tab.path, targetPath);
       });
 
+      tabsRef.current = nextTabs;
       return nextTabs;
     });
 
@@ -541,19 +748,23 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       }
 
       if (type === 'file') {
-        if (current === targetPath) {
+        if (isSameFileTabPath(current, targetPath)) {
+          activeTabIdRef.current = null;
           return null;
         }
+        activeTabIdRef.current = current;
         return current;
       }
 
-      return isPathInsideRoot(current, targetPath) ? null : current;
+      const nextActiveTabId = isPathInsideRoot(current, targetPath) ? null : current;
+      activeTabIdRef.current = nextActiveTabId;
+      return nextActiveTabId;
     });
   }
 
   function remapOpenTabs(sourceRoot: string, destinationRoot: string) {
-    setTabs((current) =>
-      current.map((tab) => {
+    setTabs((current) => {
+      const nextTabs = current.map((tab) => {
         if (tab.path.startsWith('untitled:') || !isPathInsideRoot(tab.path, sourceRoot)) {
           return tab;
         }
@@ -565,10 +776,17 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
           path: nextPath,
           name: fileNameFromPath(nextPath),
         };
-      }),
-    );
+      });
 
-    setActiveTabId((current) => (current && isPathInsideRoot(current, sourceRoot) ? remapPathWithinRoot(current, sourceRoot, destinationRoot) : current));
+      tabsRef.current = nextTabs;
+      return nextTabs;
+    });
+
+    setActiveTabId((current) => {
+      const nextActiveTabId = current && isPathInsideRoot(current, sourceRoot) ? remapPathWithinRoot(current, sourceRoot, destinationRoot) : current;
+      activeTabIdRef.current = nextActiveTabId;
+      return nextActiveTabId;
+    });
   }
 
   async function clearInternalTrash(workspaceRoot: string) {
@@ -776,18 +994,37 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
 
   function updateTabContent(tabPath: string, nextContent: string) {
     setTabs((current) => {
-      const activeFileTab = current.find((tab) => tab.path === tabPath);
-      if (!activeFileTab) {
+      let changed = false;
+      const nextTabs = current.map((tab) => {
+        if (!isSameFileTabPath(tab.path, tabPath)) {
+          return tab;
+        }
+
+        const savedContent = getFileTabSavedContent(tab);
+        const isDirty = nextContent !== savedContent;
+
+        if (tab.content === nextContent && tab.savedContent === savedContent && tab.isDirty === isDirty) {
+          return tab;
+        }
+
+        changed = true;
+        return {
+          ...tab,
+          content: nextContent,
+          savedContent,
+          isDirty,
+          isPreviewFile: false,
+          fileState: (tab.fileState === 'temporary' ? 'temporary' : 'saved') as FileTabState,
+          type: 'file' as const,
+        };
+      });
+
+      if (!changed) {
         return current;
       }
 
-      const nextFileState: FileTabState = activeFileTab.fileState === 'temporary' ? 'temporary' : 'saved';
-
-      return markEditorTabDirty(current, tabPath, {
-        content: nextContent,
-        fileState: nextFileState,
-        type: 'file',
-      });
+      tabsRef.current = nextTabs;
+      return nextTabs;
     });
   }
 
@@ -803,7 +1040,11 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
           type: 'file',
         };
 
-        setTabs((current) => openEditorTab(current, pinnedTab, { isPreview: false }));
+        setTabs((current) => {
+          const nextTabs = openEditorTab(current, pinnedTab, { isPreview: false });
+          tabsRef.current = nextTabs;
+          return nextTabs;
+        });
         activateTab(pinnedTab);
         return;
       }
@@ -820,7 +1061,11 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
 
     const nextTab = createSavedTab(filePath, result.content, { isPreview: shouldPreview });
 
-    setTabs((current) => openEditorTab(current, nextTab, { isPreview: shouldPreview }));
+    setTabs((current) => {
+      const nextTabs = openEditorTab(current, nextTab, { isPreview: shouldPreview });
+      tabsRef.current = nextTabs;
+      return nextTabs;
+    });
     activateTab(nextTab);
     void window.tantalum.fs.addRecentFile(filePath);
   }
@@ -828,7 +1073,11 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
   function createNewTab() {
     const nextTab = createUntitledTab();
 
-    setTabs((current) => [...current, nextTab]);
+    setTabs((current) => {
+      const nextTabs = [...current, nextTab];
+      tabsRef.current = nextTabs;
+      return nextTabs;
+    });
     activateTab(nextTab);
   }
 
@@ -838,7 +1087,7 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       return;
     }
 
-    const closingTab = tabs[closingIndex];
+    const closingTab = syncFileTabDirtyState(tabs[closingIndex]);
     if (closingTab.isDirty && !window.confirm(`Close ${closingTab.name} without saving your changes?`)) {
       return;
     }
@@ -846,12 +1095,16 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     const result = closeEditorTab(tabs, tabPath, activeTab?.path ?? null);
 
     if (result.tabs.length === 0) {
+      tabsRef.current = [];
+      activeTabIdRef.current = null;
+      editorValueRef.current = '';
       setTabs([]);
       setActiveTabId(null);
       setEditorValue('');
       return;
     }
 
+    tabsRef.current = result.tabs;
     setTabs(result.tabs);
 
     if (result.activeTabPath) {
@@ -862,80 +1115,88 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       }
     }
 
+    activeTabIdRef.current = null;
     setActiveTabId(null);
   }
 
   function handleTabReorder(fromIndex: number, toIndex: number) {
-    setTabs((current) => reorderEditorTabs(current, fromIndex, toIndex));
+    setTabs((current) => {
+      const nextTabs = reorderEditorTabs(current, fromIndex, toIndex);
+      tabsRef.current = nextTabs;
+      return nextTabs;
+    });
   }
 
   async function saveActiveTab(saveAs = false) {
-    if (!activeTab) {
+    const tabToSave =
+      tabsRef.current.find((tab) => tab.id === activeTabIdRef.current) ??
+      tabsRef.current.find((tab) => tab.id === activeTab?.id) ??
+      activeTab;
+
+    if (!tabToSave) {
       return;
     }
 
-    let destinationPath = activeTab.path;
-    if (saveAs || activeTab.path.startsWith('untitled:')) {
-      const result = await window.tantalum.fs.showSaveDialog({
-        defaultPath: workspacePath ? joinPath(workspacePath, activeTab.name || 'sketch.ino') : activeTab.name,
-        filters: [{ name: 'Arduino Sketch', extensions: ['ino', 'cpp', 'c', 'h'] }],
-      });
+    if (saveInProgressRef.current) {
+      return;
+    }
 
-      if (!result.success) {
+    saveInProgressRef.current = true;
+    try {
+      let destinationPath = tabToSave.path;
+      if (saveAs || tabToSave.path.startsWith('untitled:')) {
+        const result = await window.tantalum.fs.showSaveDialog({
+          defaultPath: workspacePath ? joinPath(workspacePath, tabToSave.name || 'sketch.ino') : tabToSave.name,
+          filters: [{ name: 'Arduino Sketch', extensions: ['ino', 'cpp', 'c', 'h'] }],
+        });
+
+        if (!result.success) {
+          return;
+        }
+
+        destinationPath = result.path;
+      }
+
+      const contentToSave = editorRef.current?.getValue() ?? editorValueRef.current;
+      const writeResult = await window.tantalum.fs.writeFile(destinationPath, contentToSave);
+      if (!writeResult.success) {
+        pushToast(writeResult.error, 'error');
         return;
       }
 
-      destinationPath = result.path;
-    }
-
-    const writeResult = await window.tantalum.fs.writeFile(destinationPath, editorValue);
-    if (!writeResult.success) {
-      pushToast(writeResult.error, 'error');
-      return;
-    }
-
-    const nextName = fileNameFromPath(destinationPath);
-    setTabs((current) => {
-      const destinationTab = current.find((tab) => tab.path === destinationPath && tab.id !== activeTab.id);
-      const baseTab: FileTab = {
-        ...activeTab,
-        id: destinationPath,
-        path: destinationPath,
-        name: nextName,
-        content: editorValue,
-        isPreviewFile: false,
-        isDirty: false,
-        type: 'file',
-        fileState: 'saved',
-      };
-
-      if (activeTab.path === destinationPath) {
-        return markEditorTabSaved(current, destinationPath, {
-          content: editorValue,
+      const nextName = fileNameFromPath(destinationPath);
+      setTabs((current) => {
+        const baseTab: FileTab = {
+          ...tabToSave,
+          id: destinationPath,
+          path: destinationPath,
           name: nextName,
-          fileState: 'saved',
-          type: 'file',
+          content: contentToSave,
+          savedContent: contentToSave,
           isPreviewFile: false,
-        });
-      }
+          isDirty: false,
+          type: 'file',
+          fileState: 'saved',
+        };
 
-      const nextTabs = current
-        .filter((tab) => tab.id === activeTab.id || tab.path !== destinationPath)
-        .map((tab) => (tab.id === activeTab.id ? baseTab : tab));
+        const nextTabs = current
+          .filter((tab) => tab.id === tabToSave.id || !isSameFileTabPath(tab.path, destinationPath))
+          .map((tab) => (tab.id === tabToSave.id ? baseTab : tab));
 
-      if (destinationTab) {
+        tabsRef.current = nextTabs;
         return nextTabs;
+      });
+      activeTabIdRef.current = destinationPath;
+      editorValueRef.current = contentToSave;
+      setActiveTabId(destinationPath);
+      setEditorValue(contentToSave);
+      void window.tantalum.fs.addRecentFile(destinationPath);
+
+      if (workspacePath && isPathInsideRoot(destinationPath, workspacePath) && isFirmwareFileName(nextName)) {
+        refreshFileTree();
       }
-
-      return nextTabs;
-    });
-    setActiveTabId(destinationPath);
-    setEditorValue(editorValue);
-    pushToast(`Saved ${nextName}`, 'success');
-    void window.tantalum.fs.addRecentFile(destinationPath);
-
-    if (workspacePath && isPathInsideRoot(destinationPath, workspacePath) && isFirmwareFileName(nextName)) {
-      refreshFileTree();
+    } finally {
+      saveInProgressRef.current = false;
     }
   }
 
@@ -1218,15 +1479,6 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     await refreshInstalledPlatforms();
   }
 
-  async function handleSignOut() {
-    try {
-      await signOut();
-      onSignedOut();
-    } catch (error) {
-      pushToast(error instanceof Error ? error.message : 'Unable to sign out.', 'error');
-    }
-  }
-
   const handleMenuAction = useEffectEvent(async (action: MenuAction) => {
     switch (action.type) {
       case 'new-file':
@@ -1303,7 +1555,11 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
       case 'load-example':
         {
           const nextTab = createUntitledTab(`${action.name}.ino`, action.content);
-          setTabs((current) => [...current, nextTab]);
+          setTabs((current) => {
+            const nextTabs = [...current, nextTab];
+            tabsRef.current = nextTabs;
+            return nextTabs;
+          });
           activateTab(nextTab);
         }
         break;
@@ -1357,10 +1613,12 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
           return current;
         }
 
-        return [
+        const nextTabs = [
           ...current,
           createSavedTab(createdPath, savedContent),
         ];
+        tabsRef.current = nextTabs;
+        return nextTabs;
       });
     }
 
@@ -1393,20 +1651,33 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     const nextName = fileNameFromPath(filePath);
 
     setTabs((current) => {
-      if (!current.some((tab) => tab.path === filePath)) {
+      if (!current.some((tab) => isSameFileTabPath(tab.path, filePath))) {
         return current;
       }
 
-      return markEditorTabSaved(current, filePath, {
-        content,
-        name: nextName,
-        fileState: 'saved',
-        type: 'file',
-        isPreviewFile: false,
+      const nextTabs = current.map((tab) => {
+        if (!isSameFileTabPath(tab.path, filePath)) {
+          return tab;
+        }
+
+        return {
+          ...tab,
+          content,
+          savedContent: content,
+          isDirty: false,
+          name: nextName,
+          fileState: 'saved' as FileTabState,
+          type: 'file' as const,
+          isPreviewFile: false,
+        };
       });
+
+      tabsRef.current = nextTabs;
+      return nextTabs;
     });
 
-    if (activeTabId === filePath) {
+    if (activeTabIdRef.current && isSameFileTabPath(activeTabIdRef.current, filePath)) {
+      editorValueRef.current = content;
       setEditorValue(content);
     }
   }
@@ -1419,7 +1690,8 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
   const activeExplorerPath = activeTab && !activeTab.path.startsWith('untitled:') ? activeTab.path : null;
   const currentTerminalFolderPath = activeTab && !activeTab.path.startsWith('untitled:') ? parentPath(activeTab.path) : workspacePath;
   const isTerminalWorkspaceActive = sidebar === 'terminal';
-  const isConsoleVisible = consolePanelOpen && !isTerminalWorkspaceActive;
+  const renderLegacyLeftTools = false;
+  const isConsoleVisible = bottomPanelOpen && !isTerminalWorkspaceActive;
   const leftPanelMax = getPanelMaxSize('left', panelSizes);
   const rightPanelMax = getPanelMaxSize('right', panelSizes);
   const bottomPanelMax = getPanelMaxSize('bottom', panelSizes);
@@ -1468,42 +1740,56 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     applyPanelSizes((current) => normalizePanelSizes(current));
   });
 
-  useEffect(() => {
-    if (sidebar !== 'terminal') {
-      previousSidebarRef.current = sidebar;
+  const handleEditorSaveShortcut = useEffectEvent((event: KeyboardEvent) => {
+    const isSaveShortcut = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 's';
+    if (!isSaveShortcut) {
+      return;
     }
-  }, [sidebar]);
 
-  useEffect(() => {
-    if (sidebar === 'boards') {
-      setInspectorView('board');
-    }
-  }, [sidebar]);
+    event.preventDefault();
+    event.stopPropagation();
+    void saveActiveTab(event.shiftKey);
+  });
 
   useEffect(() => {
     panelSizesRef.current = panelSizes;
   }, [panelSizes]);
 
   useEffect(() => {
+    tabsRef.current = syncedTabs;
+  }, [syncedTabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
+  useEffect(() => {
+    editorValueRef.current = editorValue;
+  }, [editorValue]);
+
+  useEffect(() => {
     setActiveTabId((current) => {
+      let nextActiveTabId = current;
+
       if (tabs.length === 0) {
-        return null;
+        nextActiveTabId = null;
+      } else if (!current || !tabs.some((tab) => tab.id === current)) {
+        nextActiveTabId = tabs[0].id;
       }
 
-      if (!current || !tabs.some((tab) => tab.id === current)) {
-        return tabs[0].id;
-      }
-
-      return current;
+      activeTabIdRef.current = nextActiveTabId;
+      return nextActiveTabId;
     });
   }, [tabs]);
 
   useEffect(() => {
     if (!activeTab) {
+      editorValueRef.current = '';
       setEditorValue('');
       return;
     }
 
+    editorValueRef.current = activeTab.content;
     setEditorValue(activeTab.content);
   }, [activeTab]);
 
@@ -1532,6 +1818,13 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     return () => {
       offMenu();
       offProgress();
+    };
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleEditorSaveShortcut, true);
+    return () => {
+      window.removeEventListener('keydown', handleEditorSaveShortcut, true);
     };
   }, []);
 
@@ -1632,27 +1925,14 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
 
   const editorMount: OnMount = (editorInstance, monaco: Monaco) => {
     editorRef.current = editorInstance;
-    monaco.editor.defineTheme('tantalum-minimal', {
-      base: 'vs-dark',
-      inherit: true,
-      rules: [
-        { token: 'comment', foreground: '66788a' },
-        { token: 'keyword', foreground: '8cc7ff' },
-        { token: 'string', foreground: 'd8b56a' },
-      ],
-      colors: {
-        'editor.background': '#0b1117',
-        'editor.foreground': '#e7edf4',
-        'editorLineNumber.foreground': '#5a6b7d',
-        'editorLineNumber.activeForeground': '#e7edf4',
-        'editorIndentGuide.background1': '#131c26',
-        'editor.selectionBackground': '#1a2533',
-        'editor.lineHighlightBackground': '#101821',
-        'editorCursor.foreground': '#6ca6ff',
-        'editorWhitespace.foreground': '#18212c',
-      },
+    monacoRef.current = monaco;
+    configureMonacoFeatures(monaco, uiPreferences.accentColor, editorThemeName);
+    editorInstance.updateOptions({
+      fontFamily: uiPreferences.editorFontFamily,
+      fontSize: uiPreferences.editorFontSize,
+      tabSize: uiPreferences.editorTabSize,
+      wordWrap: uiPreferences.editorWordWrap,
     });
-    monaco.editor.setTheme('tantalum-minimal');
     editorInstance.focus();
     setEditorReady(true);
   };
@@ -1761,71 +2041,10 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
     );
   }
 
+  void renderBoardDetails;
+
   return (
-    <div className={`ide-shell ${consolePanelOpen ? '' : 'ide-shell-console-collapsed'}`}>
-      <header className="topbar">
-        <div className="brand-cluster">
-          <div className="brand-mark">
-            <span className="brand-dot" />
-            <span className="brand-text">{appName}</span>
-          </div>
-          <span className="version-pill">v{version}</span>
-        </div>
-
-        <div className="toolbar">
-          <button className="icon-button" type="button" onClick={createNewTab} title="New sketch">
-            <Plus size={16} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void openFolderPicker()} title="Open folder">
-            <FolderOpen size={16} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void saveActiveTab(false)} title="Save file" disabled={!activeTab}>
-            <Save size={16} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void handleCompile()} title="Compile" disabled={!activeTab}>
-            <HardDriveDownload size={16} />
-          </button>
-          <button className="primary-button compact" type="button" onClick={() => setReleaseModalOpen(true)} disabled={!activeTab || !selectedBoard}>
-            <HardDriveUpload size={16} />
-            Upload OTA
-          </button>
-          <button
-            className={`icon-button ${isTerminalWorkspaceActive ? 'active' : ''}`}
-            type="button"
-            onClick={toggleTerminalWorkspace}
-            title={isTerminalWorkspaceActive ? 'Return to the previous workspace view' : 'Open immersive terminal workspace'}
-          >
-            <TerminalSquare size={16} />
-          </button>
-          <div className="board-selector">
-            <Cpu size={15} />
-            <select value={selectedBoardId} onChange={(event) => setSelectedBoardId(event.target.value)}>
-              <option value="">No cloud board selected</option>
-              {boards.map((board) => (
-                <option key={board.$id} value={board.$id}>
-                  {board.name}
-                </option>
-              ))}
-            </select>
-            <ChevronsUpDown size={14} />
-          </div>
-        </div>
-
-        <div className="user-cluster">
-          <button className="secondary-button compact" type="button" onClick={() => setBoardModalOpen(true)}>
-            <Plus size={16} />
-            Add board
-          </button>
-          <div className="user-pill">
-            <BellDot size={16} />
-            <span>{user.name || user.email}</span>
-          </div>
-          <button className="icon-button" type="button" onClick={() => void handleSignOut()} title="Sign out">
-            <LogOut size={16} />
-          </button>
-        </div>
-      </header>
-
+    <div className={`ide-shell ${bottomPanelOpen ? '' : 'ide-shell-console-collapsed'}`}>
       {!hasRequiredCloudConfiguration() ? (
         <div className="inline-banner inline-banner-error">
           Appwrite configuration is incomplete. Add the missing values in `appwrite.config.json` or provide renderer env overrides before using authentication, boards, database documents, or storage uploads.
@@ -1837,27 +2056,42 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
         </div>
       ) : null}
 
-      <main className={`workspace-shell ${isTerminalWorkspaceActive ? 'workspace-shell-terminal' : ''}`} style={workspaceShellStyle}>
-        <aside className="activity-rail">
-          <button className={sidebar === 'explorer' ? 'active' : ''} type="button" onClick={() => setSidebar('explorer')} title="Explorer">
-            <FolderOpen size={18} />
-          </button>
-          <button className={sidebar === 'boards' ? 'active' : ''} type="button" onClick={() => setSidebar('boards')} title="Boards">
-            <Cpu size={18} />
-          </button>
-          <button className={sidebar === 'libraries' ? 'active' : ''} type="button" onClick={() => setSidebar('libraries')} title="Libraries">
-            <Library size={18} />
-          </button>
-          <button className={sidebar === 'platforms' ? 'active' : ''} type="button" onClick={() => setSidebar('platforms')} title="Board manager">
-            <BookOpen size={18} />
-          </button>
-          <button className={sidebar === 'terminal' ? 'active' : ''} type="button" onClick={() => setSidebar('terminal')} title="Terminal workspace">
-            <TerminalSquare size={18} />
-          </button>
-        </aside>
-
+      <main
+        className={`workspace-shell ${leftPanelOpen ? '' : 'workspace-shell-left-collapsed'} ${
+          rightPanelOpen ? '' : 'workspace-shell-agent-collapsed'
+        }`}
+        style={workspaceShellStyle}
+      >
         <aside className={sidebar === 'explorer' ? 'left-panel left-panel-tree' : 'left-panel'}>
-          {sidebar === 'explorer' ? (
+          <nav className="left-nav" aria-label="Workspace navigation">
+            <button type="button" onClick={createNewTab}>
+              <Plus size={16} />
+              New sketch
+            </button>
+            <button className={sidebar === 'explorer' ? 'active' : ''} type="button" onClick={() => setSidebar('explorer')}>
+              <Search size={16} />
+              Search
+            </button>
+            <button className={sidebar === 'boards' ? 'active' : ''} type="button" onClick={() => setSidebar('boards')}>
+              <Cpu size={16} />
+              Boards
+            </button>
+            <button className={sidebar === 'libraries' ? 'active' : ''} type="button" onClick={() => setSidebar('libraries')}>
+              <Library size={16} />
+              Libraries
+            </button>
+            <button className={sidebar === 'platforms' ? 'active' : ''} type="button" onClick={() => setSidebar('platforms')}>
+              <BookOpen size={16} />
+              Platforms
+            </button>
+            <button className={sidebar === 'terminal' ? 'active' : ''} type="button" onClick={() => setSidebar('terminal')}>
+              <TerminalSquare size={16} />
+              Terminal
+            </button>
+          </nav>
+
+          <div className="left-projects">
+            <p>Projects</p>
             <FileTree
               fs={fileTreeFs}
               workspaceRoot={workspacePath}
@@ -1893,20 +2127,25 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
               showOpenFolderButton
               openFolderButtonPosition="top"
               sidebarPosition="left"
-              theme={FILE_TREE_THEME}
+              theme={fileTreeTheme}
             />
-          ) : null}
+          </div>
 
-          {sidebar === 'boards' ? (
+          {renderLegacyLeftTools && sidebar === 'boards' ? (
             <>
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">Cloud boards</p>
                   <h2>Devices</h2>
                 </div>
-                <button className="icon-button" type="button" onClick={() => void refreshBoardsList()} title="Refresh boards">
-                  <RefreshCcw size={16} />
-                </button>
+                <div className="panel-actions">
+                  <button className="icon-button" type="button" onClick={() => setBoardModalOpen(true)} title="Add board">
+                    <Plus size={16} />
+                  </button>
+                  <button className="icon-button" type="button" onClick={() => void refreshBoardsList()} title="Refresh boards">
+                    <RefreshCcw size={16} />
+                  </button>
+                </div>
               </div>
               <div className="panel-content board-list">
                 {boards.length === 0 ? (
@@ -1941,7 +2180,7 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
             </>
           ) : null}
 
-          {sidebar === 'libraries' ? (
+          {renderLegacyLeftTools && sidebar === 'libraries' ? (
             <>
               <div className="panel-header">
                 <div>
@@ -1983,7 +2222,7 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
             </>
           ) : null}
 
-          {sidebar === 'platforms' ? (
+          {renderLegacyLeftTools && sidebar === 'platforms' ? (
             <>
               <div className="panel-header">
                 <div>
@@ -2052,71 +2291,283 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
         />
 
         <div className="terminal-workspace-host">
-          <TerminalWorkspace active={isTerminalWorkspaceActive} currentFolderPath={currentTerminalFolderPath} />
+          <TerminalWorkspace active={isTerminalWorkspaceActive} currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
         </div>
 
+        {sidebar === 'boards' ? (
+          <section className="tool-workspace">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Cloud boards</p>
+                <h2>Devices</h2>
+              </div>
+              <div className="panel-actions">
+                <button className="icon-button" type="button" onClick={() => setBoardModalOpen(true)} title="Add board">
+                  <Plus size={16} />
+                </button>
+                <button className="icon-button" type="button" onClick={() => void refreshBoardsList()} title="Refresh boards">
+                  <RefreshCcw size={16} />
+                </button>
+              </div>
+            </div>
+            <div className="panel-content board-list">
+              {boards.length === 0 ? (
+                <div className="empty-panel">
+                  <Cpu size={24} />
+                  <p>No boards yet. Add your first device to start provisioning and OTA uploads.</p>
+                  <button className="primary-button compact" type="button" onClick={() => setBoardModalOpen(true)}>
+                    Add board
+                  </button>
+                </div>
+              ) : (
+                boards.map((board) => {
+                  const status = calculateBoardStatus(board.lastSeen, board.status);
+                  return (
+                    <button key={board.$id} className={`board-card ${selectedBoardId === board.$id ? 'active' : ''}`} type="button" onClick={() => setSelectedBoardId(board.$id)}>
+                      <div className="board-card-head">
+                        <strong>{board.name}</strong>
+                        <span className={`status-pill status-${status}`}>{status}</span>
+                      </div>
+                      <p>{board.boardType}</p>
+                      <small>Firmware {board.firmwareVersion || '1.0.0'}</small>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        ) : null}
+
+        {sidebar === 'libraries' ? (
+          <section className="tool-workspace">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Tooling</p>
+                <h2>Library Manager</h2>
+              </div>
+            </div>
+            <div className="search-strip">
+              <Search size={16} />
+              <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Search Arduino libraries" />
+            </div>
+            <div className="panel-content result-list">
+              {libraryResults.map((library) => (
+                <article key={library.name} className="result-card manager-result-card">
+                  <div className="manager-result-copy">
+                    <div className="manager-result-title-row">
+                      <strong>{library.name}</strong>
+                      {library.installed ? <span className="release-badge">Installed</span> : null}
+                    </div>
+                    <p>{library.sentence || library.paragraph || library.author || 'Arduino library package'}</p>
+                    <div className="manager-result-meta">
+                      <span>{library.version || 'latest'}</span>
+                      {library.category ? <span>{library.category}</span> : null}
+                      {library.author ? <span>{library.author}</span> : null}
+                    </div>
+                  </div>
+                  <button
+                    className={`compact manager-result-action ${library.installed ? 'secondary-button' : 'primary-button'}`}
+                    type="button"
+                    disabled={Boolean(library.installed) || busyAction === `library:${library.name}`}
+                    onClick={() => void handleInstallLibrary(library)}
+                  >
+                    {busyAction === `library:${library.name}` ? <LoaderCircle size={14} className="spin" /> : null}
+                    {library.installed ? 'Installed' : 'Install'}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {sidebar === 'platforms' ? (
+          <section className="tool-workspace">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Tooling</p>
+                <h2>Board Manager</h2>
+              </div>
+            </div>
+            <div className="search-strip">
+              <Search size={16} />
+              <input value={platformQuery} onChange={(event) => setPlatformQuery(event.target.value)} placeholder="Search board cores" />
+            </div>
+            <div className="panel-content result-list">
+              {platformResults.map((platform) => (
+                <article key={platform.id} className="result-card manager-result-card">
+                  <div className="manager-result-copy">
+                    <div className="manager-result-title-row">
+                      <strong>{platform.name}</strong>
+                      {platform.installed ? <span className="release-badge">Installed</span> : null}
+                    </div>
+                    <p>{platform.description || platform.maintainer || 'Board platform package'}</p>
+                    <div className="manager-result-meta">
+                      <span>{platform.latest || platform.version || 'latest'}</span>
+                      {platform.maintainer ? <span>{platform.maintainer}</span> : null}
+                      {platform.website ? <span>{platform.website.replace(/^https?:\/\//, '')}</span> : null}
+                    </div>
+                  </div>
+                  {platform.installed ? (
+                    <button className="danger-button compact manager-result-action" type="button" onClick={() => void handleRemovePlatform(platform)} disabled={busyAction === `remove-platform:${platform.id}`}>
+                      Remove
+                    </button>
+                  ) : (
+                    <button className="primary-button compact manager-result-action" type="button" onClick={() => void handleInstallPlatform(platform)} disabled={busyAction === `platform:${platform.id}`}>
+                      {busyAction === `platform:${platform.id}` ? <LoaderCircle size={14} className="spin" /> : null}
+                      Install
+                    </button>
+                  )}
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {sidebar === 'terminal' ? (
+          <section className="tool-workspace tool-workspace-terminal">
+            <TerminalWorkspace active currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
+          </section>
+        ) : null}
+
+        {sidebar === 'explorer' ? (
         <section className="editor-shell">
-          <EditorTabs
-            tabs={tabs}
-            activeTabPath={activeTab?.path ?? null}
-            onTabClick={(path) => selectTabByPath(path)}
-            onTabClose={(path) => closeTab(path)}
-            onTabReorder={handleTabReorder}
-          />
+          {syncedTabs.length > 0 ? (
+            <EditorTabs
+              tabs={syncedTabs}
+              activeTabPath={activeTab?.path ?? null}
+              onTabClick={(path) => selectTabByPath(path)}
+              onTabClose={(path) => closeTab(path)}
+              onTabReorder={handleTabReorder}
+            />
+          ) : null}
           <div className="editor-stage">
             {activeTab ? (
               <Editor
                 height="100%"
-                defaultLanguage="cpp"
-                language="cpp"
+                defaultLanguage={activeEditorLanguage}
+                language={activeEditorLanguage}
+                path={activeEditorPath}
                 value={editorValue}
-                beforeMount={(monaco) => monaco.editor.setTheme('vs-dark')}
+                beforeMount={(monaco) => {
+                  configureMonacoFeatures(monaco, uiPreferences.accentColor, editorThemeName);
+                }}
                 onMount={editorMount}
-                onChange={(nextValue) => {
-                  const updated = nextValue ?? '';
-                  setEditorValue(updated);
-                  updateTabContent(activeTab.path, updated);
-                }}
+                    onChange={(nextValue) => {
+                      const updated = nextValue ?? '';
+                      editorValueRef.current = updated;
+                      setEditorValue(updated);
+                      updateTabContent(activeTab.path, updated);
+                    }}
                 options={{
-                  minimap: { enabled: false },
-                  fontFamily: 'IBM Plex Mono, monospace',
-                  fontSize: 13,
+                  acceptSuggestionOnCommitCharacter: true,
+                  acceptSuggestionOnEnter: 'on',
+                  autoClosingBrackets: 'always',
+                  autoClosingDelete: 'always',
+                  autoClosingOvertype: 'always',
+                  autoClosingQuotes: 'always',
+                  autoIndent: 'full',
                   automaticLayout: true,
-                  smoothScrolling: true,
-                  scrollBeyondLastLine: false,
-                  overviewRulerLanes: 0,
-                  renderLineHighlight: 'line',
-                  guides: { indentation: false },
+                  bracketPairColorization: { enabled: uiPreferences.editorBracketPairs },
+                  codeLens: uiPreferences.editorCodeLens,
+                  colorDecorators: true,
+                  contextmenu: true,
+                  cursorBlinking: 'smooth',
+                  detectIndentation: true,
+                  dragAndDrop: true,
+                  find: { addExtraSpaceOnTop: false },
+                  folding: true,
+                  foldingHighlight: true,
+                  fontFamily: uiPreferences.editorFontFamily,
+                  fontSize: uiPreferences.editorFontSize,
+                  formatOnPaste: uiPreferences.editorFormatOnPaste,
+                  formatOnType: uiPreferences.editorFormatOnType,
+                  guides: { bracketPairs: uiPreferences.editorBracketPairs, indentation: true },
+                  hover: { enabled: true, sticky: true },
+                  inlayHints: { enabled: uiPreferences.editorInlayHints ? 'on' : 'off' },
+                  inlineSuggest: { enabled: uiPreferences.editorInlineSuggest },
+                  lightbulb: { enabled: 'on' as editor.ShowLightbulbIconMode },
                   lineDecorationsWidth: 12,
+                  lineNumbers: uiPreferences.editorLineNumbers,
                   lineNumbersMinChars: 3,
+                  links: true,
+                  matchBrackets: 'always',
+                  minimap: { enabled: uiPreferences.editorMinimap, side: 'right', showSlider: 'mouseover' },
+                  mouseWheelZoom: true,
+                  occurrencesHighlight: 'singleFile',
+                  overviewRulerLanes: 3,
                   padding: { top: 18, bottom: 18 },
+                  parameterHints: { enabled: true, cycle: true },
+                  quickSuggestions: uiPreferences.editorQuickSuggestions ? { comments: true, other: true, strings: true } : false,
+                  renderLineHighlight: 'all',
+                  renderValidationDecorations: 'on',
+                  scrollBeyondLastLine: false,
+                  smoothScrolling: true,
+                  snippetSuggestions: 'inline',
+                  stickyScroll: { enabled: uiPreferences.editorStickyScroll },
+                  suggest: {
+                    filterGraceful: true,
+                    localityBonus: true,
+                    preview: true,
+                    previewMode: 'prefix',
+                    selectionMode: 'always',
+                    showClasses: true,
+                    showColors: true,
+                    showConstants: true,
+                    showConstructors: true,
+                    showDeprecated: true,
+                    showEnumMembers: true,
+                    showEnums: true,
+                    showEvents: true,
+                    showFields: true,
+                    showFiles: true,
+                    showFolders: true,
+                    showFunctions: true,
+                    showIcons: true,
+                    showInlineDetails: true,
+                    showInterfaces: true,
+                    showIssues: true,
+                    showKeywords: true,
+                    showMethods: true,
+                    showModules: true,
+                    showOperators: true,
+                    showProperties: true,
+                    showReferences: true,
+                    showSnippets: true,
+                    showStructs: true,
+                    showTypeParameters: true,
+                    showUnits: true,
+                    showUsers: true,
+                    showValues: true,
+                    showVariables: true,
+                    snippetsPreventQuickSuggestions: false,
+                  },
+                  suggestOnTriggerCharacters: uiPreferences.editorQuickSuggestions,
+                  tabCompletion: 'on',
+                  tabSize: uiPreferences.editorTabSize,
+                  unicodeHighlight: { ambiguousCharacters: false },
+                  wordBasedSuggestions: 'allDocuments',
+                  wordBasedSuggestionsOnlySameLanguage: false,
+                  wordWrap: uiPreferences.editorWordWrap,
                 }}
-                theme={editorReady ? 'tantalum-minimal' : 'vs-dark'}
+                theme={editorReady ? editorThemeName : resolvedTheme === 'light' ? 'vs' : 'vs-dark'}
               />
             ) : (
               <div className="editor-empty-state">
-                <div className="empty-panel editor-empty-panel">
-                  <Plus size={22} />
-                  <div className="editor-empty-copy">
-                    <strong>No sketch is open</strong>
-                    <p>Create a new sketch, open a folder, or pick a file from the explorer when you're ready.</p>
-                  </div>
-                  <div className="editor-empty-actions">
-                    <button className="primary-button compact" type="button" onClick={createNewTab}>
-                      <Plus size={16} />
-                      New sketch
-                    </button>
-                    <button className="secondary-button compact" type="button" onClick={() => void openFolderPicker()}>
-                      <FolderOpen size={16} />
-                      Open folder
-                    </button>
-                  </div>
+                <div className="editor-empty-actions">
+                  <button className="primary-button compact" type="button" onClick={createNewTab}>
+                    <Plus size={16} />
+                    New sketch
+                  </button>
+                  <button className="secondary-button compact" type="button" onClick={() => void openFolderPicker()}>
+                    <FolderOpen size={16} />
+                    Open folder
+                  </button>
                 </div>
               </div>
             )}
           </div>
         </section>
-
+        ) : null}
         <div
           className={`panel-resizer panel-resizer-vertical panel-resizer-right ${activeResizePanel === 'right' ? 'panel-resizer-active' : ''}`}
           role="separator"
@@ -2131,41 +2582,10 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
           onPointerDown={(event) => beginResize('right', event)}
         />
 
-        <aside className="right-panel inspector-panel">
-          <div className="inspector-tabs">
-            <button className={inspectorView === 'agent' ? 'active' : ''} type="button" onClick={() => setInspectorView('agent')}>
-              <Bot size={16} />
-              Agent
-            </button>
-            <button className={inspectorView === 'board' ? 'active' : ''} type="button" onClick={() => setInspectorView('board')}>
-              <Cpu size={16} />
-              Board
-            </button>
-          </div>
+        <aside className="right-panel inspector-panel chat-panel">
+          <div className="inspector-tabs" style={{ display: 'none' }}></div>
           <div className="inspector-body">
-            {inspectorView === 'agent' ? (
-              <AgentPanel
-                user={user}
-                workspacePath={workspacePath}
-                activeTab={
-                  activeTab && !activeTab.path.startsWith('untitled:')
-                    ? {
-                        path: activeTab.path,
-                        name: activeTab.name,
-                        content: editorValue,
-                        isDirty: Boolean(activeTab.isDirty),
-                      }
-                    : null
-                }
-                onFileContentApplied={applyAgentFileContent}
-                onPathDeleted={handleAgentDeletedPath}
-                onRefreshWorkspace={refreshFileTree}
-                pushConsole={pushConsole}
-                pushToast={pushToast}
-              />
-            ) : (
-              renderBoardDetails()
-            )}
+            <AgentPanel user={user} workspacePath={workspacePath} activeTab={activeTab && !activeTab.path.startsWith('untitled:') ? { path: activeTab.path, name: activeTab.name, content: editorValue, isDirty: Boolean(activeTab.isDirty) } : null} onFileContentApplied={applyAgentFileContent} onPathDeleted={handleAgentDeletedPath} onRefreshWorkspace={refreshFileTree} pushConsole={pushConsole} pushToast={pushToast} defaultView="chat" chatOnly={true} onOpenSettings={onOpenSettings} onSignedOut={onSignedOut} />
           </div>
         </aside>
       </main>
@@ -2222,7 +2642,7 @@ export function IDEWorkspace({ appName, version, user, onSignedOut }: IDEWorkspa
             ))}
           </div>
         )}
-        <ConsoleTerminal active={isConsoleVisible && consoleView === 'terminal'} currentFolderPath={currentTerminalFolderPath} />
+        <ConsoleTerminal active={isConsoleVisible && consoleView === 'terminal'} currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
       </section>
 
       <footer className="statusbar">

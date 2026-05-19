@@ -57,39 +57,32 @@ export type CloudConfig = {
   boardsCollectionId: string;
   firmwareCollectionId: string;
   sketchesCollectionId: string;
-  agentSettingsCollectionId: string;
   firmwareBucketId: string;
   boardAdminFunctionId: string;
   deviceGatewayFunctionId: string;
-  proxyAiRequestFunctionId: string;
+  agentSettingsFunctionId: string;
+  agentGatewayFunctionId: string;
 };
 
-export type AgentToolName = 'list_files' | 'read_file' | 'write_file' | 'edit_file' | 'delete_file' | 'run_command';
+export type AgentToolName = 'aider_apply';
+
+export type AgentChangePreview = {
+  path: string;
+  changeType: 'create' | 'update' | 'delete';
+  originalContent: string;
+  nextContent: string;
+  stats?: {
+    changedLines: number;
+    beforeLength: number;
+    afterLength: number;
+  };
+};
 
 export type AgentApprovalPreview =
   | {
-      kind: 'file';
-      path: string;
-      isNewFile: boolean;
-      originalContent: string;
-      nextContent: string;
-      stats?: {
-        changedLines: number;
-        beforeLength: number;
-        afterLength: number;
-      };
-    }
-  | {
-      kind: 'delete';
-      path: string;
-      isDirectory: boolean;
-    }
-  | {
-      kind: 'command';
-      command: string;
-      cwd: string;
-      shell: string;
-      platform: string;
+      kind: 'agent-run';
+      files: AgentChangePreview[];
+      output: string;
     };
 
 export type AgentApprovalRequest = {
@@ -123,11 +116,49 @@ export type DesktopApi = {
   app: {
     cloudConfig?: CloudConfig;
     getInfo: () => Promise<Result<{ appName: string; version: string; platform: string }>>;
+    controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<Result>;
     onMenuAction: (callback: (action: MenuAction) => void) => () => void;
   };
   agent: {
-    getContext: () => Promise<Result<{ workspaceRoot: string | null; workspaceMap: string; revision: number; totalEntries: number; truncated: boolean }>>;
-    invokeTool: (payload: { toolName: AgentToolName; args?: Record<string, unknown> }) => Promise<AgentToolInvokeResponse>;
+    getStatus: () => Promise<
+      Result<{
+        workspaceRoot: string | null;
+        setup: {
+          installed: boolean;
+          aiderPath: string | null;
+          runtimeDir: string;
+          message: string;
+        };
+      }>
+    >;
+    run: (payload: {
+      prompt: string;
+      source: 'managed' | 'custom';
+      mode: 'fast' | 'plan';
+      customCredentialId?: string | null;
+      customModelName?: string | null;
+      activeTab?: {
+        path: string;
+        name: string;
+        content: string;
+        isDirty: boolean;
+      } | null;
+    }) => Promise<
+      Result<{
+        output: string;
+        changedFiles: Array<{
+          path: string;
+          changeType: 'create' | 'update' | 'delete';
+          stats?: {
+            changedLines: number;
+            beforeLength: number;
+            afterLength: number;
+          };
+        }>;
+        requiresApproval?: boolean;
+        approval?: AgentApprovalRequest;
+      }>
+    >;
     resolveApproval: (payload: { requestId: string; approved: boolean }) => Promise<AgentApprovalResolution>;
   };
   cloud: {
@@ -159,6 +190,7 @@ export type DesktopApi = {
     openFolder: () => Promise<Result<{ path: string }>>;
     setWorkspace: (folderPath: string) => Promise<Result<{ path: string }>>;
     getLastWorkspace: () => Promise<Result<{ path: string }>>;
+    getRecentWorkspaces: () => Promise<Result<{ paths: string[] }>>;
     showSaveDialog: (options: { defaultPath?: string; filters?: Array<{ name: string; extensions: string[] }> }) => Promise<Result<{ path: string }>>;
     readDirectory: (dirPath: string) => Promise<Result<{ items: DirectoryItem[] }>>;
     readFile: (filePath: string) => Promise<Result<{ path: string; content: string }>>;

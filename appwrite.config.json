@@ -58,6 +58,16 @@
             "scopes": [
                 "databases.read",
                 "databases.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_BOARDS_COLLECTION_ID",
+                    "value": "boards"
+                }
             ]
         },
         {
@@ -78,13 +88,31 @@
             "scopes": [
                 "databases.read",
                 "databases.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_BOARDS_COLLECTION_ID",
+                    "value": "boards"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_COLLECTION_ID",
+                    "value": "firmwares"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_BUCKET_ID",
+                    "value": "firmware_bucket"
+                }
             ]
         },
         {
-            "$id": "proxy-ai-request",
-            "name": "proxy-ai-request",
+            "$id": "agent-settings",
+            "name": "agent-settings",
             "runtime": "node-22",
-            "path": "functions/proxy-ai-request",
+            "path": "functions/agent-settings",
             "entrypoint": "src/main.js",
             "execute": [
                 "users"
@@ -95,7 +123,98 @@
             "schedule": "",
             "timeout": 30,
             "commands": "npm install",
-            "scopes": []
+            "scopes": [
+                "databases.read",
+                "databases.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID",
+                    "value": "agent_managed_key_pool"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID",
+                    "value": "agent_user_managed_keys"
+                },
+                {
+                    "key": "APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID",
+                    "value": "agent_custom_credentials"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID",
+                    "value": "agent_user_preferences"
+                },
+                {
+                    "key": "APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID",
+                    "value": "agent_credit_accounts"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID",
+                    "value": "agent_usage_ledger"
+                },
+                {
+                    "key": "AGENT_DEFAULT_MONTHLY_CREDITS",
+                    "value": "500"
+                }
+            ]
+        },
+        {
+            "$id": "agent-gateway",
+            "name": "agent-gateway",
+            "runtime": "node-22",
+            "path": "functions/agent-gateway",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "users"
+            ],
+            "enabled": true,
+            "logging": true,
+            "events": [],
+            "schedule": "",
+            "timeout": 120,
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID",
+                    "value": "agent_managed_key_pool"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID",
+                    "value": "agent_user_managed_keys"
+                },
+                {
+                    "key": "APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID",
+                    "value": "agent_custom_credentials"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID",
+                    "value": "agent_user_preferences"
+                },
+                {
+                    "key": "APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID",
+                    "value": "agent_credit_accounts"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID",
+                    "value": "agent_usage_ledger"
+                },
+                {
+                    "key": "AGENT_DEFAULT_MONTHLY_CREDITS",
+                    "value": "500"
+                }
+            ]
         }
     ],
     "sites": [
@@ -319,8 +438,8 @@
                     "required": true,
                     "array": false,
                     "default": null,
-                    "min": -9223372036854775808,
-                    "max": 9223372036854775807
+                    "min": "-9223372036854775808",
+                    "max": "9223372036854775807"
                 },
                 {
                     "key": "checksum",
@@ -460,10 +579,160 @@
             ]
         },
         {
-            "$id": "settings",
+            "$id": "agent_managed_key_pool",
             "$permissions": [],
             "databaseId": "697b8f660033fffde4be",
-            "name": "AI Settings",
+            "name": "Agent Managed Key Pool",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "providerLabel",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 120,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "baseUrl",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 2048,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "apiKey",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 2048,
+                    "default": null,
+                    "encrypt": true
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "active",
+                    "encrypt": false
+                },
+                {
+                    "key": "fastModel",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "fastEditorModel",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "planModel",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "planEditorModel",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "assignmentWeight",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 1
+                },
+                {
+                    "key": "maxAssignments",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 0
+                },
+                {
+                    "key": "assignedCount",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 0
+                },
+                {
+                    "key": "lastHealthStatus",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "lastHealthAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_pool_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "agent_user_managed_keys",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent User Managed Keys",
             "enabled": true,
             "rowSecurity": true,
             "columns": [
@@ -477,7 +746,25 @@
                     "encrypt": false
                 },
                 {
-                    "key": "apiProvider",
+                    "key": "poolKeyId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "active",
+                    "encrypt": false
+                },
+                {
+                    "key": "assignedAt",
                     "type": "string",
                     "required": true,
                     "array": false,
@@ -486,16 +773,218 @@
                     "encrypt": false
                 },
                 {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_user_managed_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_user_managed_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_user_managed_pool",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "poolKeyId"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "agent_custom_credentials",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent Custom Credentials",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "displayName",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 120,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "baseUrl",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 2048,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
                     "key": "apiKey",
                     "type": "string",
-                    "required": false,
+                    "required": true,
                     "array": false,
-                    "size": 1024,
+                    "size": 2048,
                     "default": null,
                     "encrypt": true
                 },
                 {
-                    "key": "model",
+                    "key": "apiKeyPreview",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "modelNames",
+                    "type": "string",
+                    "required": true,
+                    "array": true,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "enabled",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": true
+                },
+                {
+                    "key": "lastUsedAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_custom_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_custom_enabled",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "enabled"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "agent_user_preferences",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent User Preferences",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "selectedSource",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "defaultMode",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "selectedCustomCredentialId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "selectedCustomModelName",
                     "type": "string",
                     "required": false,
                     "array": false,
@@ -524,11 +1013,243 @@
             ],
             "indexes": [
                 {
-                    "key": "settings_userId",
+                    "key": "agent_preferences_user",
                     "type": "key",
                     "status": "available",
                     "columns": [
                         "userId"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "agent_credit_accounts",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent Credit Accounts",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "periodKey",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 16,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "monthlyAllowance",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "usedCredits",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "resetAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_credits_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_credits_period",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "periodKey"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "agent_usage_ledger",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent Usage Ledger",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "requestId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "source",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "mode",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "providerLabel",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 120,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "modelAlias",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "totalTokens",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 0
+                },
+                {
+                    "key": "multiplier",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 1
+                },
+                {
+                    "key": "chargedCredits",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 0
+                },
+                {
+                    "key": "errorMessage",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1024,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_usage_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_usage_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "agent_usage_request",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "requestId"
                     ],
                     "orders": []
                 }

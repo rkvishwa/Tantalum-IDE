@@ -18,15 +18,8 @@ const {
   searchLibraries
 } = require("./arduinoHandler");
 const { SecurityManager } = require("./src/agent/securityManager");
+const { AgentRuntimeManager } = require("./src/agent/aiderRuntimeManager");
 const { getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
-const {
-  applySearchReplaceDiff,
-  buildCommandPreview,
-  readUtf8IfPresent,
-  resolveWorkspacePath,
-  runWorkspaceCommand,
-  summarizeFileChange,
-} = require("./src/agent/tooling");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
 const provisioningService = require("./src/services/provisioningService");
 const appwriteManifest = require("./appwrite.config.json");
@@ -57,6 +50,14 @@ const trustedRoots = new Set();
 const terminalSessions = new Map();
 const workspaceScanner = new WorkspaceScanner();
 const securityManager = new SecurityManager();
+const agentRuntimeManager = new AgentRuntimeManager({
+  app,
+  getWorkspaceRoot: () => currentWorkspace,
+  executeGatewayRequest: executeAgentGatewayRequest,
+  securityManager,
+  markWorkspaceDirty,
+  addRecentFile,
+});
 
 let pty = null;
 try {
@@ -74,12 +75,47 @@ function registerTrustedPath(targetPath) {
   trustedRoots.add(absolutePath);
 }
 
+function getRecentWorkspaces() {
+  const recentWorkspaces = preferenceStore?.get("recentWorkspaces");
+  const normalized = Array.isArray(recentWorkspaces)
+    ? recentWorkspaces.filter((workspacePath) => {
+        if (typeof workspacePath !== "string" || !fs.existsSync(workspacePath)) {
+          return false;
+        }
+
+        try {
+          return fs.statSync(workspacePath).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+
+  if (normalized.length !== (recentWorkspaces?.length ?? 0)) {
+    preferenceStore?.set("recentWorkspaces", normalized);
+  }
+
+  return normalized;
+}
+
+function addRecentWorkspace(workspacePath) {
+  const absolutePath = path.resolve(workspacePath);
+  if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isDirectory()) {
+    return { success: false, error: "The selected workspace no longer exists." };
+  }
+
+  const updated = [absolutePath, ...getRecentWorkspaces().filter((entry) => entry !== absolutePath)].slice(0, 10);
+  preferenceStore?.set("recentWorkspaces", updated);
+  return { success: true, paths: updated };
+}
+
 function setCurrentWorkspace(workspacePath) {
   const absolutePath = path.resolve(workspacePath);
 
   currentWorkspace = absolutePath;
   registerTrustedPath(absolutePath);
   preferenceStore?.set("lastWorkspace", absolutePath);
+  addRecentWorkspace(absolutePath);
   workspaceScanner.markDirty();
 }
 
@@ -306,6 +342,40 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   }
 
   return payload;
+}
+
+function safeJsonParse(value, fallback) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+async function executeAgentGatewayRequest(body) {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.agentGatewayFunctionId) {
+    throw new Error("The agent gateway function is not configured.");
+  }
+
+  const execution = await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(cloudConfig.agentGatewayFunctionId)}/executions`,
+    body: {
+      body: JSON.stringify(body),
+      async: false,
+      path: "/chat-completions",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    },
+  });
+  const parsed = safeJsonParse(execution.responseBody || "{}", { ok: false, error: "Agent gateway returned an unreadable response." });
+
+  if (execution.responseStatusCode >= 400 || !parsed.ok) {
+    throw new Error(parsed.error || execution.responseBody || execution.errors || "Agent gateway execution failed.");
+  }
+
+  return parsed.data;
 }
 
 function contentTypeFor(filePath) {
@@ -586,7 +656,7 @@ function createMenu() {
   ];
 
   const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  Menu.setApplicationMenu(null);
 }
 
 function getDefaultTerminalCwd() {
@@ -666,7 +736,8 @@ function createMainWindow() {
     minWidth: 1100,
     minHeight: 760,
     title: APP_NAME,
-    backgroundColor: "#081420",
+    backgroundColor: "#1e1e1e",
+    frame: false,
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -731,6 +802,31 @@ ipcMain.handle("app:get-info", async () => ({
   platform: process.platform
 }));
 
+ipcMain.handle("app:window-control", async (event, action) => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!targetWindow) {
+    return { success: false, error: "Window is unavailable." };
+  }
+
+  switch (action) {
+    case "minimize":
+      targetWindow.minimize();
+      return { success: true };
+    case "maximize":
+      if (targetWindow.isMaximized()) {
+        targetWindow.unmaximize();
+      } else {
+        targetWindow.maximize();
+      }
+      return { success: true };
+    case "close":
+      targetWindow.close();
+      return { success: true };
+    default:
+      return { success: false, error: "Unknown window control action." };
+  }
+});
+
 ipcMain.on("app:get-cloud-config-sync", (event) => {
   try {
     event.returnValue = getRendererCloudConfig();
@@ -741,243 +837,23 @@ ipcMain.on("app:get-cloud-config-sync", (event) => {
   }
 });
 
-ipcMain.handle("agent:get-context", async () => {
+ipcMain.handle("agent:get-status", async () => {
   try {
-    const scanResult = await workspaceScanner.scan(currentWorkspace, ".");
-    return {
-      success: true,
-      workspaceRoot: scanResult.rootPath,
-      workspaceMap: scanResult.tree,
-      revision: scanResult.revision,
-      totalEntries: scanResult.totalEntries,
-      truncated: scanResult.truncated,
-    };
+    const status = await agentRuntimeManager.getStatus();
+    return { success: true, ...status };
   } catch (error) {
     return toErrorResult(error);
   }
 });
 
-ipcMain.handle("agent:invoke-tool", async (_event, payload = {}) => {
+ipcMain.handle("agent:run", async (_event, payload = {}) => {
   try {
-    const toolName = typeof payload.toolName === "string" ? payload.toolName : "";
-    const args = payload.args && typeof payload.args === "object" ? payload.args : {};
-
-    switch (toolName) {
-      case "list_files": {
-        const scanResult = await workspaceScanner.scan(currentWorkspace, args.path || ".");
-        return {
-          success: true,
-          toolName,
-          output: scanResult.tree,
-          meta: {
-            path: scanResult.relativePath,
-            totalEntries: scanResult.totalEntries,
-            truncated: scanResult.truncated,
-            revision: scanResult.revision,
-          },
-        };
-      }
-
-      case "read_file": {
-        const absolutePath = resolveWorkspacePath(currentWorkspace, args.path);
-        const content = await fsPromises.readFile(absolutePath, "utf8");
-
-        return {
-          success: true,
-          toolName,
-          output: content,
-          meta: {
-            path: toWorkspaceRelativePath(absolutePath),
-            bytes: Buffer.byteLength(content, "utf8"),
-          },
-        };
-      }
-
-      case "write_file": {
-        const absolutePath = resolveWorkspacePath(currentWorkspace, args.path);
-        const relativePath = toWorkspaceRelativePath(absolutePath);
-        const nextContent = typeof args.content === "string" ? args.content : "";
-        const originalContent = await readUtf8IfPresent(absolutePath);
-        const changeSummary = summarizeFileChange(originalContent ?? "", nextContent);
-
-        const approval = securityManager.createApproval({
-          toolName,
-          summary: originalContent === null ? `Create ${relativePath}` : `Overwrite ${relativePath}`,
-          preview: {
-            kind: "file",
-            path: relativePath,
-            isNewFile: originalContent === null,
-            originalContent: originalContent ?? "",
-            nextContent,
-            stats: changeSummary,
-          },
-          execute: async () => {
-            const latestContent = await readUtf8IfPresent(absolutePath);
-            if ((latestContent ?? null) !== originalContent) {
-              throw new Error("The file changed after approval was requested. Ask the agent to refresh and try again.");
-            }
-
-            await fsPromises.mkdir(path.dirname(absolutePath), { recursive: true });
-            await fsPromises.writeFile(absolutePath, nextContent, "utf8");
-            addRecentFile(absolutePath);
-            const revision = markWorkspaceDirty(absolutePath);
-
-            return {
-              toolName,
-              output: `Saved ${relativePath}.`,
-              meta: {
-                action: originalContent === null ? "create" : "write",
-                path: relativePath,
-                revision,
-                stats: changeSummary,
-                content: nextContent,
-              },
-            };
-          },
-        });
-
-        return {
-          success: true,
-          toolName,
-          requiresApproval: true,
-          approval: serializeApproval(approval),
-        };
-      }
-
-      case "edit_file": {
-        const absolutePath = resolveWorkspacePath(currentWorkspace, args.path);
-        const relativePath = toWorkspaceRelativePath(absolutePath);
-        const originalContent = await fsPromises.readFile(absolutePath, "utf8");
-        const nextContent = applySearchReplaceDiff(originalContent, String(args.diff ?? ""));
-        const changeSummary = summarizeFileChange(originalContent, nextContent);
-
-        const approval = securityManager.createApproval({
-          toolName,
-          summary: `Edit ${relativePath}`,
-          preview: {
-            kind: "file",
-            path: relativePath,
-            isNewFile: false,
-            originalContent,
-            nextContent,
-            stats: changeSummary,
-          },
-          execute: async () => {
-            const latestContent = await fsPromises.readFile(absolutePath, "utf8");
-            if (latestContent !== originalContent) {
-              throw new Error("The file changed after approval was requested. Ask the agent to re-read it and try again.");
-            }
-
-            await fsPromises.writeFile(absolutePath, nextContent, "utf8");
-            addRecentFile(absolutePath);
-            const revision = markWorkspaceDirty(absolutePath);
-
-            return {
-              toolName,
-              output: `Updated ${relativePath}.`,
-              meta: {
-                action: "edit",
-                path: relativePath,
-                revision,
-                stats: changeSummary,
-                content: nextContent,
-              },
-            };
-          },
-        });
-
-        return {
-          success: true,
-          toolName,
-          requiresApproval: true,
-          approval: serializeApproval(approval),
-        };
-      }
-
-      case "delete_file": {
-        const absolutePath = resolveWorkspacePath(currentWorkspace, args.path);
-        const relativePath = toWorkspaceRelativePath(absolutePath);
-        const stats = await fsPromises.stat(absolutePath);
-
-        const approval = securityManager.createApproval({
-          toolName,
-          summary: `Delete ${relativePath}`,
-          preview: {
-            kind: "delete",
-            path: relativePath,
-            isDirectory: stats.isDirectory(),
-          },
-          execute: async () => {
-            const latestStats = await fsPromises.stat(absolutePath);
-            if (latestStats.isDirectory()) {
-              await fsPromises.rm(absolutePath, { recursive: true, force: false });
-            } else {
-              await fsPromises.unlink(absolutePath);
-            }
-
-            const revision = markWorkspaceDirty(absolutePath);
-            return {
-              toolName,
-              output: `Deleted ${relativePath}.`,
-              meta: {
-                action: "delete",
-                path: relativePath,
-                revision,
-                isDirectory: stats.isDirectory(),
-              },
-            };
-          },
-        });
-
-        return {
-          success: true,
-          toolName,
-          requiresApproval: true,
-          approval: serializeApproval(approval),
-        };
-      }
-
-      case "run_command": {
-        const command = String(args.command ?? "").trim();
-        if (!currentWorkspace) {
-          throw new Error("Open a workspace before running commands.");
-        }
-
-        const approval = securityManager.createApproval({
-          toolName,
-          summary: `Run command in workspace: ${command}`,
-          preview: {
-            kind: "command",
-            ...buildCommandPreview(command, currentWorkspace),
-          },
-          execute: async () => {
-            const result = await runWorkspaceCommand(command, currentWorkspace);
-
-            return {
-              toolName,
-              output: [
-                `Exit code: ${result.exitCode}`,
-                result.output || "(The command produced no output.)",
-              ].join("\n\n"),
-              meta: {
-                action: "command",
-                ...result,
-              },
-            };
-          },
-        });
-
-        return {
-          success: true,
-          toolName,
-          requiresApproval: true,
-          approval: serializeApproval(approval),
-        };
-      }
-
-      default:
-        throw new Error(`Unknown agent tool: ${toolName}`);
-    }
+    const result = await agentRuntimeManager.run(payload);
+    return {
+      success: true,
+      ...result,
+      ...(result.approval ? { approval: serializeApproval(result.approval) } : {}),
+    };
   } catch (error) {
     return toErrorResult(error);
   }
@@ -990,7 +866,7 @@ ipcMain.handle("agent:resolve-approval", async (_event, payload = {}) => {
       throw new Error("requestId is required.");
     }
 
-    const result = await securityManager.resolveApproval(requestId, Boolean(payload.approved));
+    const result = await agentRuntimeManager.resolveApproval(requestId, Boolean(payload.approved));
     return {
       success: true,
       toolName: result.toolName,
@@ -1271,6 +1147,14 @@ ipcMain.handle("fs:get-last-workspace", async () => {
     return { success: true, path: currentWorkspace };
   } catch {
     return { success: false };
+  }
+});
+
+ipcMain.handle("fs:get-recent-workspaces", async () => {
+  try {
+    return { success: true, paths: getRecentWorkspaces() };
+  } catch (error) {
+    return toErrorResult(error);
   }
 });
 

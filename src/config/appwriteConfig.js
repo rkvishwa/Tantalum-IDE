@@ -15,8 +15,7 @@ function deriveCollections(config) {
     return {
         boards: tables.find((table) => table.$id === 'boards')?.$id || 'boards',
         firmwares: tables.find((table) => table.$id === 'firmwares')?.$id || 'firmwares',
-        sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches',
-        settings: tables.find((table) => table.$id === 'settings')?.$id || 'settings'
+        sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches'
     };
 }
 

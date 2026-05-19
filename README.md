@@ -16,9 +16,10 @@ From the project root:
 
 ```bash
 npm install
-npm --prefix renderer-react install
 npm run dev
 ```
+
+The root package uses npm workspaces, so one `npm install` installs both the Electron app dependencies and the `renderer-react/` Vite dependencies.
 
 To package:
 

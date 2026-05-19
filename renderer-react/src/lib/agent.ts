@@ -1,386 +1,175 @@
-import { ID, Permission, Query, Role, databases } from './appwrite';
 import { executeFunction } from './functions';
 import { appwriteConfig } from './config';
-import type { AgentToolName } from '@/types/electron';
-import type { AgentSettingsDocument } from './models';
-import { safeJsonParse } from './utils';
 
-export type AgentProvider = 'appwrite-default' | 'openrouter' | 'groq';
-
-export type AgentSettings = {
-  documentId: string | null;
-  apiProvider: AgentProvider;
-  apiKey: string;
-  model: string;
-};
+export type AgentMode = 'fast' | 'plan';
+export type AgentSource = 'managed' | 'custom';
 
 export type AgentUiMessage = {
   id: string;
-  role: 'user' | 'assistant' | 'tool' | 'status';
+  role: 'user' | 'assistant' | 'status';
   content: string;
   tone?: 'default' | 'success' | 'error' | 'warning';
-  toolName?: AgentToolName;
 };
 
-export type AgentChatMessage =
-  | { role: 'system' | 'user'; content: string }
-  | { role: 'assistant'; content: string; tool_calls?: AgentToolCall[] }
-  | { role: 'tool'; content: string; tool_call_id: string; name: string };
+export type AgentManagedMode = {
+  id: AgentMode;
+  label: string;
+  creditMultiplier: number;
+};
 
-export type AgentToolCall = {
+export type AgentCustomCredential = {
   id: string;
-  type: 'function';
-  function: {
-    name: AgentToolName;
-    arguments: string;
-  };
+  displayName: string;
+  baseUrl: string;
+  modelNames: string[];
+  enabled: boolean;
+  apiKeyPreview: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
 };
 
-type ChatCompletionResponse = {
-  id?: string;
-  choices?: Array<{
-    index?: number;
-    message?: {
-      role?: 'assistant';
-      content?: string | null;
-      tool_calls?: AgentToolCall[];
-    };
-    finish_reason?: string | null;
-  }>;
-  error?: {
-    message?: string;
-  };
+export type AgentPreferences = {
+  selectedSource: AgentSource;
+  defaultMode: AgentMode;
+  selectedCustomCredentialId: string | null;
+  selectedCustomModelName: string | null;
 };
 
-type AgentCompletionRequest = {
-  settings: AgentSettings;
-  messages: AgentChatMessage[];
+export type AgentCreditAccount = {
+  id: string;
+  periodKey: string;
+  monthlyAllowance: number;
+  usedCredits: number;
+  remainingCredits: number;
+  resetAt: string;
+  updatedAt: string;
 };
 
-function settingsPermissions(userId: string) {
-  return [
-    Permission.read(Role.user(userId)),
-    Permission.update(Role.user(userId)),
-    Permission.delete(Role.user(userId)),
-  ];
+export type AgentUsageEvent = {
+  id: string;
+  source: AgentSource;
+  mode: AgentMode;
+  status: 'success' | 'failed' | 'blocked' | string;
+  modelAlias: string | null;
+  totalTokens: number;
+  multiplier: number;
+  chargedCredits: number;
+  createdAt: string;
+  errorMessage: string | null;
+};
+
+export type AgentSettingsState = {
+  managedAvailable: boolean;
+  managedModes: AgentManagedMode[];
+  preferences: AgentPreferences;
+  customCredentials: AgentCustomCredential[];
+  creditAccount: AgentCreditAccount;
+  recentUsage: AgentUsageEvent[];
+};
+
+export type AgentCredentialInput = {
+  displayName: string;
+  baseUrl: string;
+  apiKey: string;
+  modelNames: string[];
+  enabled?: boolean;
+};
+
+export type AgentCredentialUpdateInput = Partial<AgentCredentialInput> & {
+  credentialId: string;
+};
+
+function assertAgentSettingsFunction() {
+  if (!appwriteConfig.agentSettingsFunctionId) {
+    throw new Error('The agent settings function is not configured.');
+  }
 }
 
-export const AGENT_TOOL_DEFINITIONS = [
-  {
-    type: 'function',
-    function: {
-      name: 'list_files',
-      description: 'Return a recursive tree for a workspace-relative path. Use "." to inspect the whole project.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Workspace-relative directory or file path. Use "." for the workspace root.',
-          },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read a UTF-8 file from the workspace.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Workspace-relative file path.',
-          },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description: 'Create or overwrite a file. The user must approve it before it is applied.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Workspace-relative file path.',
-          },
-          content: {
-            type: 'string',
-            description: 'The complete file contents to write.',
-          },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'edit_file',
-      description:
-        'Apply a SEARCH/REPLACE diff to an existing file. Use blocks formatted as <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Workspace-relative file path.',
-          },
-          diff: {
-            type: 'string',
-            description:
-              'One or more SEARCH/REPLACE blocks. SEARCH text must match exactly once in the current file.',
-          },
-        },
-        required: ['path', 'diff'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'delete_file',
-      description: 'Delete a file or folder from the workspace. The user must approve it before it is applied.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Workspace-relative path to delete.',
-          },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_command',
-      description: 'Run a shell command in the workspace root. The user must approve it before it is executed.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          command: {
-            type: 'string',
-            description: 'Shell command to run.',
-          },
-        },
-        required: ['command'],
-      },
-    },
-  },
-] as const;
-
-export function createDefaultAgentSettings(): AgentSettings {
+export function createDefaultAgentSettings(): AgentSettingsState {
   return {
-    documentId: null,
-    apiProvider: 'appwrite-default',
-    apiKey: '',
-    model: '',
+    managedAvailable: false,
+    managedModes: [
+      { id: 'fast', label: 'Fast', creditMultiplier: 1 },
+      { id: 'plan', label: 'Plan', creditMultiplier: 2 },
+    ],
+    preferences: {
+      selectedSource: 'managed',
+      defaultMode: 'fast',
+      selectedCustomCredentialId: null,
+      selectedCustomModelName: null,
+    },
+    customCredentials: [],
+    creditAccount: {
+      id: '',
+      periodKey: '',
+      monthlyAllowance: 0,
+      usedCredits: 0,
+      remainingCredits: 0,
+      resetAt: '',
+      updatedAt: '',
+    },
+    recentUsage: [],
   };
 }
 
-export async function loadAgentSettings(userId: string) {
-  const response = await databases.listDocuments<AgentSettingsDocument>(
-    appwriteConfig.databaseId,
-    appwriteConfig.agentSettingsCollectionId,
-    [Query.equal('userId', userId), Query.limit(1)],
+export async function loadAgentSettings() {
+  assertAgentSettingsFunction();
+  return executeFunction<Record<string, never>, AgentSettingsState>(
+    appwriteConfig.agentSettingsFunctionId,
+    {},
+    '/bootstrap',
   );
-
-  const [document] = response.documents;
-  if (!document) {
-    return createDefaultAgentSettings();
-  }
-
-  return {
-    documentId: document.$id,
-    apiProvider: normalizeProvider(document.apiProvider),
-    apiKey: document.apiKey || '',
-    model: document.model || '',
-  };
 }
 
-export async function saveAgentSettings(userId: string, settings: AgentSettings) {
-  const now = new Date().toISOString();
-  const payload = {
-    userId,
-    apiProvider: settings.apiProvider,
-    apiKey: settings.apiKey || null,
-    model: settings.model || null,
-    updatedAt: now,
-  };
-
-  if (settings.documentId) {
-    const document = await databases.updateDocument<AgentSettingsDocument>(
-      appwriteConfig.databaseId,
-      appwriteConfig.agentSettingsCollectionId,
-      settings.documentId,
-      payload,
-      settingsPermissions(userId),
-    );
-
-    return {
-      documentId: document.$id,
-      apiProvider: normalizeProvider(document.apiProvider),
-      apiKey: document.apiKey || '',
-      model: document.model || '',
-    };
-  }
-
-  const document = await databases.createDocument<AgentSettingsDocument>(
-    appwriteConfig.databaseId,
-    appwriteConfig.agentSettingsCollectionId,
-    ID.unique(),
-    {
-      ...payload,
-      createdAt: now,
-    },
-    settingsPermissions(userId),
+export async function saveAgentPreferences(preferences: AgentPreferences) {
+  assertAgentSettingsFunction();
+  return executeFunction<AgentPreferences, AgentPreferences>(
+    appwriteConfig.agentSettingsFunctionId,
+    preferences,
+    '/preferences',
   );
-
-  return {
-    documentId: document.$id,
-    apiProvider: normalizeProvider(document.apiProvider),
-    apiKey: document.apiKey || '',
-    model: document.model || '',
-  };
 }
 
-export async function requestAgentCompletion({ settings, messages }: AgentCompletionRequest) {
-  const requestBody = {
-    model: settings.model || undefined,
-    messages,
-    tools: AGENT_TOOL_DEFINITIONS,
-    tool_choice: 'auto',
-    parallel_tool_calls: false,
-    temperature: 0.2,
-  };
-
-  if (settings.apiProvider === 'appwrite-default') {
-    return executeFunction<{ provider: string; request: Record<string, unknown> }, ChatCompletionResponse>(
-      appwriteConfig.proxyAiRequestFunctionId,
-      {
-        provider: 'openrouter',
-        request: requestBody,
-      },
-    );
-  }
-
-  if (!settings.apiKey.trim()) {
-    throw new Error('Add your API key before sending prompts with a custom provider.');
-  }
-
-  if (!settings.model.trim()) {
-    throw new Error('Choose a model before sending prompts with a custom provider.');
-  }
-
-  const endpoint =
-    settings.apiProvider === 'groq'
-      ? 'https://api.groq.com/openai/v1/chat/completions'
-      : 'https://openrouter.ai/api/v1/chat/completions';
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${settings.apiKey.trim()}`,
-      'Content-Type': 'application/json',
-      ...(settings.apiProvider === 'openrouter'
-        ? {
-            'HTTP-Referer': 'https://tantalum-ide.local',
-            'X-Title': 'Tantalum IDE',
-          }
-        : {}),
-    },
-    body: JSON.stringify({
-      ...requestBody,
-      model: settings.model.trim(),
-    }),
-  });
-
-  const rawText = await response.text();
-  const parsed = safeJsonParse<ChatCompletionResponse>(rawText, {});
-
-  if (!response.ok) {
-    throw new Error(parsed.error?.message || rawText || 'The provider request failed.');
-  }
-
-  return parsed;
+export async function createCustomCredential(input: AgentCredentialInput) {
+  assertAgentSettingsFunction();
+  return executeFunction<AgentCredentialInput, AgentCustomCredential>(
+    appwriteConfig.agentSettingsFunctionId,
+    input,
+    '/custom-credentials/create',
+  );
 }
 
-export function createAgentSystemPrompt() {
-  return [
-    'You are Tantalum Copilot, an expert AI software engineer embedded inside an Electron IDE.',
-    'You can inspect the active workspace and use tools to read, edit, create, delete, and execute commands in the project.',
-    'Follow this operating procedure whenever you are asked to change code:',
-    '1. Inspect the project structure with list_files before making assumptions.',
-    '2. Read the relevant files before proposing edits.',
-    '3. Explain your reasoning briefly before using mutating tools.',
-    '4. Prefer edit_file for focused changes and write_file for full rewrites or new files.',
-    '5. For edit_file you must use SEARCH/REPLACE blocks exactly in this format:',
-    '<<<<<<< SEARCH',
-    'old text',
-    '=======',
-    'new text',
-    '>>>>>>> REPLACE',
-    '6. Use workspace-relative paths only.',
-    '7. Never claim a change was applied until the corresponding tool result confirms it.',
-    '8. Keep responses concise, practical, and focused on the user task.',
-  ].join('\n');
+export async function updateCustomCredential(input: AgentCredentialUpdateInput) {
+  assertAgentSettingsFunction();
+  return executeFunction<AgentCredentialUpdateInput, AgentCustomCredential>(
+    appwriteConfig.agentSettingsFunctionId,
+    input,
+    '/custom-credentials/update',
+  );
 }
 
-export function createWorkspaceContextMessage(workspaceRoot: string | null, workspaceMap: string, revision: number) {
-  return [
-    `Workspace root: ${workspaceRoot || '(none)'}`,
-    `Workspace revision: ${revision}`,
-    'Workspace tree:',
-    workspaceMap,
-  ].join('\n');
+export async function deleteCustomCredential(credentialId: string) {
+  assertAgentSettingsFunction();
+  return executeFunction<{ credentialId: string }, { deleted: boolean }>(
+    appwriteConfig.agentSettingsFunctionId,
+    { credentialId },
+    '/custom-credentials/delete',
+  );
 }
 
-export function createUserPrompt(prompt: string, activeTab: { path: string; name: string; content: string; isDirty: boolean } | null) {
-  if (!activeTab) {
-    return prompt;
-  }
-
-  return [
-    prompt,
-    '',
-    'Active editor context:',
-    `File: ${activeTab.path}`,
-    `Display name: ${activeTab.name}`,
-    `Unsaved changes: ${activeTab.isDirty ? 'yes' : 'no'}`,
-    'Current buffer:',
-    activeTab.content,
-  ].join('\n');
+export async function testCustomCredential(credentialId: string) {
+  assertAgentSettingsFunction();
+  return executeFunction<{ credentialId: string }, { ok: boolean }>(
+    appwriteConfig.agentSettingsFunctionId,
+    { credentialId },
+    '/custom-credentials/test',
+  );
 }
 
-export function pruneConversation(messages: AgentChatMessage[], limit = 24) {
-  if (messages.length <= limit) {
-    return messages;
-  }
-
-  return messages.slice(messages.length - limit);
-}
-
-export function normalizeProvider(value: string): AgentProvider {
-  if (value === 'groq' || value === 'openrouter' || value === 'appwrite-default') {
-    return value;
-  }
-
-  return 'appwrite-default';
+export function normalizeModelList(value: string) {
+  return value
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
