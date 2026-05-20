@@ -11,16 +11,104 @@ export type DirectoryItem = {
   extension: string | null;
 };
 
+export type WorkspaceSearchMode = 'all' | 'files' | 'folders' | 'text';
+
+export type WorkspaceSearchRequest = {
+  query: string;
+  mode?: WorkspaceSearchMode;
+  replace?: string;
+  useRegex?: boolean;
+  matchCase?: boolean;
+  wholeWord?: boolean;
+  includeGlob?: string;
+  excludeGlob?: string;
+  maxResults?: number;
+  blockedPaths?: string[];
+};
+
+export type WorkspaceSearchResult = {
+  id: string;
+  type: 'file' | 'folder' | 'text';
+  path: string;
+  relativePath: string;
+  name: string;
+  lineNumber?: number;
+  column?: number;
+  endColumn?: number;
+  preview?: string;
+  matchText?: string;
+};
+
+export type WorkspaceSearchStats = {
+  totalResults: number;
+  fileResults: number;
+  folderResults: number;
+  textResults: number;
+  durationMs: number;
+};
+
+export type WorkspaceReplacePreviewFile = {
+  path: string;
+  relativePath: string;
+  matchCount: number;
+  previews: Array<{
+    lineNumber: number;
+    column: number;
+    before: string;
+    after: string;
+  }>;
+};
+
+export type WorkspaceReplaceChangedFile = {
+  path: string;
+  relativePath: string;
+  matchCount: number;
+  content: string;
+};
+
+export type ProjectFolder = {
+  id: string;
+  path: string;
+  name: string;
+  displayName?: string;
+  favorite: boolean;
+  addedAt: string;
+  lastOpenedAt?: string;
+  exists: boolean;
+  details?: {
+    topLevelFiles: number;
+    topLevelFolders: number;
+    lastModifiedAt?: string;
+    gitRepository: boolean;
+  };
+};
+
 export type MenuAction =
   | { type: 'new-file' }
+  | { type: 'open-file' }
   | { type: 'open-folder' }
+  | { type: 'open-recent-workspace'; folderPath: string }
   | { type: 'save-file' }
   | { type: 'save-file-as' }
   | { type: 'show-sketch-folder' }
+  | { type: 'undo' }
+  | { type: 'redo' }
+  | { type: 'cut' }
+  | { type: 'copy' }
+  | { type: 'paste' }
+  | { type: 'select-all' }
   | { type: 'toggle-comment' }
   | { type: 'find' }
+  | { type: 'find-in-workspace' }
   | { type: 'find-next' }
   | { type: 'find-previous' }
+  | { type: 'show-explorer' }
+  | { type: 'show-boards' }
+  | { type: 'show-libraries' }
+  | { type: 'show-git' }
+  | { type: 'show-platforms' }
+  | { type: 'show-my-projects' }
+  | { type: 'show-output' }
   | { type: 'compile' }
   | { type: 'upload-cloud' }
   | { type: 'open-library-manager' }
@@ -65,6 +153,94 @@ export type CloudConfig = {
 };
 
 export type AgentToolName = 'aider_apply';
+
+export type GitStatusState = 'no-workspace' | 'missing-git' | 'not-repository' | 'unsafe' | 'repository';
+
+export type GitFileChange = {
+  path: string;
+  oldPath?: string;
+  status: string;
+  staged: boolean;
+  conflicted: boolean;
+  untracked: boolean;
+};
+
+export type GitStatus = {
+  state: GitStatusState;
+  available: boolean;
+  isRepository: boolean;
+  root: string | null;
+  gitDir: string | null;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  detached: boolean;
+  operation: string | null;
+  stagedFiles: GitFileChange[];
+  unstagedFiles: GitFileChange[];
+  untrackedFiles: GitFileChange[];
+  conflictedFiles: GitFileChange[];
+  hasChanges: boolean;
+  safeDirectoryRequired: boolean;
+  message: string;
+};
+
+export type GitDiffMode = 'working-tree' | 'staged';
+
+export type GitDiff = {
+  path: string;
+  oldPath: string;
+  mode: GitDiffMode;
+  oldContent: string;
+  newContent: string;
+};
+
+export type GitCommit = {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  subject: string;
+  author: string;
+  authorEmail?: string;
+  date: string;
+  refs: string;
+  branch: string;
+  graphPrefix: string;
+  stats?: {
+    filesChanged: number;
+    insertions: number;
+    deletions: number;
+  };
+};
+
+export type GitBranch = {
+  name: string;
+  shortHash: string;
+  current: boolean;
+  remote: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+};
+
+export type GitRemote = {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string;
+};
+
+export type GitProvider = 'github' | 'gitlab';
+
+export type GitConfiguration = {
+  defaultProvider: GitProvider;
+  githubUsername: string;
+  gitlabUsername: string;
+  gitUserName: string;
+  gitUserEmail: string;
+  githubTokenConfigured: boolean;
+  gitlabTokenConfigured: boolean;
+};
 
 export type AgentChangePreview = {
   path: string;
@@ -117,6 +293,7 @@ export type DesktopApi = {
     cloudConfig?: CloudConfig;
     getInfo: () => Promise<Result<{ appName: string; version: string; platform: string }>>;
     controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<Result>;
+    dispatchMenuAction: (action: MenuAction) => Promise<Result>;
     onMenuAction: (callback: (action: MenuAction) => void) => () => void;
   };
   agent: {
@@ -188,9 +365,11 @@ export type DesktopApi = {
   };
   fs: {
     openFolder: () => Promise<Result<{ path: string }>>;
+    openFile: () => Promise<Result<{ path: string }>>;
     setWorkspace: (folderPath: string) => Promise<Result<{ path: string }>>;
     getLastWorkspace: () => Promise<Result<{ path: string }>>;
     getRecentWorkspaces: () => Promise<Result<{ paths: string[] }>>;
+    getRecentFiles: () => Promise<Result<{ paths: string[] }>>;
     showSaveDialog: (options: { defaultPath?: string; filters?: Array<{ name: string; extensions: string[] }> }) => Promise<Result<{ path: string }>>;
     readDirectory: (dirPath: string) => Promise<Result<{ items: DirectoryItem[] }>>;
     readFile: (filePath: string) => Promise<Result<{ path: string; content: string }>>;
@@ -200,6 +379,56 @@ export type DesktopApi = {
     rename: (oldPath: string, newPath: string) => Promise<Result<{ path: string }>>;
     deletePath: (targetPath: string) => Promise<Result>;
     addRecentFile: (filePath: string) => Promise<Result>;
+  };
+  workspace: {
+    search: (request: WorkspaceSearchRequest) => Promise<Result<{ results: WorkspaceSearchResult[]; truncated: boolean; stats: WorkspaceSearchStats }>>;
+    previewReplace: (request: WorkspaceSearchRequest) => Promise<Result<{ files: WorkspaceReplacePreviewFile[]; totalMatches: number; blockedPaths: string[] }>>;
+    applyReplace: (request: WorkspaceSearchRequest) => Promise<Result<{ changedFiles: WorkspaceReplaceChangedFile[]; skippedFiles: string[]; totalReplacements: number }>>;
+  };
+  projects: {
+    list: () => Promise<Result<{ projects: ProjectFolder[] }>>;
+    add: (projectPath: string) => Promise<Result<{ project: ProjectFolder; alreadyExists: boolean }>>;
+    pickFolder: () => Promise<Result<{ path: string }>>;
+    remove: (projectId: string) => Promise<Result<{ projects: ProjectFolder[] }>>;
+    update: (projectId: string, patch: Partial<Pick<ProjectFolder, 'path' | 'displayName' | 'favorite' | 'lastOpenedAt'>>) => Promise<Result<{ project: ProjectFolder }>>;
+    inspect: (projectId: string) => Promise<Result<{ project: ProjectFolder }>>;
+  };
+  git: {
+    getStatus: () => Promise<Result<{ status: GitStatus }>>;
+    getDiff: (payload: { path: string; oldPath?: string; mode?: GitDiffMode }) => Promise<Result<{ diff: GitDiff }>>;
+    stage: (payload: { path?: string; paths?: string[] }) => Promise<Result<{ output?: string }>>;
+    unstage: (payload: { path?: string; paths?: string[] }) => Promise<Result<{ output?: string }>>;
+    discard: (payload: { path?: string; paths?: string[]; staged?: boolean; untracked?: boolean }) => Promise<Result<{ output?: string }>>;
+    commit: (payload: { message: string }) => Promise<Result<{ output?: string }>>;
+    fetch: () => Promise<Result<{ output?: string }>>;
+    pull: () => Promise<Result<{ output?: string }>>;
+    push: () => Promise<Result<{ output?: string }>>;
+    listBranches: () => Promise<Result<{ status: GitStatus; branches: GitBranch[] }>>;
+    checkoutBranch: (payload: { branch: string }) => Promise<Result<{ output?: string }>>;
+    createBranch: (payload: { branch: string }) => Promise<Result<{ output?: string }>>;
+    getLog: (payload?: { limit?: number }) => Promise<Result<{ commits: GitCommit[] }>>;
+    getRemotes: () => Promise<Result<{ remotes: GitRemote[] }>>;
+    repairSafeDirectory: () => Promise<Result<{ output?: string }>>;
+    initRepository: (payload?: { defaultBranch?: string }) => Promise<Result<{ output?: string }>>;
+    publishRepository: (payload: {
+      provider: GitProvider;
+      repositoryName: string;
+      owner?: string;
+      visibility: 'private' | 'public';
+      initialCommitMessage?: string;
+    }) => Promise<Result<{ output?: string; remoteUrl: string; webUrl: string }>>;
+    getConfiguration: () => Promise<Result<{ config: GitConfiguration }>>;
+    setConfiguration: (payload: {
+      defaultProvider: GitProvider;
+      githubUsername?: string;
+      gitlabUsername?: string;
+      githubToken?: string;
+      gitlabToken?: string;
+      clearGithubToken?: boolean;
+      clearGitlabToken?: boolean;
+      gitUserName?: string;
+      gitUserEmail?: string;
+    }) => Promise<Result<{ config: GitConfiguration }>>;
   };
   secrets: {
     setBoardSecrets: (payload: { boardId: string; apiToken?: string; wifiPassword?: string }) => Promise<Result>;

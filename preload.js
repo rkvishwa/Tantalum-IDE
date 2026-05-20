@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     cloudConfig: readCloudConfig(),
     getInfo: () => ipcRenderer.invoke("app:get-info"),
     controlWindow: (action) => ipcRenderer.invoke("app:window-control", action),
+    dispatchMenuAction: (action) => ipcRenderer.invoke("app:dispatch-menu-action", action),
     onMenuAction: (callback) => subscribe("app:menu-action", callback)
   },
   agent: {
@@ -61,9 +62,11 @@ contextBridge.exposeInMainWorld("tantalum", {
   },
   fs: {
     openFolder: () => ipcRenderer.invoke("fs:open-folder"),
+    openFile: () => ipcRenderer.invoke("fs:open-file"),
     setWorkspace: (folderPath) => ipcRenderer.invoke("fs:set-workspace", folderPath),
     getLastWorkspace: () => ipcRenderer.invoke("fs:get-last-workspace"),
     getRecentWorkspaces: () => ipcRenderer.invoke("fs:get-recent-workspaces"),
+    getRecentFiles: () => ipcRenderer.invoke("fs:get-recent-files"),
     showSaveDialog: (options) => ipcRenderer.invoke("fs:show-save-dialog", options),
     readDirectory: (dirPath) => ipcRenderer.invoke("fs:read-directory", dirPath),
     readFile: (filePath) => ipcRenderer.invoke("fs:read-file", filePath),
@@ -73,6 +76,40 @@ contextBridge.exposeInMainWorld("tantalum", {
     rename: (oldPath, newPath) => ipcRenderer.invoke("fs:rename", { oldPath, newPath }),
     deletePath: (targetPath) => ipcRenderer.invoke("fs:delete", targetPath),
     addRecentFile: (filePath) => ipcRenderer.invoke("workspace:add-recent-file", filePath)
+  },
+  workspace: {
+    search: (payload) => ipcRenderer.invoke("workspace:search", payload),
+    previewReplace: (payload) => ipcRenderer.invoke("workspace:preview-replace", payload),
+    applyReplace: (payload) => ipcRenderer.invoke("workspace:apply-replace", payload)
+  },
+  projects: {
+    list: () => ipcRenderer.invoke("projects:list"),
+    add: (projectPath) => ipcRenderer.invoke("projects:add", projectPath),
+    pickFolder: () => ipcRenderer.invoke("projects:pick-folder"),
+    remove: (projectId) => ipcRenderer.invoke("projects:remove", projectId),
+    update: (projectId, patch) => ipcRenderer.invoke("projects:update", projectId, patch),
+    inspect: (projectId) => ipcRenderer.invoke("projects:inspect", projectId)
+  },
+  git: {
+    getStatus: () => ipcRenderer.invoke("git:get-status"),
+    getDiff: (payload) => ipcRenderer.invoke("git:get-diff", payload),
+    stage: (payload) => ipcRenderer.invoke("git:stage", payload),
+    unstage: (payload) => ipcRenderer.invoke("git:unstage", payload),
+    discard: (payload) => ipcRenderer.invoke("git:discard", payload),
+    commit: (payload) => ipcRenderer.invoke("git:commit", payload),
+    fetch: () => ipcRenderer.invoke("git:fetch"),
+    pull: () => ipcRenderer.invoke("git:pull"),
+    push: () => ipcRenderer.invoke("git:push"),
+    listBranches: () => ipcRenderer.invoke("git:list-branches"),
+    checkoutBranch: (payload) => ipcRenderer.invoke("git:checkout-branch", payload),
+    createBranch: (payload) => ipcRenderer.invoke("git:create-branch", payload),
+    getLog: (payload) => ipcRenderer.invoke("git:get-log", payload),
+    getRemotes: () => ipcRenderer.invoke("git:get-remotes"),
+    repairSafeDirectory: () => ipcRenderer.invoke("git:repair-safe-directory"),
+    initRepository: (payload) => ipcRenderer.invoke("git:init-repository", payload),
+    publishRepository: (payload) => ipcRenderer.invoke("git:publish-repository", payload),
+    getConfiguration: () => ipcRenderer.invoke("git:get-configuration"),
+    setConfiguration: (payload) => ipcRenderer.invoke("git:set-configuration", payload)
   },
   secrets: {
     setBoardSecrets: (payload) => ipcRenderer.invoke("secrets:set-board", payload),

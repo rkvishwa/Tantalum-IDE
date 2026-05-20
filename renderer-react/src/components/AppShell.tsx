@@ -1,21 +1,24 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Models } from 'appwrite';
 import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Maximize2,
   Minus,
   PanelBottom,
   PanelLeft,
   PanelRight,
+  Search,
   Settings,
   UserRound,
   X,
 } from 'lucide-react';
 
 import { signOut } from '@/lib/auth';
+import type { MenuAction } from '@/types/electron';
 import {
   DEFAULT_UI_PREFERENCES,
   loadUiPreferences,
@@ -25,27 +28,190 @@ import {
   type UiPreferences,
 } from '@/lib/uiPreferences';
 
-import { IDEWorkspace } from './IDEWorkspace';
-import { SettingsPage } from './SettingsPage';
+import { IDEWorkspace, type SidebarView } from './IDEWorkspace';
+import { SettingsPage, type SettingsTab } from './SettingsPage';
 
 type AppShellProps = {
   appName: string;
   version: string;
+  platform: string;
   user: Models.User<Models.Preferences>;
   onSignedOut: () => void;
 };
 
 type View = 'workspace' | 'settings';
+type AppRoute =
+  | { view: 'workspace'; sidebar: SidebarView }
+  | { view: 'settings'; tab: SettingsTab };
+type AppNavigationState = {
+  entries: AppRoute[];
+  index: number;
+};
 type WindowControlAction = 'minimize' | 'maximize' | 'close';
+type TitlebarMenuId = 'file' | 'edit' | 'view' | 'sketch' | 'help';
+type PanelVisibilityState = {
+  leftPanelOpen: boolean;
+  rightPanelOpen: boolean;
+  bottomPanelOpen: boolean;
+};
+type TitlebarMenuSeparator = {
+  id: string;
+  type: 'separator';
+};
+type TitlebarMenuCommand = {
+  id: string;
+  label: string;
+  shortcut?: string;
+  title?: string;
+  disabled?: boolean;
+  action?: MenuAction;
+  onSelect?: () => void;
+  submenu?: TitlebarMenuItem[];
+};
+type TitlebarMenuItem = TitlebarMenuSeparator | TitlebarMenuCommand;
+type TitlebarMenuGroup = {
+  id: TitlebarMenuId;
+  label: string;
+  items: TitlebarMenuItem[];
+};
 
-export function AppShell({ appName, version, user, onSignedOut }: AppShellProps) {
-  const [currentView, setCurrentView] = useState<View>('workspace');
-  const [leftPanelOpen, setLeftPanelOpen] = useState(true);
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+const PANEL_VISIBILITY_STORAGE_KEY = 'tantalum-panel-visibility';
+const MAX_APP_HISTORY_ENTRIES = 100;
+const DEFAULT_WORKSPACE_SIDEBAR: SidebarView = 'explorer';
+const DEFAULT_SETTINGS_TAB: SettingsTab = 'appearance';
+const DEFAULT_APP_ROUTE: AppRoute = { view: 'workspace', sidebar: DEFAULT_WORKSPACE_SIDEBAR };
+const DEFAULT_PANEL_VISIBILITY: PanelVisibilityState = {
+  leftPanelOpen: true,
+  rightPanelOpen: false,
+  bottomPanelOpen: false,
+};
+
+function baseNameFromPath(targetPath: string) {
+  const normalized = targetPath.replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).pop() || targetPath;
+}
+
+function isMenuSeparator(item: TitlebarMenuItem): item is TitlebarMenuSeparator {
+  return 'type' in item && item.type === 'separator';
+}
+
+function appRoutesEqual(left: AppRoute, right: AppRoute) {
+  if (left.view !== right.view) {
+    return false;
+  }
+
+  if (left.view === 'workspace' && right.view === 'workspace') {
+    return left.sidebar === right.sidebar;
+  }
+
+  return left.view === 'settings' && right.view === 'settings' && left.tab === right.tab;
+}
+
+function getCurrentAppRoute(navigation: AppNavigationState) {
+  return navigation.entries[navigation.index] ?? DEFAULT_APP_ROUTE;
+}
+
+function getLastWorkspaceSidebar(entries: AppRoute[], index: number) {
+  for (let cursor = Math.min(index, entries.length - 1); cursor >= 0; cursor -= 1) {
+    const route = entries[cursor];
+    if (route?.view === 'workspace') {
+      return route.sidebar;
+    }
+  }
+
+  return DEFAULT_WORKSPACE_SIDEBAR;
+}
+
+function getLastSettingsTab(entries: AppRoute[], index: number) {
+  for (let cursor = Math.min(index, entries.length - 1); cursor >= 0; cursor -= 1) {
+    const route = entries[cursor];
+    if (route?.view === 'settings') {
+      return route.tab;
+    }
+  }
+
+  return DEFAULT_SETTINGS_TAB;
+}
+
+function loadPanelVisibilityState(): PanelVisibilityState {
+  if (typeof localStorage === 'undefined') {
+    return DEFAULT_PANEL_VISIBILITY;
+  }
+
+  try {
+    const stored = localStorage.getItem(PANEL_VISIBILITY_STORAGE_KEY);
+    if (!stored) {
+      return DEFAULT_PANEL_VISIBILITY;
+    }
+
+    const parsed = JSON.parse(stored) as Partial<PanelVisibilityState>;
+    return {
+      leftPanelOpen: typeof parsed.leftPanelOpen === 'boolean' ? parsed.leftPanelOpen : DEFAULT_PANEL_VISIBILITY.leftPanelOpen,
+      rightPanelOpen: typeof parsed.rightPanelOpen === 'boolean' ? parsed.rightPanelOpen : DEFAULT_PANEL_VISIBILITY.rightPanelOpen,
+      bottomPanelOpen: typeof parsed.bottomPanelOpen === 'boolean' ? parsed.bottomPanelOpen : DEFAULT_PANEL_VISIBILITY.bottomPanelOpen,
+    };
+  } catch {
+    return DEFAULT_PANEL_VISIBILITY;
+  }
+}
+
+function savePanelVisibilityState(panelVisibility: PanelVisibilityState) {
+  if (typeof localStorage === 'undefined') {
+    return;
+  }
+
+  try {
+    localStorage.setItem(PANEL_VISIBILITY_STORAGE_KEY, JSON.stringify(panelVisibility));
+  } catch {
+    // Ignore storage failures; panel state can safely fall back to defaults.
+  }
+}
+
+function getAccentContrastColor(accentColor: string) {
+  const hex = accentColor.replace('#', '');
+  if (!/^[0-9a-f]{6}$/i.test(hex)) {
+    return '#ffffff';
+  }
+
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  const yiq = (red * 299 + green * 587 + blue * 114) / 1000;
+
+  return yiq >= 150 ? '#081018' : '#ffffff';
+}
+
+export function AppShell({ appName, version, platform, user, onSignedOut }: AppShellProps) {
+  const [appNavigation, setAppNavigation] = useState<AppNavigationState>(() => ({
+    entries: [DEFAULT_APP_ROUTE],
+    index: 0,
+  }));
+  const [panelVisibility, setPanelVisibility] = useState<PanelVisibilityState>(() => loadPanelVisibilityState());
   const [workspaceTitle, setWorkspaceTitle] = useState('');
+  const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
   const [uiPreferences, setUiPreferences] = useState<UiPreferences>(() => loadUiPreferences());
   const [resolvedTheme, setResolvedTheme] = useState<'dark' | 'light'>(() => resolveThemePreference(uiPreferences.theme));
+  const currentRoute = getCurrentAppRoute(appNavigation);
+  const currentView = currentRoute.view;
+  const currentWorkspaceSidebar =
+    currentRoute.view === 'workspace' ? currentRoute.sidebar : getLastWorkspaceSidebar(appNavigation.entries, appNavigation.index);
+  const currentSettingsTab = currentRoute.view === 'settings' ? currentRoute.tab : getLastSettingsTab(appNavigation.entries, appNavigation.index);
+  const canNavigateBack = appNavigation.index > 0;
+  const canNavigateForward = appNavigation.index < appNavigation.entries.length - 1;
+  const workspaceSearchAvailable = currentView === 'workspace' && Boolean(workspaceTitle);
+  const { leftPanelOpen, rightPanelOpen, bottomPanelOpen } = panelVisibility;
+
+  useEffect(() => {
+    savePanelVisibilityState(panelVisibility);
+  }, [panelVisibility]);
+
+  useEffect(() => {
+    if (currentView !== 'workspace' || (currentWorkspaceSidebar !== 'git' && currentWorkspaceSidebar !== 'my-projects')) {
+      return;
+    }
+
+    setPanelVisibility((current) => (current.rightPanelOpen ? current : { ...current, rightPanelOpen: true }));
+  }, [currentView, currentWorkspaceSidebar]);
 
   useEffect(() => {
     saveUiPreferences(uiPreferences);
@@ -61,6 +227,7 @@ export function AppShell({ appName, version, user, onSignedOut }: AppShellProps)
       root.style.setProperty('--app-font-family', uiPreferences.fontFamily);
       root.style.setProperty('--app-font-size', `${uiPreferences.fontSize}px`);
       root.style.setProperty('--accent', uiPreferences.accentColor);
+      root.style.setProperty('--accent-contrast', getAccentContrastColor(uiPreferences.accentColor));
       root.style.setProperty('--color-accent', uiPreferences.accentColor);
     };
 
@@ -72,8 +239,97 @@ export function AppShell({ appName, version, user, onSignedOut }: AppShellProps)
     };
   }, [uiPreferences]);
 
+  useEffect(() => {
+    if (currentView !== 'workspace') {
+      return;
+    }
+
+    const layoutHandle = window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    return () => {
+      window.cancelAnimationFrame(layoutHandle);
+    };
+  }, [currentView]);
+
+  useEffect(() => {
+    const handleWorkspaceSearchShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'f') {
+        if (!workspaceSearchAvailable) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        setWorkspaceSearchOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', handleWorkspaceSearchShortcut, true);
+    return () => {
+      window.removeEventListener('keydown', handleWorkspaceSearchShortcut, true);
+    };
+  }, [workspaceSearchAvailable]);
+
   const handlePreferenceChange = (nextPreferences: UiPreferences) => {
     setUiPreferences(normalizeUiPreferences(nextPreferences));
+  };
+
+  const pushAppRoute = useCallback((nextRoute: AppRoute) => {
+    setAppNavigation((current) => {
+      const currentRoute = getCurrentAppRoute(current);
+      if (appRoutesEqual(currentRoute, nextRoute)) {
+        return current;
+      }
+
+      const pendingEntries = [...current.entries.slice(0, current.index + 1), nextRoute];
+      const entries =
+        pendingEntries.length > MAX_APP_HISTORY_ENTRIES ? pendingEntries.slice(pendingEntries.length - MAX_APP_HISTORY_ENTRIES) : pendingEntries;
+
+      return {
+        entries,
+        index: entries.length - 1,
+      };
+    });
+  }, []);
+
+  const navigateBack = useCallback(() => {
+    setAppNavigation((current) => (current.index > 0 ? { ...current, index: current.index - 1 } : current));
+  }, []);
+
+  const navigateForward = useCallback(() => {
+    setAppNavigation((current) => (current.index < current.entries.length - 1 ? { ...current, index: current.index + 1 } : current));
+  }, []);
+
+  const navigateToWorkspaceSidebar = useCallback(
+    (sidebar: SidebarView) => {
+      pushAppRoute({ view: 'workspace', sidebar });
+    },
+    [pushAppRoute],
+  );
+
+  const navigateToSettings = useCallback(() => {
+    pushAppRoute({ view: 'settings', tab: getLastSettingsTab(appNavigation.entries, appNavigation.index) });
+  }, [appNavigation.entries, appNavigation.index, pushAppRoute]);
+
+  const navigateToSettingsTab = useCallback(
+    (tab: SettingsTab) => {
+      pushAppRoute({ view: 'settings', tab });
+    },
+    [pushAppRoute],
+  );
+
+  const navigateToLastWorkspace = useCallback(() => {
+    pushAppRoute({ view: 'workspace', sidebar: getLastWorkspaceSidebar(appNavigation.entries, appNavigation.index) });
+  }, [appNavigation.entries, appNavigation.index, pushAppRoute]);
+
+  const setPanelOpen = (panel: keyof PanelVisibilityState, open: boolean) => {
+    setPanelVisibility((current) => (current[panel] === open ? current : { ...current, [panel]: open }));
+  };
+
+  const togglePanelOpen = (panel: keyof PanelVisibilityState) => {
+    setPanelVisibility((current) => ({ ...current, [panel]: !current[panel] }));
   };
 
   const handleSignedOut = async () => {
@@ -97,40 +353,60 @@ export function AppShell({ appName, version, user, onSignedOut }: AppShellProps)
         leftPanelOpen={leftPanelOpen}
         rightPanelOpen={rightPanelOpen}
         bottomPanelOpen={bottomPanelOpen}
-        onBackToWorkspace={() => setCurrentView('workspace')}
-        onOpenSettings={() => setCurrentView('settings')}
-        onToggleLeftPanel={() => setLeftPanelOpen((current) => !current)}
-        onToggleRightPanel={() => setRightPanelOpen((current) => !current)}
-        onToggleBottomPanel={() => setBottomPanelOpen((current) => !current)}
+        workspaceSearchAvailable={workspaceSearchAvailable}
+        workspaceSearchOpen={workspaceSearchOpen}
+        canNavigateBack={canNavigateBack}
+        canNavigateForward={canNavigateForward}
+        onNavigateBack={navigateBack}
+        onNavigateForward={navigateForward}
+        onBackToWorkspace={navigateToLastWorkspace}
+        onOpenSettings={navigateToSettings}
+        onOpenWorkspaceSearch={() => setWorkspaceSearchOpen(true)}
+        onToggleLeftPanel={() => togglePanelOpen('leftPanelOpen')}
+        onToggleRightPanel={() => togglePanelOpen('rightPanelOpen')}
+        onToggleBottomPanel={() => togglePanelOpen('bottomPanelOpen')}
         onSignedOut={() => void handleSignedOut()}
       />
 
       <main className="app-shell-main">
-        {currentView === 'workspace' && (
+        <div
+          className={`app-view-panel ${currentView === 'workspace' ? 'app-view-panel-active' : 'app-view-panel-hidden'}`}
+          aria-hidden={currentView !== 'workspace'}
+        >
           <IDEWorkspace
+            active={currentView === 'workspace'}
             appName={appName}
             version={version}
+            platform={platform}
             user={user}
             onSignedOut={() => void handleSignedOut()}
-            onOpenSettings={() => setCurrentView('settings')}
+            onOpenSettings={navigateToSettings}
+            sidebar={currentWorkspaceSidebar}
+            onSidebarChange={navigateToWorkspaceSidebar}
             leftPanelOpen={leftPanelOpen}
             rightPanelOpen={rightPanelOpen}
             bottomPanelOpen={bottomPanelOpen}
-            onBottomPanelOpenChange={setBottomPanelOpen}
+            onBottomPanelOpenChange={(open) => setPanelOpen('bottomPanelOpen', open)}
             onWorkspaceTitleChange={setWorkspaceTitle}
+            workspaceSearchOpen={workspaceSearchOpen}
+            onWorkspaceSearchOpenChange={setWorkspaceSearchOpen}
             uiPreferences={uiPreferences}
             resolvedTheme={resolvedTheme}
           />
-        )}
+        </div>
         {currentView === 'settings' && (
-          <SettingsPage
-            appName={appName}
-            version={version}
-            user={user}
-            preferences={uiPreferences}
-            onPreferencesChange={handlePreferenceChange}
-            onResetPreferences={() => handlePreferenceChange(DEFAULT_UI_PREFERENCES)}
-          />
+          <div className="app-view-panel app-view-panel-active">
+            <SettingsPage
+              appName={appName}
+              version={version}
+              user={user}
+              preferences={uiPreferences}
+              activeTab={currentSettingsTab}
+              onActiveTabChange={navigateToSettingsTab}
+              onPreferencesChange={handlePreferenceChange}
+              onResetPreferences={() => handlePreferenceChange(DEFAULT_UI_PREFERENCES)}
+            />
+          </div>
         )}
       </main>
     </div>
@@ -144,8 +420,15 @@ function AppTitleBar({
   leftPanelOpen,
   rightPanelOpen,
   bottomPanelOpen,
+  workspaceSearchAvailable,
+  workspaceSearchOpen,
+  canNavigateBack,
+  canNavigateForward,
+  onNavigateBack,
+  onNavigateForward,
   onBackToWorkspace,
   onOpenSettings,
+  onOpenWorkspaceSearch,
   onToggleLeftPanel,
   onToggleRightPanel,
   onToggleBottomPanel,
@@ -159,15 +442,26 @@ function AppTitleBar({
   leftPanelOpen: boolean;
   rightPanelOpen: boolean;
   bottomPanelOpen: boolean;
+  workspaceSearchAvailable: boolean;
+  workspaceSearchOpen: boolean;
+  canNavigateBack: boolean;
+  canNavigateForward: boolean;
+  onNavigateBack: () => void;
+  onNavigateForward: () => void;
   onBackToWorkspace: () => void;
   onOpenSettings: () => void;
+  onOpenWorkspaceSearch: () => void;
   onToggleLeftPanel: () => void;
   onToggleRightPanel: () => void;
   onToggleBottomPanel: () => void;
   onSignedOut: () => void;
 }) {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState<TitlebarMenuId | null>(null);
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>([]);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const titlebarMenuRef = useRef<HTMLElement | null>(null);
   const displayName = user.name || user.email || 'Account';
   const initial = useMemo(() => displayName.trim().charAt(0).toUpperCase() || 'T', [displayName]);
 
@@ -188,9 +482,282 @@ function AppTitleBar({
     };
   }, [accountMenuOpen]);
 
+  useEffect(() => {
+    void refreshRecentItems();
+  }, []);
+
+  useEffect(() => {
+    if (!openMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (titlebarMenuRef.current && !titlebarMenuRef.current.contains(event.target as Node)) {
+        setOpenMenu(null);
+      }
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenMenu(null);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openMenu]);
+
+  async function refreshRecentItems() {
+    const [workspaceResult, fileResult] = await Promise.all([
+      window.tantalum.fs.getRecentWorkspaces(),
+      window.tantalum.fs.getRecentFiles(),
+    ]);
+
+    if (workspaceResult.success) {
+      setRecentWorkspaces(workspaceResult.paths);
+    }
+
+    if (fileResult.success) {
+      setRecentFiles(fileResult.paths);
+    }
+  }
+
   const controlWindow = (action: WindowControlAction) => {
     void window.tantalum.app.controlWindow(action);
   };
+
+  const closeMenus = () => {
+    setOpenMenu(null);
+    setAccountMenuOpen(false);
+  };
+
+  const sendMenuAction = (action: MenuAction) => {
+    closeMenus();
+    void window.tantalum.app.dispatchMenuAction(action);
+  };
+
+  const runMenuCommand = (command: () => void) => {
+    closeMenus();
+    command();
+  };
+
+  const openMenuExternalLink = (url: string) => {
+    closeMenus();
+    void window.tantalum.shell.openExternal(url);
+  };
+
+  const toggleMenu = (menuId: TitlebarMenuId) => {
+    setAccountMenuOpen(false);
+    setOpenMenu((current) => {
+      const next = current === menuId ? null : menuId;
+      if (next === 'file') {
+        void refreshRecentItems();
+      }
+      return next;
+    });
+  };
+
+  const switchOpenMenu = (menuId: TitlebarMenuId) => {
+    if (!openMenu || openMenu === menuId) {
+      return;
+    }
+
+    if (menuId === 'file') {
+      void refreshRecentItems();
+    }
+    setOpenMenu(menuId);
+  };
+
+  const recentWorkspaceItems: TitlebarMenuItem[] = recentWorkspaces.length
+    ? recentWorkspaces.map((folderPath) => ({
+        id: `recent-workspace:${folderPath}`,
+        label: baseNameFromPath(folderPath),
+        title: folderPath,
+        action: { type: 'open-recent-workspace', folderPath },
+      }))
+    : [{ id: 'recent-workspaces-empty', label: 'No Recent Folders', disabled: true }];
+
+  const recentFileItems: TitlebarMenuItem[] = recentFiles.length
+    ? recentFiles.map((filePath) => ({
+        id: `recent-file:${filePath}`,
+        label: baseNameFromPath(filePath),
+        title: filePath,
+        action: { type: 'open-recent-file', filePath },
+      }))
+    : [{ id: 'recent-files-empty', label: 'No Recent Files', disabled: true }];
+
+  const menuGroups: TitlebarMenuGroup[] = [
+    {
+      id: 'file',
+      label: 'File',
+      items: [
+        { id: 'new-file', label: 'New File', shortcut: 'Ctrl N', action: { type: 'new-file' } },
+        { id: 'open-file', label: 'Open File...', shortcut: 'Ctrl O', action: { type: 'open-file' } },
+        { id: 'open-folder', label: 'Open Folder...', shortcut: 'Ctrl Shift O', action: { type: 'open-folder' } },
+        {
+          id: 'open-recent',
+          label: 'Open Recent',
+          submenu: [
+            { id: 'recent-folders', label: 'Folders', submenu: recentWorkspaceItems },
+            { id: 'recent-files', label: 'Files', submenu: recentFileItems },
+          ],
+        },
+        {
+          id: 'examples',
+          label: 'Examples',
+          submenu: [
+            { id: 'example-blink', label: 'Blink', action: { type: 'load-example', name: 'Blink', content: `// Blink
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(1000);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(1000);
+}` } },
+            { id: 'example-bare-minimum', label: 'Bare Minimum', action: { type: 'load-example', name: 'BareMinimum', content: `void setup() {
+  // put your setup code here, to run once:
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+}` } },
+            { id: 'example-analog-read', label: 'Analog Read Serial', action: { type: 'load-example', name: 'AnalogReadSerial', content: `int sensorValue = 0;
+
+void setup() {
+  Serial.begin(9600);
+}
+
+void loop() {
+  sensorValue = analogRead(A0);
+  Serial.println(sensorValue);
+  delay(100);
+}` } },
+          ],
+        },
+        { id: 'file-save-separator', type: 'separator' },
+        { id: 'save-file', label: 'Save', shortcut: 'Ctrl S', action: { type: 'save-file' } },
+        { id: 'save-file-as', label: 'Save As...', shortcut: 'Ctrl Shift S', action: { type: 'save-file-as' } },
+        { id: 'file-location-separator', type: 'separator' },
+        { id: 'show-sketch-folder', label: 'Reveal in File Explorer', shortcut: 'Ctrl K', action: { type: 'show-sketch-folder' } },
+        { id: 'file-exit-separator', type: 'separator' },
+        { id: 'exit', label: 'Exit', onSelect: () => controlWindow('close') },
+      ],
+    },
+    {
+      id: 'edit',
+      label: 'Edit',
+      items: [
+        { id: 'undo', label: 'Undo', shortcut: 'Ctrl Z', action: { type: 'undo' } },
+        { id: 'redo', label: 'Redo', shortcut: 'Ctrl Y', action: { type: 'redo' } },
+        { id: 'edit-clipboard-separator', type: 'separator' },
+        { id: 'cut', label: 'Cut', shortcut: 'Ctrl X', action: { type: 'cut' } },
+        { id: 'copy', label: 'Copy', shortcut: 'Ctrl C', action: { type: 'copy' } },
+        { id: 'paste', label: 'Paste', shortcut: 'Ctrl V', action: { type: 'paste' } },
+        { id: 'select-all', label: 'Select All', shortcut: 'Ctrl A', action: { type: 'select-all' } },
+        { id: 'edit-search-separator', type: 'separator' },
+        { id: 'find', label: 'Find', shortcut: 'Ctrl F', action: { type: 'find' } },
+        { id: 'find-workspace', label: 'Find in Files', shortcut: 'Ctrl Shift F', disabled: !workspaceSearchAvailable, action: { type: 'find-in-workspace' } },
+        { id: 'find-next', label: 'Find Next', shortcut: 'Ctrl G', action: { type: 'find-next' } },
+        { id: 'find-previous', label: 'Find Previous', shortcut: 'Ctrl Shift G', action: { type: 'find-previous' } },
+        { id: 'edit-code-separator', type: 'separator' },
+        { id: 'toggle-comment', label: 'Comment / Uncomment', shortcut: 'Ctrl /', action: { type: 'toggle-comment' } },
+        { id: 'format-document', label: 'Format Document', shortcut: 'Ctrl T', action: { type: 'format-document' } },
+      ],
+    },
+    {
+      id: 'view',
+      label: 'View',
+      items: [
+        { id: 'show-explorer', label: 'Explorer', action: { type: 'show-explorer' } },
+        { id: 'show-boards', label: 'Boards', action: { type: 'show-boards' } },
+        { id: 'show-libraries', label: 'Libraries', action: { type: 'show-libraries' } },
+        { id: 'show-git', label: 'Git', action: { type: 'show-git' } },
+        { id: 'show-platforms', label: 'Board Platforms', action: { type: 'show-platforms' } },
+        { id: 'view-panels-separator', type: 'separator' },
+        { id: 'toggle-left-panel', label: leftPanelOpen ? 'Hide Left Panel' : 'Show Left Panel', onSelect: onToggleLeftPanel },
+        { id: 'toggle-right-panel', label: rightPanelOpen ? 'Hide Right Panel' : 'Show Right Panel', onSelect: onToggleRightPanel },
+        { id: 'toggle-bottom-panel', label: bottomPanelOpen ? 'Hide Bottom Panel' : 'Show Bottom Panel', onSelect: onToggleBottomPanel },
+        { id: 'show-output', label: 'Output', action: { type: 'show-output' } },
+        { id: 'show-terminal', label: 'Terminal', shortcut: 'Ctrl Shift M', action: { type: 'toggle-terminal' } },
+        { id: 'show-my-projects', label: 'My Projects', action: { type: 'show-my-projects' } },
+        { id: 'view-settings-separator', type: 'separator' },
+        { id: 'settings', label: 'Settings', onSelect: onOpenSettings },
+      ],
+    },
+    {
+      id: 'sketch',
+      label: 'Sketch',
+      items: [
+        { id: 'compile', label: 'Verify / Compile', shortcut: 'Ctrl R', action: { type: 'compile' } },
+        { id: 'upload', label: 'Upload OTA Firmware', shortcut: 'Ctrl U', action: { type: 'upload-cloud' } },
+        { id: 'sketch-tools-separator', type: 'separator' },
+        { id: 'manage-libraries', label: 'Manage Libraries...', action: { type: 'open-library-manager' } },
+        { id: 'boards-manager', label: 'Boards Manager...', action: { type: 'open-board-manager' } },
+        { id: 'install-esp32', label: 'Install ESP32 Support', action: { type: 'install-esp32-support' } },
+      ],
+    },
+    {
+      id: 'help',
+      label: 'Help',
+      items: [
+        { id: 'getting-started', label: 'Getting Started', onSelect: () => openMenuExternalLink('https://docs.arduino.cc/learn/starting-guide/getting-started-arduino') },
+        { id: 'arduino-reference', label: 'Arduino Reference', onSelect: () => openMenuExternalLink('https://www.arduino.cc/reference/en/') },
+        { id: 'help-about-separator', type: 'separator' },
+        { id: 'about', label: 'About Tantalum IDE', action: { type: 'about' } },
+      ],
+    },
+  ];
+
+  const renderMenuItems = (items: TitlebarMenuItem[]) =>
+    items.map((item) => {
+      if (isMenuSeparator(item)) {
+        return <div key={item.id} className="titlebar-menu-separator" role="separator" />;
+      }
+
+      const hasSubmenu = Boolean(item.submenu?.length);
+
+      return (
+        <div key={item.id} className={`titlebar-menu-row ${hasSubmenu ? 'has-submenu' : ''}`} role="none">
+          <button
+            type="button"
+            role="menuitem"
+            title={item.title}
+            disabled={item.disabled}
+            aria-haspopup={hasSubmenu ? 'menu' : undefined}
+            onClick={() => {
+              if (item.disabled || hasSubmenu) {
+                return;
+              }
+
+              if (item.action) {
+                sendMenuAction(item.action);
+                return;
+              }
+
+              if (item.onSelect) {
+                runMenuCommand(item.onSelect);
+              }
+            }}
+          >
+            <span className="titlebar-menu-label">{item.label}</span>
+            {item.shortcut ? <span className="titlebar-menu-shortcut">{item.shortcut}</span> : <span />}
+            {hasSubmenu ? <ChevronRight size={13} /> : null}
+          </button>
+          {hasSubmenu ? (
+            <div className="titlebar-submenu-panel" role="menu">
+              {renderMenuItems(item.submenu ?? [])}
+            </div>
+          ) : null}
+        </div>
+      );
+    });
 
   return (
     <header className="app-titlebar flex h-[44px] items-center border-b">
@@ -204,10 +771,24 @@ function AppTitleBar({
         >
           <PanelLeft size={16} />
         </button>
-        <button className="titlebar-icon-button muted" type="button" title="Back" disabled>
+        <button
+          className={`titlebar-icon-button ${canNavigateBack ? '' : 'muted'}`}
+          type="button"
+          onClick={onNavigateBack}
+          title="Back"
+          aria-label="Back"
+          disabled={!canNavigateBack}
+        >
           <ArrowLeft size={16} />
         </button>
-        <button className="titlebar-icon-button muted" type="button" title="Forward" disabled>
+        <button
+          className={`titlebar-icon-button ${canNavigateForward ? '' : 'muted'}`}
+          type="button"
+          onClick={onNavigateForward}
+          title="Forward"
+          aria-label="Forward"
+          disabled={!canNavigateForward}
+        >
           <ArrowRight size={16} />
         </button>
         {view === 'settings' ? (
@@ -216,17 +797,47 @@ function AppTitleBar({
             Back to app
           </button>
         ) : null}
-        <nav className="titlebar-menu" aria-label="Application menu">
-          {['File', 'Edit', 'View', 'Window', 'Help'].map((label) => (
-            <button key={label} type="button">
-              {label}
-            </button>
+        <nav className="titlebar-menu" ref={titlebarMenuRef} aria-label="Application menu" role="menubar">
+          {menuGroups.map((menu) => (
+            <div key={menu.id} className="titlebar-menu-group" role="none" onPointerEnter={() => switchOpenMenu(menu.id)}>
+              <button
+                className={`titlebar-menu-trigger ${openMenu === menu.id ? 'active' : ''}`}
+                type="button"
+                role="menuitem"
+                aria-haspopup="menu"
+                aria-expanded={openMenu === menu.id}
+                onClick={() => toggleMenu(menu.id)}
+              >
+                {menu.label}
+              </button>
+              {openMenu === menu.id ? (
+                <div className="titlebar-menu-dropdown" role="menu">
+                  {renderMenuItems(menu.items)}
+                </div>
+              ) : null}
+            </div>
           ))}
         </nav>
       </div>
 
       <div className="titlebar-drag-region" onDoubleClick={() => controlWindow('maximize')}>
-        <span>{titleText}</span>
+        {view === 'workspace' ? (
+          <button
+            className={`titlebar-search-pill ${workspaceSearchOpen ? 'active' : ''}`}
+            type="button"
+            onClick={onOpenWorkspaceSearch}
+            disabled={!workspaceSearchAvailable}
+            title={workspaceSearchAvailable ? 'Search workspace' : 'Open a folder to search'}
+            aria-haspopup="dialog"
+            aria-expanded={workspaceSearchOpen}
+          >
+            <Search size={14} />
+            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open folder to search'}</span>
+            <kbd>Ctrl Shift F</kbd>
+          </button>
+        ) : (
+          <span>{titleText}</span>
+        )}
       </div>
 
       <div className="titlebar-right">
@@ -261,7 +872,10 @@ function AppTitleBar({
           <button
             className={`account-menu-trigger ${accountMenuOpen ? 'active' : ''}`}
             type="button"
-            onClick={() => setAccountMenuOpen((current) => !current)}
+            onClick={() => {
+              setOpenMenu(null);
+              setAccountMenuOpen((current) => !current);
+            }}
             title={displayName}
             aria-haspopup="menu"
             aria-expanded={accountMenuOpen}

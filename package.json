@@ -20,6 +20,7 @@
     "build:mac": "npm run build:renderer && electron-builder --mac"
   },
   "dependencies": {
+    "@vscode/ripgrep": "^1.18.0",
     "appwrite": "^13.0.0",
     "bcryptjs": "^2.4.3",
     "electron-store": "^11.0.2",

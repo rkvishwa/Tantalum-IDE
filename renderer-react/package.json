@@ -11,11 +11,12 @@
   },
   "dependencies": {
     "@knurdz/jack-editor-tab": "^0.1.1",
-    "@knurdz/jack-file-tree": "^0.2.7",
+    "@knurdz/jack-file-tree": "^0.2.9",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-context-menu": "^2.2.16",
     "appwrite": "^13.0.2",
     "lucide-react": "^0.563.0",
+    "material-icon-theme": "^5.34.0",
     "monaco-editor": "^0.55.1",
     "react": "^19.2.0",
     "react-complex-tree": "^2.6.1",

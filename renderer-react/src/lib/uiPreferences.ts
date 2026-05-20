@@ -19,15 +19,17 @@ export type UiPreferences = {
   editorFormatOnType: boolean;
   editorFormatOnPaste: boolean;
   editorBracketPairs: boolean;
+  editorAutoSave: boolean;
 };
 
 const LEGACY_VS_CODE_FONT_FAMILY = "'Segoe WPC', 'Segoe UI', system-ui, sans-serif";
 
+export const SYSTEM_FONT_FAMILY = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 export const VS_CODE_FONT_FAMILY = "'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
 export const VS_CODE_MONO_FONT_FAMILY = "Consolas, 'Courier New', monospace";
 
 export const FONT_FAMILY_OPTIONS = [
-  { label: 'Codex / VS Code default', value: VS_CODE_FONT_FAMILY },
+  { label: 'System default', value: SYSTEM_FONT_FAMILY },
   { label: 'Segoe UI', value: "'Segoe UI', system-ui, sans-serif" },
   { label: 'Consolas', value: VS_CODE_MONO_FONT_FAMILY },
   { label: 'Cascadia Code', value: "'Cascadia Code', Consolas, monospace" },
@@ -38,11 +40,11 @@ export const ACCENT_PRESETS = ['#0078d4', '#3794ff', '#c586c0', '#4ec9b0', '#d7b
 
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   theme: 'system',
-  fontFamily: VS_CODE_FONT_FAMILY,
+  fontFamily: SYSTEM_FONT_FAMILY,
   fontSize: 13,
   accentColor: '#0078d4',
   editorFontFamily: VS_CODE_MONO_FONT_FAMILY,
-  editorFontSize: 13,
+  editorFontSize: 14,
   editorTabSize: 2,
   editorWordWrap: 'off',
   editorMinimap: true,
@@ -55,6 +57,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   editorFormatOnType: true,
   editorFormatOnPaste: true,
   editorBracketPairs: true,
+  editorAutoSave: false,
 };
 
 const STORAGE_KEY = 'tantalum-ui-preferences';
@@ -103,7 +106,10 @@ export function normalizeUiPreferences(preferences: Partial<UiPreferences>): UiP
     ? clamp(Number(preferences.editorTabSize), 2, 8)
     : DEFAULT_UI_PREFERENCES.editorTabSize;
   const fontFamily =
-    typeof preferences.fontFamily === 'string' && preferences.fontFamily.trim() && preferences.fontFamily !== LEGACY_VS_CODE_FONT_FAMILY
+    typeof preferences.fontFamily === 'string' &&
+    preferences.fontFamily.trim() &&
+    preferences.fontFamily !== LEGACY_VS_CODE_FONT_FAMILY &&
+    preferences.fontFamily !== VS_CODE_FONT_FAMILY
       ? preferences.fontFamily
       : DEFAULT_UI_PREFERENCES.fontFamily;
   const editorFontFamily =
@@ -140,6 +146,7 @@ export function normalizeUiPreferences(preferences: Partial<UiPreferences>): UiP
     editorFormatOnType: typeof preferences.editorFormatOnType === 'boolean' ? preferences.editorFormatOnType : DEFAULT_UI_PREFERENCES.editorFormatOnType,
     editorFormatOnPaste: typeof preferences.editorFormatOnPaste === 'boolean' ? preferences.editorFormatOnPaste : DEFAULT_UI_PREFERENCES.editorFormatOnPaste,
     editorBracketPairs: typeof preferences.editorBracketPairs === 'boolean' ? preferences.editorBracketPairs : DEFAULT_UI_PREFERENCES.editorBracketPairs,
+    editorAutoSave: typeof preferences.editorAutoSave === 'boolean' ? preferences.editorAutoSave : DEFAULT_UI_PREFERENCES.editorAutoSave,
   };
 }
 

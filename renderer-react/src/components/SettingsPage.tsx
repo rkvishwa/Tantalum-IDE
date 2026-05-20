@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Models } from 'appwrite';
-import { Code2, Cpu, Monitor, Moon, Palette, Plus, RotateCcw, Sun, Type } from 'lucide-react';
+import { Code2, Cpu, GitBranch, KeyRound, Monitor, Moon, Palette, Plus, RotateCcw, Save, Sun, Type } from 'lucide-react';
 
 import { createBoard, deleteBoard, listBoards } from '@/lib/boards';
 import { hasRequiredCloudConfiguration } from '@/lib/config';
@@ -8,6 +8,7 @@ import { hasRequiredCloudConfiguration } from '@/lib/config';
 import type { BoardDocument, BoardInput } from '@/lib/models';
 import { ACCENT_PRESETS, FONT_FAMILY_OPTIONS, type ThemePreference, type UiPreferences } from '@/lib/uiPreferences';
 import { calculateBoardStatus } from '@/lib/utils';
+import type { GitConfiguration, GitProvider } from '@/types/electron';
 
 import { AgentPanel } from './AgentPanel';
 import { Modal } from './Modal';
@@ -17,9 +18,13 @@ type SettingsPageProps = {
   version: string;
   user: Models.User<Models.Preferences>;
   preferences: UiPreferences;
+  activeTab: SettingsTab;
+  onActiveTabChange: (tab: SettingsTab) => void;
   onPreferencesChange: (preferences: UiPreferences) => void;
   onResetPreferences: () => void;
 };
+
+export type SettingsTab = 'appearance' | 'editor' | 'agent' | 'git' | 'boards';
 
 const BOARD_OPTIONS = [
   { value: 'esp32:esp32:esp32', label: 'ESP32 DevKit' },
@@ -30,13 +35,34 @@ const BOARD_OPTIONS = [
   { value: 'arduino:avr:uno', label: 'Arduino Uno' },
 ];
 
-export function SettingsPage({ appName, version, user, preferences, onPreferencesChange, onResetPreferences }: SettingsPageProps) {
-  const [activeTab, setActiveTab] = useState<'appearance' | 'editor' | 'agent' | 'boards'>('appearance');
-  
+const EMPTY_GIT_CONFIGURATION: GitConfiguration = {
+  defaultProvider: 'github',
+  githubUsername: '',
+  gitlabUsername: '',
+  gitUserName: '',
+  gitUserEmail: '',
+  githubTokenConfigured: false,
+  gitlabTokenConfigured: false,
+};
+
+export function SettingsPage({
+  appName,
+  version,
+  user,
+  preferences,
+  activeTab,
+  onActiveTabChange,
+  onPreferencesChange,
+  onResetPreferences,
+}: SettingsPageProps) {
   const [boards, setBoards] = useState<BoardDocument[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
   const [boardModalOpen, setBoardModalOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [gitConfiguration, setGitConfiguration] = useState<GitConfiguration>(EMPTY_GIT_CONFIGURATION);
+  const [gitConfigMessage, setGitConfigMessage] = useState('');
+  const [gitConfigError, setGitConfigError] = useState('');
+  const [gitTokenInputs, setGitTokenInputs] = useState({ githubToken: '', gitlabToken: '' });
   const [boardForm, setBoardForm] = useState<BoardInput>({
     name: '',
     boardType: 'esp32:esp32:esp32',
@@ -93,6 +119,57 @@ export function SettingsPage({ appName, version, user, preferences, onPreference
   useEffect(() => {
     // Left intentionally empty or we can just remove it
   }, [selectedBoardId]);
+
+  async function refreshGitConfiguration() {
+    const result = await window.tantalum.git.getConfiguration();
+    if (result.success) {
+      setGitConfiguration(result.config);
+      setGitConfigError('');
+      return;
+    }
+
+    setGitConfigError(result.error);
+  }
+
+  async function handleSaveGitConfiguration(options: { clearGithubToken?: boolean; clearGitlabToken?: boolean } = {}) {
+    setBusyAction('save-git-config');
+    setGitConfigMessage('');
+    setGitConfigError('');
+
+    const result = await window.tantalum.git.setConfiguration({
+      defaultProvider: gitConfiguration.defaultProvider,
+      githubUsername: gitConfiguration.githubUsername,
+      gitlabUsername: gitConfiguration.gitlabUsername,
+      gitUserName: gitConfiguration.gitUserName,
+      gitUserEmail: gitConfiguration.gitUserEmail,
+      githubToken: gitTokenInputs.githubToken,
+      gitlabToken: gitTokenInputs.gitlabToken,
+      clearGithubToken: options.clearGithubToken,
+      clearGitlabToken: options.clearGitlabToken,
+    });
+
+    if (result.success) {
+      setGitConfiguration(result.config);
+      setGitTokenInputs({ githubToken: '', gitlabToken: '' });
+      setGitConfigMessage('Git configuration saved.');
+    } else {
+      setGitConfigError(result.error);
+    }
+
+    setBusyAction(null);
+  }
+
+  function updateGitConfiguration(nextConfiguration: Partial<GitConfiguration>) {
+    setGitConfiguration((current) => ({ ...current, ...nextConfiguration }));
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'git') {
+      return;
+    }
+
+    void refreshGitConfiguration();
+  }, [activeTab]);
 
   async function handleCreateBoard(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -179,10 +256,11 @@ export function SettingsPage({ appName, version, user, preferences, onPreference
           <h2>Settings</h2>
         </div>
         <nav className="settings-nav">
-          <button className={activeTab === 'appearance' ? 'active' : ''} onClick={() => setActiveTab('appearance')}>Appearance</button>
-          <button className={activeTab === 'editor' ? 'active' : ''} onClick={() => setActiveTab('editor')}>Editor</button>
-          <button className={activeTab === 'agent' ? 'active' : ''} onClick={() => setActiveTab('agent')}>Agent Configuration</button>
-          <button className={activeTab === 'boards' ? 'active' : ''} onClick={() => setActiveTab('boards')}>Device Management</button>
+          <button className={activeTab === 'appearance' ? 'active' : ''} onClick={() => onActiveTabChange('appearance')}>Appearance</button>
+          <button className={activeTab === 'editor' ? 'active' : ''} onClick={() => onActiveTabChange('editor')}>Editor</button>
+          <button className={activeTab === 'agent' ? 'active' : ''} onClick={() => onActiveTabChange('agent')}>Agent Configuration</button>
+          <button className={activeTab === 'git' ? 'active' : ''} onClick={() => onActiveTabChange('git')}>Git Configuration</button>
+          <button className={activeTab === 'boards' ? 'active' : ''} onClick={() => onActiveTabChange('boards')}>Device Management</button>
         </nav>
       </div>
       
@@ -407,6 +485,7 @@ export function SettingsPage({ appName, version, user, preferences, onPreference
                   {renderToggleSetting('editorFormatOnType', 'Format On Type', 'Format supported syntax while you type.')}
                   {renderToggleSetting('editorFormatOnPaste', 'Format On Paste', 'Format supported syntax when pasting code.')}
                   {renderToggleSetting('editorBracketPairs', 'Bracket Pair Guides', 'Highlight matching brackets and show bracket pair guides.')}
+                  {renderToggleSetting('editorAutoSave', 'Auto Save', 'Automatically save existing files shortly after edits.')}
                 </div>
               </section>
             </div>
@@ -427,6 +506,112 @@ export function SettingsPage({ appName, version, user, preferences, onPreference
               defaultView="settings" 
               hideChat={true} 
             />
+          </div>
+        )}
+
+        {activeTab === 'git' && (
+          <div className="settings-pane git-settings-pane">
+            <div className="settings-pane-header">
+              <div>
+                <h2>Git Configuration</h2>
+                <p className="text-muted">Configure Git identity and publishing credentials for GitHub or GitLab.</p>
+              </div>
+              <button className="primary-button compact" type="button" onClick={() => void handleSaveGitConfiguration()} disabled={busyAction === 'save-git-config'}>
+                <Save size={15} /> Save
+              </button>
+            </div>
+
+            {gitConfigError ? <div className="inline-banner inline-banner-error">{gitConfigError}</div> : null}
+            {gitConfigMessage ? <div className="inline-banner inline-banner-success">{gitConfigMessage}</div> : null}
+
+            <div className="appearance-grid">
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <GitBranch size={18} />
+                  <div>
+                    <h3>Identity</h3>
+                    <p>Stored in your global Git config and used for commits.</p>
+                  </div>
+                </div>
+                <div className="settings-form-grid">
+                  <label>
+                    Git user name
+                    <input value={gitConfiguration.gitUserName} onChange={(event) => updateGitConfiguration({ gitUserName: event.target.value })} placeholder="Your Name" />
+                  </label>
+                  <label>
+                    Git user email
+                    <input value={gitConfiguration.gitUserEmail} onChange={(event) => updateGitConfiguration({ gitUserEmail: event.target.value })} placeholder="you@example.com" />
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <KeyRound size={18} />
+                  <div>
+                    <h3>Provider</h3>
+                    <p>Used by Publish Repository when creating hosted remotes.</p>
+                  </div>
+                </div>
+                <div className="settings-form-grid">
+                  <label>
+                    Default provider
+                    <select value={gitConfiguration.defaultProvider} onChange={(event) => updateGitConfiguration({ defaultProvider: event.target.value as GitProvider })}>
+                      <option value="github">GitHub</option>
+                      <option value="gitlab">GitLab</option>
+                    </select>
+                  </label>
+                  <label>
+                    GitHub username
+                    <input value={gitConfiguration.githubUsername} onChange={(event) => updateGitConfiguration({ githubUsername: event.target.value })} placeholder="github-user" />
+                  </label>
+                  <label>
+                    GitLab username
+                    <input value={gitConfiguration.gitlabUsername} onChange={(event) => updateGitConfiguration({ gitlabUsername: event.target.value })} placeholder="gitlab-user" />
+                  </label>
+                </div>
+              </section>
+
+              <section className="settings-card settings-list-card git-token-card">
+                <div className="settings-card-heading">
+                  <KeyRound size={18} />
+                  <div>
+                    <h3>Tokens</h3>
+                    <p>Tokens stay in the local desktop secret store and are used only for creating and publishing remotes.</p>
+                  </div>
+                </div>
+                <div className="settings-form-grid">
+                  <label>
+                    GitHub token
+                    <input
+                      type="password"
+                      value={gitTokenInputs.githubToken}
+                      onChange={(event) => setGitTokenInputs((current) => ({ ...current, githubToken: event.target.value }))}
+                      placeholder={gitConfiguration.githubTokenConfigured ? 'Configured' : 'ghp_...'}
+                    />
+                  </label>
+                  <label>
+                    GitLab token
+                    <input
+                      type="password"
+                      value={gitTokenInputs.gitlabToken}
+                      onChange={(event) => setGitTokenInputs((current) => ({ ...current, gitlabToken: event.target.value }))}
+                      placeholder={gitConfiguration.gitlabTokenConfigured ? 'Configured' : 'glpat-...'}
+                    />
+                  </label>
+                </div>
+                <div className="git-token-actions">
+                  <span>{gitConfiguration.githubTokenConfigured ? 'GitHub token configured' : 'No GitHub token'}</span>
+                  <button className="secondary-button compact" type="button" onClick={() => void handleSaveGitConfiguration({ clearGithubToken: true })} disabled={!gitConfiguration.githubTokenConfigured || busyAction === 'save-git-config'}>
+                    Clear GitHub token
+                  </button>
+                  <span>{gitConfiguration.gitlabTokenConfigured ? 'GitLab token configured' : 'No GitLab token'}</span>
+                  <button className="secondary-button compact" type="button" onClick={() => void handleSaveGitConfiguration({ clearGitlabToken: true })} disabled={!gitConfiguration.gitlabTokenConfigured || busyAction === 'save-git-config'}>
+                    Clear GitLab token
+                  </button>
+                </div>
+              </section>
+            </div>
           </div>
         )}
 

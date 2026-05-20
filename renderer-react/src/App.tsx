@@ -9,11 +9,12 @@ import { AppShell } from './components/AppShell';
 type AppInfo = {
   appName: string;
   version: string;
+  platform: string;
 };
 
 function App() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null | undefined>(undefined);
-  const [appInfo, setAppInfo] = useState<AppInfo>({ appName: 'Tantalum IDE', version: '1.0.0' });
+  const [appInfo, setAppInfo] = useState<AppInfo>({ appName: 'Tantalum IDE', version: '1.0.0', platform: navigator.platform });
 
   useEffect(() => {
     let mounted = true;
@@ -23,7 +24,7 @@ function App() {
       void desktopApp.getInfo()
         .then((result) => {
           if (mounted && result.success) {
-            setAppInfo({ appName: result.appName, version: result.version });
+            setAppInfo({ appName: result.appName, version: result.version, platform: result.platform });
           }
         })
         .catch(() => {});
@@ -62,7 +63,7 @@ function App() {
     return <AuthScreen appName={appInfo.appName} onAuthenticated={setUser} />;
   }
 
-  return <AppShell appName={appInfo.appName} version={appInfo.version} user={user} onSignedOut={() => setUser(null)} />;
+  return <AppShell appName={appInfo.appName} version={appInfo.version} platform={appInfo.platform} user={user} onSignedOut={() => setUser(null)} />;
 }
 
 type AppInfoResult =
