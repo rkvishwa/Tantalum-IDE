@@ -498,9 +498,6 @@ export function SettingsPage({
               user={user} 
               workspacePath={null} 
               activeTab={null} 
-              onFileContentApplied={() => {}} 
-              onPathDeleted={() => {}} 
-              onRefreshWorkspace={() => {}} 
               pushConsole={() => {}} 
               pushToast={() => {}} 
               defaultView="settings" 

@@ -1,8 +1,6 @@
 import crypto from 'node:crypto';
 
-import sdk from 'node-appwrite';
-
-const { Account, Client, Databases, ID, Permission, Role } = sdk;
+import { Account, Client, Databases, ID, Permission, Role } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,

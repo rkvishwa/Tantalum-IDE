@@ -1,8 +1,6 @@
 import crypto from 'node:crypto';
 
-import sdk from 'node-appwrite';
-
-const { Client, Databases, Query } = sdk;
+import { Client, Databases, Query } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,

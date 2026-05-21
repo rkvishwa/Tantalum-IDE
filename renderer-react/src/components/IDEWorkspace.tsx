@@ -57,6 +57,8 @@ import {
 import type { editor } from 'monaco-editor';
 
 import { createBoard, deleteBoard, listBoards, rotateBoardToken, updateBoard } from '@/lib/boards';
+import { createAgentThreadMessage } from '@/lib/agent';
+import { buildAgentDiffRows, previewContentForAgentChange } from '@/lib/agentDiff';
 import { appwriteConfig, hasBoardAdminFunction, hasDeviceGatewayFunction, hasRequiredCloudConfiguration } from '@/lib/config';
 import {
   configureArduinoCppLanguageSupport,
@@ -77,9 +79,10 @@ import {
   sha256Hex,
 } from '@/lib/utils';
 import type { GitStatus, MenuAction, ProjectFolder, WorkspaceReplaceChangedFile, WorkspaceSearchResult } from '@/types/electron';
+import type { AgentChangePreview } from '@/types/electron';
 
 import { ConsoleTerminal } from './ConsoleTerminal';
-import { AgentPanel } from './AgentPanel';
+import { AgentPanel, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
 import { GitHistoryPanel, GitSourceControlPanel, GitWorkspace } from './GitWorkspace';
 import { useGitWorkspaceController } from './useGitWorkspaceController';
 import { Modal } from './Modal';
@@ -94,10 +97,12 @@ type IDEWorkspaceProps = {
   user: Models.User<Models.Preferences>;
   onSignedOut: () => void;
   onOpenSettings?: () => void;
+  onOpenAgentSettings?: () => void;
   sidebar: SidebarView;
   onSidebarChange: (sidebar: SidebarView) => void;
   leftPanelOpen: boolean;
   rightPanelOpen: boolean;
+  onRightPanelOpenChange: (open: boolean) => void;
   bottomPanelOpen: boolean;
   onBottomPanelOpenChange: (open: boolean) => void;
   onWorkspaceTitleChange?: (title: string) => void;
@@ -113,11 +118,20 @@ type FileTabState = 'temporary' | 'preview' | 'saved';
 type ProjectSortMode = 'recent' | 'name' | 'favorites';
 type ProjectViewMode = 'grid' | 'list';
 
+type AgentPreviewState = {
+  reviewId: string;
+  changeType: AgentChangePreview['changeType'];
+  originalContent: string;
+  nextContent: string;
+  wasOpen: boolean;
+};
+
 type FileTab = EditorTabItem & {
   id: string;
   content: string;
   savedContent: string;
   fileState: FileTabState;
+  agentPreview?: AgentPreviewState;
 };
 
 function getFileTabSavedContent(tab: FileTab) {
@@ -334,6 +348,7 @@ void loop() {
 `;
 
 const FILE_TREE_INTERNAL_TRASH_DIR = '.tantalum-file-tree-trash';
+const AGENT_LIVE_REVIEW_STORAGE_PREFIX = 'tantalum-agent-live-review:';
 
 const FILE_TREE_THEME: FileTreeTheme = {
   backgroundPrimary: 'var(--chrome-panel-bg)',
@@ -356,6 +371,66 @@ const FILE_TREE_THEME: FileTreeTheme = {
   openFolderButtonBorder: 'rgba(255, 255, 255, 0.42)',
   fontFamily: 'var(--system-font-family)',
 };
+
+function agentLiveReviewStorageKey(workspacePath: string) {
+  return `${AGENT_LIVE_REVIEW_STORAGE_PREFIX}${encodeURIComponent(workspacePath)}`;
+}
+
+function readStoredAgentReview(workspacePath: string): AgentPendingReview | null {
+  try {
+    const raw = localStorage.getItem(agentLiveReviewStorageKey(workspacePath));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as AgentPendingReview;
+    if (!parsed || typeof parsed.id !== 'string' || typeof parsed.threadId !== 'string' || !Array.isArray(parsed.files)) {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredAgentReview(workspacePath: string, review: AgentPendingReview | null) {
+  try {
+    const key = agentLiveReviewStorageKey(workspacePath);
+    if (!review) {
+      localStorage.removeItem(key);
+      return;
+    }
+
+    localStorage.setItem(key, JSON.stringify(review));
+  } catch {
+    // Persistence is best-effort; the in-memory review state still works.
+  }
+}
+
+async function validateStoredAgentReview(workspacePath: string, review: AgentPendingReview | null) {
+  if (!review) {
+    return null;
+  }
+
+  for (const change of review.files) {
+    const targetPath = joinPath(workspacePath, change.path);
+    const current = await window.tantalum.fs.readFile(targetPath);
+
+    if (change.changeType === 'delete') {
+      if (current.success) {
+        return null;
+      }
+      continue;
+    }
+
+    if (!current.success || current.content !== change.nextContent) {
+      return null;
+    }
+  }
+
+  return review;
+}
 
 const FILE_TREE_CONTEXT_MENU_ICONS: Record<FileTreeContextMenuActionId, LucideIcon> = {
   'new-file': FilePlus2,
@@ -776,10 +851,12 @@ export function IDEWorkspace({
   user,
   onSignedOut,
   onOpenSettings,
+  onOpenAgentSettings,
   sidebar,
   onSidebarChange,
   leftPanelOpen,
   rightPanelOpen,
+  onRightPanelOpenChange,
   bottomPanelOpen,
   onBottomPanelOpenChange,
   onWorkspaceTitleChange,
@@ -799,6 +876,9 @@ export function IDEWorkspace({
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [editorValue, setEditorValue] = useState('');
   const [editorReady, setEditorReady] = useState(false);
+  const [pendingAgentReview, setPendingAgentReview] = useState<AgentPendingReview | null>(null);
+  const [resolvingAgentReview, setResolvingAgentReview] = useState(false);
+  const [agentReviewNotice, setAgentReviewNotice] = useState<AgentReviewResolutionNotice | null>(null);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>(() => [
     { id: Date.now(), level: 'info', message: 'Ready. Open a folder or start writing firmware.' },
   ]);
@@ -899,6 +979,8 @@ export function IDEWorkspace({
   }, [deferredProjectQuery, projectFolders, projectSortMode]);
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
+  const agentDiffDecorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const agentDiffViewZoneIdsRef = useRef<string[]>([]);
   const tabsRef = useRef<FileTab[]>(tabs);
   const activeTabIdRef = useRef<string | null>(activeTabId);
   const editorValueRef = useRef(editorValue);
@@ -906,6 +988,8 @@ export function IDEWorkspace({
   const saveInProgressRef = useRef(false);
   const consoleOutputRef = useRef<HTMLDivElement | null>(null);
   const toastCounterRef = useRef(1);
+  const agentReviewIdCounterRef = useRef(1);
+  const agentReviewNoticeCounterRef = useRef(1);
   const [treeTrashMap] = useState(() => new Map<string, string>());
   const panelSizesRef = useRef<PanelSizes>(panelSizes);
   const resizeSessionRef = useRef<ResizeSession | null>(null);
@@ -913,6 +997,18 @@ export function IDEWorkspace({
   const activeEditorFilePath = activeTab?.path.startsWith('untitled:') ? activeTab.name : activeTab?.path;
   const activeEditorLanguage = getEditorLanguage(activeEditorFilePath);
   const activeEditorPath = toMonacoPath(activeTab?.path);
+  const activeAgentChange = useMemo(() => {
+    if (!pendingAgentReview || !activeTab || !workspacePath) {
+      return null;
+    }
+
+    return (
+      pendingAgentReview.files.find((file) => {
+        const targetPath = joinPath(workspacePath, file.path);
+        return isSameFileTabPath(targetPath, activeTab.path);
+      }) ?? null
+    );
+  }, [activeTab, pendingAgentReview, workspacePath]);
   const dirtyWorkspaceFilePaths = useMemo(
     () => syncedTabs.filter((tab) => !tab.path.startsWith('untitled:') && tab.isDirty).map((tab) => tab.path),
     [syncedTabs],
@@ -930,6 +1026,14 @@ export function IDEWorkspace({
   useEffect(() => {
     onWorkspaceTitleChange?.(workspacePath ? fileNameFromPath(workspacePath) : '');
   }, [onWorkspaceTitleChange, workspacePath]);
+
+  useEffect(() => {
+    if (!workspacePath) {
+      return;
+    }
+
+    writeStoredAgentReview(workspacePath, pendingAgentReview);
+  }, [pendingAgentReview, workspacePath]);
 
   useEffect(() => {
     if (projectFolders.length === 0) {
@@ -1471,6 +1575,16 @@ export function IDEWorkspace({
 
     treeTrashMap.clear();
     setWorkspacePath(result.path);
+    const storedReview = readStoredAgentReview(result.path);
+    setPendingAgentReview(storedReview);
+    if (storedReview) {
+      void validateStoredAgentReview(result.path, storedReview).then((validReview) => {
+        if (!validReview) {
+          writeStoredAgentReview(result.path, null);
+        }
+        setPendingAgentReview(validReview);
+      });
+    }
     refreshFileTree();
     void refreshGitChangeIndicator(result.path);
     pushConsole(`Opened workspace: ${result.path}`, 'success');
@@ -1894,7 +2008,12 @@ export function IDEWorkspace({
       return;
     }
 
-    const nextTab = createSavedTab(filePath, result.content, { isPreview: shouldPreview });
+    const activeReview = pendingAgentReview;
+    const pendingChange =
+      activeReview?.files.find((file) => isSameFileTabPath(getAgentChangeAbsolutePath(file), filePath)) ?? null;
+    const nextTab = pendingChange && activeReview
+      ? makeAgentPreviewTab(pendingChange, activeReview.id, null)
+      : createSavedTab(filePath, result.content, { isPreview: shouldPreview });
 
     setTabs((current) => {
       const nextTabs = openEditorTab(current, nextTab, { isPreview: shouldPreview });
@@ -2052,6 +2171,11 @@ export function IDEWorkspace({
       activeTab;
 
     if (!tabToSave) {
+      return;
+    }
+
+    if (tabToSave.agentPreview) {
+      pushToast('Keep or revert Tantalum AI changes before saving this file.', 'info');
       return;
     }
 
@@ -2698,44 +2822,403 @@ export function IDEWorkspace({
     void refreshProjectFolders(selectedProjectId);
   }
 
-  function applyAgentFileContent(filePath: string, content: string) {
-    const nextName = fileNameFromPath(filePath);
+  function getAgentChangeAbsolutePath(change: AgentChangePreview) {
+    if (!workspacePath) {
+      return change.path;
+    }
 
-    setTabs((current) => {
-      if (!current.some((tab) => isSameFileTabPath(tab.path, filePath))) {
-        return current;
+    return joinPath(workspacePath, change.path);
+  }
+
+  function makeAgentPreviewTab(change: AgentChangePreview, reviewId: string, existingTab: FileTab | null): FileTab {
+    const filePath = getAgentChangeAbsolutePath(change);
+    const content = previewContentForAgentChange(change);
+    const baseTab = existingTab ?? createSavedTab(filePath, content, { isPreview: false });
+
+    return {
+      ...baseTab,
+      id: filePath,
+      path: filePath,
+      name: fileNameFromPath(filePath),
+      content,
+      savedContent: content,
+      isDirty: false,
+      isPreviewFile: false,
+      type: 'file' as const,
+      fileState: 'saved',
+      agentPreview: {
+        reviewId,
+        changeType: change.changeType,
+        originalContent: change.originalContent,
+        nextContent: change.nextContent,
+        wasOpen: Boolean(existingTab),
+      },
+    };
+  }
+
+  function showAgentPreviewFile(change: AgentChangePreview, reviewId: string) {
+    const filePath = getAgentChangeAbsolutePath(change);
+    setSidebar('explorer');
+
+    const existingTab = tabsRef.current.find((tab) => isSameFileTabPath(tab.path, filePath)) ?? null;
+    const previewTab = makeAgentPreviewTab(change, reviewId, existingTab);
+    const nextTabs = existingTab
+      ? tabsRef.current.map((tab) => (isSameFileTabPath(tab.path, filePath) ? previewTab : tab))
+      : openEditorTab(tabsRef.current, previewTab, { isPreview: false });
+
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    activateTab(previewTab);
+  }
+
+  function mergeAgentReviewFiles(currentFiles: AgentChangePreview[], incomingFiles: AgentChangePreview[]) {
+    const fileMap = new Map(currentFiles.map((file) => [normalizeFileTabPath(file.path), file]));
+
+    incomingFiles.forEach((incoming) => {
+      const key = normalizeFileTabPath(incoming.path);
+      const existing = fileMap.get(key);
+      const originalContent = existing?.originalContent ?? incoming.originalContent;
+      const wasCreatedInReview = existing?.changeType === 'create' || (!existing && incoming.changeType === 'create');
+      const nextContent = incoming.nextContent;
+
+      if (wasCreatedInReview && incoming.changeType === 'delete') {
+        fileMap.delete(key);
+        return;
       }
 
-      const nextTabs = current.map((tab) => {
-        if (!isSameFileTabPath(tab.path, filePath)) {
-          return tab;
+      if (!wasCreatedInReview && incoming.changeType !== 'delete' && nextContent === originalContent) {
+        fileMap.delete(key);
+        return;
+      }
+
+      fileMap.set(key, {
+        ...incoming,
+        changeType: wasCreatedInReview ? 'create' : incoming.changeType === 'delete' ? 'delete' : 'update',
+        originalContent,
+        nextContent,
+      });
+    });
+
+    return [...fileMap.values()].sort((left, right) => left.path.localeCompare(right.path));
+  }
+
+  function refreshAgentPreviewTabs(review: AgentPendingReview) {
+    const reviewMap = new Map(review.files.map((file) => [normalizeFileTabPath(getAgentChangeAbsolutePath(file)), file]));
+    const nextTabs = tabsRef.current.map((tab) => {
+      const change = reviewMap.get(normalizeFileTabPath(tab.path));
+      if (!change) {
+        return tab.agentPreview?.reviewId === review.id ? { ...tab, agentPreview: undefined } : tab;
+      }
+
+      return makeAgentPreviewTab(change, review.id, tab);
+    });
+
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+
+    const activePath = activeTabIdRef.current;
+    const activePreviewTab = activePath ? nextTabs.find((tab) => tab.id === activePath) : null;
+    if (activePreviewTab) {
+      editorValueRef.current = activePreviewTab.content;
+      setEditorValue(activePreviewTab.content);
+    }
+  }
+
+  function handleAgentChangesPrepared(review: AgentPreparedReview) {
+    if (!workspacePath || review.files.length === 0) {
+      return;
+    }
+
+    refreshFileTree();
+    void refreshGitChangeIndicator();
+
+    const previousReview = pendingAgentReview;
+    const reviewId = previousReview?.id ?? `agent-review-${agentReviewIdCounterRef.current++}`;
+    const mergedFiles = mergeAgentReviewFiles(previousReview?.files ?? [], review.files);
+    const nextReview: AgentPendingReview = {
+      ...review,
+      id: reviewId,
+      threadId: previousReview?.threadId ?? review.threadId,
+      files: mergedFiles,
+      createdAt: previousReview?.createdAt ?? new Date().toISOString(),
+    };
+
+    if (nextReview.files.length === 0) {
+      setPendingAgentReview(null);
+      clearAgentPreviewTabs(
+        {
+          ...nextReview,
+          files: previousReview?.files ?? [],
+        },
+        false,
+      );
+      pushToast('Tantalum AI changes returned to the live baseline.', 'info');
+      return;
+    }
+
+    setPendingAgentReview(nextReview);
+    refreshAgentPreviewTabs(nextReview);
+    const preferredChange =
+      nextReview.files.find((file) => review.files.some((incoming) => normalizeFileTabPath(incoming.path) === normalizeFileTabPath(file.path))) ?? nextReview.files[0];
+    showAgentPreviewFile(preferredChange, nextReview.id);
+    pushToast(`${nextReview.files.length} Tantalum AI ${nextReview.files.length === 1 ? 'change' : 'changes'} applied. Keep or revert them in the editor.`, 'info');
+  }
+
+  function clearAgentDiffDecorations() {
+    agentDiffDecorationsRef.current?.clear();
+    agentDiffDecorationsRef.current = null;
+
+    const editorInstance = editorRef.current;
+    const zoneIds = agentDiffViewZoneIdsRef.current;
+    if (editorInstance && zoneIds.length > 0) {
+      editorInstance.changeViewZones((accessor) => {
+        zoneIds.forEach((zoneId) => accessor.removeZone(zoneId));
+      });
+    }
+
+    agentDiffViewZoneIdsRef.current = [];
+  }
+
+  function createDeletedViewZoneNode(lines: string[]) {
+    const node = document.createElement('div');
+    node.className = 'agent-diff-deleted-zone';
+
+    lines.forEach((line) => {
+      const row = document.createElement('div');
+      row.className = 'agent-diff-deleted-zone-line';
+
+      const marker = document.createElement('span');
+      marker.className = 'agent-diff-zone-marker';
+      marker.textContent = '-';
+
+      const code = document.createElement('code');
+      code.textContent = line || ' ';
+
+      row.append(marker, code);
+      node.append(row);
+    });
+
+    return node;
+  }
+
+  function renderAgentDiffDecorations(change: AgentChangePreview | null) {
+    clearAgentDiffDecorations();
+
+    const editorInstance = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editorInstance?.getModel();
+    if (!change || !editorInstance || !monaco || !model) {
+      return;
+    }
+
+    const decorations: editor.IModelDeltaDecoration[] = [];
+    const deletedChunks: Array<{ afterLineNumber: number; lines: string[] }> = [];
+
+    if (change.changeType === 'delete') {
+      const lineCount = Math.max(1, model.getLineCount());
+      for (let lineNumber = 1; lineNumber <= lineCount; lineNumber += 1) {
+        decorations.push({
+          range: new monaco.Range(lineNumber, 1, lineNumber, model.getLineMaxColumn(lineNumber)),
+          options: {
+            isWholeLine: true,
+            className: 'agent-diff-deleted-line',
+            overviewRuler: {
+              color: 'rgba(248, 81, 73, 0.8)',
+              position: monaco.editor.OverviewRulerLane.Right,
+            },
+          },
+        });
+      }
+    } else {
+      let lastNewLine = 0;
+      let activeDeletedChunk: { afterLineNumber: number; lines: string[] } | null = null;
+
+      buildAgentDiffRows(change).forEach((row) => {
+        if (row.kind === 'add' && row.newLine) {
+          activeDeletedChunk = null;
+          lastNewLine = row.newLine;
+          decorations.push({
+            range: new monaco.Range(row.newLine, 1, row.newLine, model.getLineMaxColumn(row.newLine)),
+            options: {
+              isWholeLine: true,
+              className: 'agent-diff-added-line',
+              overviewRuler: {
+                color: 'rgba(46, 160, 67, 0.8)',
+                position: monaco.editor.OverviewRulerLane.Right,
+              },
+            },
+          });
+          return;
         }
 
-        return {
+        if (row.kind === 'delete') {
+          if (!activeDeletedChunk) {
+            activeDeletedChunk = {
+              afterLineNumber: lastNewLine,
+              lines: [],
+            };
+            deletedChunks.push(activeDeletedChunk);
+          }
+          activeDeletedChunk.lines.push(row.text);
+          return;
+        }
+
+        activeDeletedChunk = null;
+        if (row.newLine) {
+          lastNewLine = row.newLine;
+        }
+      });
+    }
+
+    agentDiffDecorationsRef.current = editorInstance.createDecorationsCollection(decorations);
+    editorInstance.changeViewZones((accessor) => {
+      agentDiffViewZoneIdsRef.current = deletedChunks.map((chunk) =>
+        accessor.addZone({
+          afterLineNumber: chunk.afterLineNumber,
+          heightInLines: Math.max(1, chunk.lines.length),
+          domNode: createDeletedViewZoneNode(chunk.lines),
+          suppressMouseDown: true,
+        }),
+      );
+    });
+  }
+
+  function clearAgentPreviewTabs(review: AgentPendingReview, approved: boolean) {
+    const reviewPaths = new Set(review.files.map((file) => normalizeFileTabPath(getAgentChangeAbsolutePath(file))));
+    const nextTabs = tabsRef.current.flatMap((tab) => {
+      if (!reviewPaths.has(normalizeFileTabPath(tab.path)) || tab.agentPreview?.reviewId !== review.id) {
+        return [tab];
+      }
+
+      if (!approved && (!tab.agentPreview.wasOpen || tab.agentPreview.changeType === 'create')) {
+        return [];
+      }
+
+      if (approved && tab.agentPreview.changeType === 'delete') {
+        return [];
+      }
+
+      const content = approved ? tab.agentPreview.nextContent : tab.agentPreview.originalContent;
+      return [
+        {
           ...tab,
           content,
           savedContent: content,
           isDirty: false,
-          name: nextName,
+          agentPreview: undefined,
           fileState: 'saved' as FileTabState,
           type: 'file' as const,
-          isPreviewFile: false,
-        };
-      });
-
-      tabsRef.current = nextTabs;
-      return nextTabs;
+        },
+      ];
     });
 
-    if (activeTabIdRef.current && isSameFileTabPath(activeTabIdRef.current, filePath)) {
-      editorValueRef.current = content;
-      setEditorValue(content);
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+
+    const nextActiveTab = (activeTabIdRef.current ? nextTabs.find((tab) => tab.id === activeTabIdRef.current) : null) ?? nextTabs[0] ?? null;
+    activeTabIdRef.current = nextActiveTab?.id ?? null;
+    editorValueRef.current = nextActiveTab?.content ?? '';
+    setActiveTabId(nextActiveTab?.id ?? null);
+    setEditorValue(nextActiveTab?.content ?? '');
+  }
+
+  async function writeAgentReviewNotice(review: AgentPendingReview, content: string, tone: AgentReviewResolutionNotice['tone']) {
+    try {
+      const saved = await createAgentThreadMessage({
+        threadId: review.threadId,
+        role: 'status',
+        content,
+        tone,
+      });
+
+      setAgentReviewNotice({
+        id: saved.id,
+        threadId: review.threadId,
+        content: saved.content,
+        tone: saved.tone,
+        createdAt: saved.createdAt ?? new Date().toISOString(),
+      });
+    } catch {
+      setAgentReviewNotice({
+        id: `agent-review-notice-${agentReviewNoticeCounterRef.current++}`,
+        threadId: review.threadId,
+        content,
+        tone,
+        createdAt: new Date().toISOString(),
+      });
     }
   }
 
-  function handleAgentDeletedPath(targetPath: string, isDirectory: boolean) {
-    closeTabsForPath(targetPath, isDirectory ? 'directory' : 'file');
-    refreshFileTree();
+  async function resolvePendingAgentReview(approved: boolean) {
+    if (!pendingAgentReview || !workspacePath || resolvingAgentReview) {
+      return;
+    }
+
+    const review = pendingAgentReview;
+    setResolvingAgentReview(true);
+
+    try {
+      for (const change of review.files) {
+        const targetPath = getAgentChangeAbsolutePath(change);
+        if (!isPathInsideRoot(targetPath, workspacePath)) {
+          throw new Error(`Blocked unsafe agent change: ${change.path}`);
+        }
+      }
+
+      if (!approved) {
+        for (const change of review.files) {
+          const targetPath = getAgentChangeAbsolutePath(change);
+          if (change.changeType === 'create') {
+            const current = await window.tantalum.fs.readFile(targetPath);
+            if (current.success && current.content !== change.nextContent) {
+              throw new Error(`${change.path} changed after Tantalum AI applied it. Keep it or manually resolve this file.`);
+            }
+
+            if (current.success) {
+              const result = await window.tantalum.fs.deletePath(targetPath);
+              if (!result.success) {
+                throw new Error(result.error);
+              }
+            }
+            continue;
+          }
+
+          if (change.changeType === 'update') {
+            const current = await window.tantalum.fs.readFile(targetPath);
+            if (!current.success) {
+              throw new Error(current.error);
+            }
+
+            if (current.content !== change.nextContent) {
+              throw new Error(`${change.path} changed after Tantalum AI applied it. Keep it or manually resolve this file.`);
+            }
+          }
+
+          const result = await window.tantalum.fs.writeFile(targetPath, change.originalContent);
+
+          if (!result.success) {
+            throw new Error(result.error);
+          }
+        }
+      }
+
+      clearAgentPreviewTabs(review, approved);
+      setPendingAgentReview(null);
+      refreshFileTree();
+      void refreshGitChangeIndicator();
+
+      const content = approved
+        ? `Kept ${review.files.length} Tantalum AI ${review.files.length === 1 ? 'change' : 'changes'}.`
+        : `Reverted ${review.files.length} Tantalum AI ${review.files.length === 1 ? 'change' : 'changes'}.`;
+      await writeAgentReviewNotice(review, content, approved ? 'success' : 'warning');
+      pushToast(content, approved ? 'success' : 'info');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to resolve Tantalum AI changes.';
+      await writeAgentReviewNotice(review, message, 'error');
+      pushToast(message, 'error');
+    } finally {
+      setResolvingAgentReview(false);
+    }
   }
 
   const activeExplorerPath = activeTab && !activeTab.path.startsWith('untitled:') ? activeTab.path : null;
@@ -2942,6 +3425,17 @@ export function IDEWorkspace({
     editorValueRef.current = activeTab.content;
     setEditorValue(activeTab.content);
   }, [activeTab, refreshActiveEditorDiagnostics]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      renderAgentDiffDecorations(activeAgentChange);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(handle);
+      clearAgentDiffDecorations();
+    };
+  }, [activeAgentChange, activeTab?.path, editorReady]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -3344,6 +3838,7 @@ export function IDEWorkspace({
     );
   }
 
+  /* eslint-disable react-hooks/refs */
   function renderLibrariesWorkspace() {
     const hasLibraries = visibleLibraryResults.length > 0;
     const loadingMessage = librarySearchTerm ? 'Searching libraries...' : 'Loading libraries...';
@@ -3453,12 +3948,22 @@ export function IDEWorkspace({
                       </div>
                     </div>
                     {platform.installed ? (
-                      <button className="danger-button compact manager-result-action" type="button" onClick={() => void handleRemovePlatform(platform)} disabled={isRemoving}>
+                      <button
+                        className="danger-button compact manager-result-action"
+                        type="button"
+                        onClick={() => void handleRemovePlatform(platform)}
+                        disabled={isRemoving}
+                      >
                         {isRemoving ? <LoaderCircle size={13} className="spin" /> : null}
                         {isRemoving ? 'Removing' : 'Remove'}
                       </button>
                     ) : (
-                      <button className="primary-button compact manager-result-action" type="button" onClick={() => void handleInstallPlatform(platform)} disabled={isInstalling}>
+                      <button
+                        className="primary-button compact manager-result-action"
+                        type="button"
+                        onClick={() => void handleInstallPlatform(platform)}
+                        disabled={isInstalling}
+                      >
                         {isInstalling ? <LoaderCircle size={13} className="spin" /> : null}
                         {isInstalling ? 'Installing' : 'Install'}
                       </button>
@@ -3472,6 +3977,7 @@ export function IDEWorkspace({
       </section>
     );
   }
+  /* eslint-enable react-hooks/refs */
 
   function renderFileTreeMoreMenu(menuId: 'workspace' | 'project', actions: FileTreeMoreAction[]) {
     const isOpen = fileTreeMoreMenu === menuId;
@@ -4311,6 +4817,8 @@ export function IDEWorkspace({
                   padding: { top: 18, bottom: 18 },
                   parameterHints: { enabled: true, cycle: true },
                   quickSuggestions: uiPreferences.editorQuickSuggestions ? { comments: true, other: true, strings: true } : false,
+                  readOnly: Boolean(activeTab.agentPreview),
+                  readOnlyMessage: { value: 'Keep or revert Tantalum AI changes before editing this file.' },
                   renderLineHighlight: 'all',
                   renderValidationDecorations: 'on',
                   scrollBeyondLastLine: false,
@@ -4373,18 +4881,46 @@ export function IDEWorkspace({
               />
             ) : (
               <div className="editor-empty-state">
-                <div className="editor-empty-actions">
-                  <button className="editor-empty-action-tile" type="button" onClick={createNewTab}>
-                    <Plus size={30} />
-                    <span>New sketch</span>
+                {workspacePath ? (
+                  <div className="editor-empty-panel editor-empty-workspace-panel">
+                    <p>Select a file to edit</p>
+                    <button className="secondary-button" type="button" onClick={createNewTab}>
+                      <Plus size={16} />
+                      <span>New sketch</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="editor-empty-actions">
+                    <button className="editor-empty-action-tile" type="button" onClick={createNewTab}>
+                      <Plus size={30} />
+                      <span>New sketch</span>
+                    </button>
+                    <button className="editor-empty-action-tile" type="button" onClick={() => void openFolderPicker()}>
+                      <FolderOpen size={30} />
+                      <span>Open workspace</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {pendingAgentReview ? (
+              <div className="agent-editor-review-bar">
+                <div>
+                  <span className="release-badge">Tantalum AI live changes</span>
+                  <strong>{pendingAgentReview.files.length} applied {pendingAgentReview.files.length === 1 ? 'change' : 'changes'}</strong>
+                  {activeAgentChange ? <code>{activeAgentChange.path}</code> : null}
+                </div>
+                <div className="action-row">
+                  <button className="danger-button compact" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(false)}>
+                    Revert
                   </button>
-                  <button className="editor-empty-action-tile" type="button" onClick={() => void openFolderPicker()}>
-                    <FolderOpen size={30} />
-                    <span>Open workspace</span>
+                  <button className="primary-button compact" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(true)}>
+                    {resolvingAgentReview ? <LoaderCircle size={14} className="spin" /> : null}
+                    Keep
                   </button>
                 </div>
               </div>
-            )}
+            ) : null}
           </div>
         </section>
         ) : null}
@@ -4410,7 +4946,29 @@ export function IDEWorkspace({
             ) : sidebar === 'my-projects' ? (
               myProjectsDetailPanel
             ) : (
-              <AgentPanel user={user} workspacePath={workspacePath} activeTab={activeTab && !activeTab.path.startsWith('untitled:') ? { path: activeTab.path, name: activeTab.name, content: editorValue, isDirty: Boolean(activeTab.isDirty) } : null} onFileContentApplied={applyAgentFileContent} onPathDeleted={handleAgentDeletedPath} onRefreshWorkspace={refreshFileTree} pushConsole={pushConsole} pushToast={pushToast} defaultView="chat" chatOnly={true} onOpenSettings={onOpenSettings} onSignedOut={onSignedOut} />
+              <AgentPanel
+                user={user}
+                workspacePath={workspacePath}
+                activeTab={activeTab && !activeTab.path.startsWith('untitled:') && !activeTab.agentPreview ? { path: activeTab.path, name: activeTab.name, content: editorValue, isDirty: Boolean(activeTab.isDirty) } : null}
+                pushConsole={pushConsole}
+                pushToast={pushToast}
+                pendingReview={pendingAgentReview}
+                resolvingReview={resolvingAgentReview}
+                reviewResolutionNotice={agentReviewNotice}
+                onAgentChangesPrepared={handleAgentChangesPrepared}
+                onPreviewAgentFile={(relativePath) => {
+                  const change = pendingAgentReview?.files.find((file) => file.path === relativePath);
+                  if (change && pendingAgentReview) {
+                    showAgentPreviewFile(change, pendingAgentReview.id);
+                  }
+                }}
+                onResolveAgentChanges={resolvePendingAgentReview}
+                defaultView="chat"
+                chatOnly={true}
+                onOpenSettings={onOpenAgentSettings ?? onOpenSettings}
+                onClosePanel={() => onRightPanelOpenChange(false)}
+                onSignedOut={onSignedOut}
+              />
             )}
           </div>
         </aside>

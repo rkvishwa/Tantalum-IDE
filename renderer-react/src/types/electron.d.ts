@@ -153,6 +153,81 @@ export type CloudConfig = {
 };
 
 export type AgentToolName = 'aider_apply';
+export type AgentRouteEngine = 'local' | 'direct_llm' | 'aider_ask' | 'aider_edit';
+export type AgentReviewMode = 'live-applied' | 'none';
+export type AgentRunStageName = 'routing' | 'preparing_workspace' | 'running_direct_llm' | 'running_aider' | 'applying_changes';
+export type PendingAgentActionStatus = 'pending' | 'approved' | 'running' | 'blocked' | 'skipped' | 'executed' | 'expired';
+export type AgentDecisionKind = 'approve_skip' | 'clarify' | 'none';
+export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'blocked' | 'skipped';
+
+export type PendingAgentAction = {
+  id: string;
+  threadId: string | null;
+  kind: 'edit' | 'ask' | string;
+  originalPrompt: string;
+  normalizedPrompt: string;
+  riskLevel: 'low' | 'medium' | 'high' | string;
+  reason: string;
+  createdAt: string;
+  status: PendingAgentActionStatus;
+};
+
+export type AgentTaskItem = {
+  id: string;
+  title: string;
+  status: AgentTaskStatus;
+  kind: string;
+  targetPath?: string;
+  result?: string;
+  error?: string;
+};
+
+export type AgentTaskList = {
+  id: string;
+  actionId: string | null;
+  items: AgentTaskItem[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentProgressEvent = {
+  threadId: string;
+  actionId: string | null;
+  stage: 'running' | 'completed' | 'blocked' | string;
+  taskList?: AgentTaskList;
+  createdAt: string;
+};
+
+export type AgentRunStage = {
+  name: AgentRunStageName | string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | string;
+  message?: string;
+};
+
+export type AgentSkippedFile = {
+  path: string;
+  reason: 'excluded' | 'oversized' | 'binary' | 'non_utf8' | 'unreadable' | string;
+  sizeBytes?: number;
+};
+
+export type AgentDiagnostic = {
+  level: 'info' | 'warning' | 'error' | string;
+  message: string;
+  path?: string;
+};
+
+export type AgentRouteResult = {
+  engine: AgentRouteEngine;
+  reason: string;
+  confidence: number;
+  persistThread: boolean;
+  titleSuggestion: string;
+  userMessage?: string;
+  requiresUserDecision?: boolean;
+  decisionKind?: AgentDecisionKind;
+  pendingAction?: PendingAgentAction;
+  taskList?: AgentTaskList;
+};
 
 export type GitStatusState = 'no-workspace' | 'missing-git' | 'not-repository' | 'unsafe' | 'repository';
 
@@ -288,6 +363,31 @@ export type AgentApprovalResolution = Result<{
   approved: boolean;
 }>;
 
+export type AgentRunPayload = {
+  prompt: string;
+  source: 'managed' | 'custom';
+  mode: 'fast' | 'plan';
+  intent?: 'agent' | 'ask';
+  threadId?: string | null;
+  customCredentialId?: string | null;
+  customModelName?: string | null;
+  fastContextWindow?: number | null;
+  planContextWindow?: number | null;
+  threadMessages?: Array<{
+    role: 'user' | 'assistant' | 'status';
+    content: string;
+  }>;
+  activeTab?: {
+    path: string;
+    name: string;
+    content: string;
+    isDirty: boolean;
+  } | null;
+  pendingAction?: PendingAgentAction | null;
+  taskList?: AgentTaskList | null;
+  approvedActionId?: string | null;
+};
+
 export type DesktopApi = {
   app: {
     cloudConfig?: CloudConfig;
@@ -308,19 +408,8 @@ export type DesktopApi = {
         };
       }>
     >;
-    run: (payload: {
-      prompt: string;
-      source: 'managed' | 'custom';
-      mode: 'fast' | 'plan';
-      customCredentialId?: string | null;
-      customModelName?: string | null;
-      activeTab?: {
-        path: string;
-        name: string;
-        content: string;
-        isDirty: boolean;
-      } | null;
-    }) => Promise<
+    route: (payload: AgentRunPayload) => Promise<Result<AgentRouteResult>>;
+    run: (payload: AgentRunPayload) => Promise<
       Result<{
         output: string;
         changedFiles: Array<{
@@ -332,11 +421,24 @@ export type DesktopApi = {
             afterLength: number;
           };
         }>;
+        autoApplied?: boolean;
+        diff?: AgentChangePreview[];
+        meta?: Record<string, unknown>;
+        route?: AgentRouteResult;
+        engine?: AgentRouteEngine;
+        diagnostics?: AgentDiagnostic[];
+        skippedFiles?: AgentSkippedFile[];
+        reviewMode?: AgentReviewMode;
+        stages?: AgentRunStage[];
         requiresApproval?: boolean;
         approval?: AgentApprovalRequest;
+        taskList?: AgentTaskList;
+        actionStatus?: PendingAgentActionStatus;
       }>
     >;
+    stop: (payload: { threadId: string }) => Promise<Result<{ stopped: boolean }>>;
     resolveApproval: (payload: { requestId: string; approved: boolean }) => Promise<AgentApprovalResolution>;
+    onProgress: (callback: (event: AgentProgressEvent) => void) => () => void;
   };
   cloud: {
     auth: {

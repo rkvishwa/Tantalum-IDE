@@ -59,6 +59,7 @@ const agentRuntimeManager = new AgentRuntimeManager({
   securityManager,
   markWorkspaceDirty,
   addRecentFile,
+  emitProgress: (event) => sendRendererEvent("agent:progress", event),
 });
 
 let pty = null;
@@ -2067,7 +2068,7 @@ async function executeAgentGatewayRequest(body) {
     body: {
       body: JSON.stringify(body),
       async: false,
-      path: "/chat-completions",
+      path: "/gateway",
       method: "POST",
       headers: { "content-type": "application/json" },
     },
@@ -2602,6 +2603,15 @@ ipcMain.handle("agent:get-status", async () => {
   }
 });
 
+ipcMain.handle("agent:route", async (_event, payload = {}) => {
+  try {
+    const route = await agentRuntimeManager.route(payload);
+    return { success: true, ...route };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("agent:run", async (_event, payload = {}) => {
   try {
     const result = await agentRuntimeManager.run(payload);
@@ -2610,6 +2620,15 @@ ipcMain.handle("agent:run", async (_event, payload = {}) => {
       ...result,
       ...(result.approval ? { approval: serializeApproval(result.approval) } : {}),
     };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("agent:stop", async (_event, payload = {}) => {
+  try {
+    const result = agentRuntimeManager.stop(payload);
+    return { success: true, ...result };
   } catch (error) {
     return toErrorResult(error);
   }
@@ -3125,7 +3144,8 @@ ipcMain.handle("fs:read-file", async (_event, filePath) => {
 
 ipcMain.handle("fs:write-file", async (_event, payload) => {
   try {
-    const absolutePath = assertTrustedPath(payload.filePath);
+    const absolutePath = assertTrustedPath(payload.filePath, { allowMissing: true });
+    await fsPromises.mkdir(path.dirname(absolutePath), { recursive: true });
     await fsPromises.writeFile(absolutePath, payload.content, "utf8");
 
     addRecentFile(absolutePath);

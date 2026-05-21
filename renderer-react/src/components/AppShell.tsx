@@ -320,6 +320,10 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
     [pushAppRoute],
   );
 
+  const navigateToAgentSettings = useCallback(() => {
+    navigateToSettingsTab('agent');
+  }, [navigateToSettingsTab]);
+
   const navigateToLastWorkspace = useCallback(() => {
     pushAppRoute({ view: 'workspace', sidebar: getLastWorkspaceSidebar(appNavigation.entries, appNavigation.index) });
   }, [appNavigation.entries, appNavigation.index, pushAppRoute]);
@@ -381,10 +385,12 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
             user={user}
             onSignedOut={() => void handleSignedOut()}
             onOpenSettings={navigateToSettings}
+            onOpenAgentSettings={navigateToAgentSettings}
             sidebar={currentWorkspaceSidebar}
             onSidebarChange={navigateToWorkspaceSidebar}
             leftPanelOpen={leftPanelOpen}
             rightPanelOpen={rightPanelOpen}
+            onRightPanelOpenChange={(open) => setPanelOpen('rightPanelOpen', open)}
             bottomPanelOpen={bottomPanelOpen}
             onBottomPanelOpenChange={(open) => setPanelOpen('bottomPanelOpen', open)}
             onWorkspaceTitleChange={setWorkspaceTitle}

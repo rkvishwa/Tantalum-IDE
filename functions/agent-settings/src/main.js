@@ -1,9 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
-import sdk from 'node-appwrite';
-
-const { Account, Client, Databases, ID, Query } = sdk;
+import { Account, Client, Databases, ID, Query } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -15,10 +13,23 @@ const {
   APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID = 'agent_user_preferences',
   APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID = 'agent_credit_accounts',
   APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID = 'agent_usage_ledger',
+  APPWRITE_AGENT_THREADS_COLLECTION_ID = 'agent_threads',
+  APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID = 'agent_thread_messages',
   AGENT_DEFAULT_MONTHLY_CREDITS = '500',
 } = process.env;
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
+const DEFAULT_MANAGED_MODEL_METADATA = {
+  providerLabel: 'Azure AI Foundry',
+  fastModel: 'gpt-4.1',
+  fastEditorModel: 'gpt-4.1',
+  planModel: 'gpt-5.5',
+  planEditorModel: 'gpt-4.1',
+  planReasoningEffort: 'medium',
+  fastContextWindow: null,
+  planContextWindow: null,
+  repoMapTokens: 2048,
+};
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -133,6 +144,105 @@ function maskCreditAccount(document) {
   };
 }
 
+function asNullablePositiveInteger(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function cleanPreview(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
+function defaultThreadTitle(value) {
+  const title = cleanPreview(value).slice(0, 64);
+  return title || 'New thread';
+}
+
+function isUnknownSelectedCustomModelError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('Unknown attribute') && message.includes('selectedCustomModelName');
+}
+
+function maskManagedModelMetadata(poolKey) {
+  if (!poolKey) {
+    return DEFAULT_MANAGED_MODEL_METADATA;
+  }
+
+  return {
+    providerLabel: poolKey.providerLabel || DEFAULT_MANAGED_MODEL_METADATA.providerLabel,
+    fastModel: poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.fastModel,
+    fastEditorModel: poolKey.fastEditorModel || poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.fastEditorModel,
+    planModel: poolKey.planModel || DEFAULT_MANAGED_MODEL_METADATA.planModel,
+    planEditorModel: poolKey.planEditorModel || poolKey.fastEditorModel || poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.planEditorModel,
+    planReasoningEffort: poolKey.planReasoningEffort || DEFAULT_MANAGED_MODEL_METADATA.planReasoningEffort,
+    fastContextWindow: asNullablePositiveInteger(poolKey.fastContextWindow),
+    planContextWindow: asNullablePositiveInteger(poolKey.planContextWindow),
+    repoMapTokens: Number(poolKey.repoMapTokens || DEFAULT_MANAGED_MODEL_METADATA.repoMapTokens),
+  };
+}
+
+function managedModesFromMetadata(metadata) {
+  return [
+    {
+      id: 'fast',
+      label: 'Fast',
+      creditMultiplier: 1,
+      model: metadata.fastModel,
+      editorModel: metadata.fastEditorModel,
+      contextWindow: metadata.fastContextWindow,
+      repoMapTokens: metadata.repoMapTokens,
+      reasoningEffort: null,
+    },
+    {
+      id: 'plan',
+      label: 'Plan',
+      creditMultiplier: 2,
+      model: metadata.planModel,
+      editorModel: metadata.planEditorModel,
+      contextWindow: metadata.planContextWindow,
+      repoMapTokens: metadata.repoMapTokens,
+      reasoningEffort: metadata.planReasoningEffort,
+    },
+  ];
+}
+
+function maskThread(document) {
+  return {
+    id: document.$id,
+    title: document.title || 'New thread',
+    workspaceKey: document.workspaceKey || null,
+    workspaceName: document.workspaceName || null,
+    status: document.status || 'active',
+    messageCount: Number(document.messageCount || 0),
+    lastMessagePreview: document.lastMessagePreview || '',
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    lastMessageAt: document.lastMessageAt || document.updatedAt || document.createdAt,
+  };
+}
+
+function maskThreadMessage(document) {
+  let metadata = {};
+  try {
+    metadata = document.metadataJson ? JSON.parse(document.metadataJson) : {};
+  } catch {
+    metadata = {};
+  }
+
+  return {
+    id: document.$id,
+    threadId: document.threadId,
+    role: document.role,
+    content: document.content || '',
+    tone: document.tone || 'default',
+    metadata,
+    createdAt: document.createdAt,
+  };
+}
+
 function isBlockedIp(address) {
   const version = net.isIP(address);
   if (version === 4) {
@@ -239,19 +349,20 @@ async function ensurePreferences(databases, userId) {
   }
 
   const now = new Date().toISOString();
+  const preferences = {
+    userId,
+    selectedSource: 'managed',
+    defaultMode: 'fast',
+    selectedCustomCredentialId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
   return databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID,
     ID.unique(),
-    {
-      userId,
-      selectedSource: 'managed',
-      defaultMode: 'fast',
-      selectedCustomCredentialId: null,
-      selectedCustomModelName: null,
-      createdAt: now,
-      updatedAt: now,
-    },
+    preferences,
     [],
   );
 }
@@ -313,6 +424,18 @@ async function ensureManagedAssignment(databases, userId) {
   return assignment;
 }
 
+async function getManagedPoolKey(databases, assignment) {
+  if (!assignment?.poolKeyId) {
+    return null;
+  }
+
+  try {
+    return await databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, assignment.poolKeyId);
+  } catch {
+    return null;
+  }
+}
+
 async function listCustomCredentials(databases, userId) {
   const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID, [
     Query.equal('userId', userId),
@@ -343,23 +466,179 @@ async function listRecentUsage(databases, userId) {
   }));
 }
 
+async function getOwnedThread(databases, userId, threadId) {
+  const cleanThreadId = String(threadId || '').trim();
+  if (!cleanThreadId) {
+    throw new Error('threadId is required.');
+  }
+
+  const thread = await databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, cleanThreadId);
+  if (thread.userId !== userId || thread.status === 'deleted') {
+    throw new Error('Thread was not found.');
+  }
+
+  return thread;
+}
+
+async function listThreadDocuments(databases, userId, workspaceKey = null, limit = 50) {
+  const queries = [
+    Query.equal('userId', userId),
+    Query.orderDesc('lastMessageAt'),
+    Query.limit(limit),
+  ];
+
+  try {
+    const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, queries);
+    return response.documents
+      .filter((thread) => thread.status === 'active' && (!workspaceKey || thread.workspaceKey === workspaceKey))
+      .map(maskThread);
+  } catch {
+    return [];
+  }
+}
+
+async function listThreads(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const workspaceKey = String(payload.workspaceKey || '').trim() || null;
+  return ok(res, await listThreadDocuments(databases, user.$id, workspaceKey));
+}
+
+async function createThread(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const now = new Date().toISOString();
+  const title = defaultThreadTitle(payload.title);
+
+  const thread = await databases.createDocument(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_AGENT_THREADS_COLLECTION_ID,
+    ID.unique(),
+    {
+      userId: user.$id,
+      title,
+      workspaceKey: String(payload.workspaceKey || '').trim() || null,
+      workspaceName: String(payload.workspaceName || '').trim() || null,
+      status: 'active',
+      messageCount: 0,
+      lastMessagePreview: '',
+      createdAt: now,
+      updatedAt: now,
+      lastMessageAt: now,
+    },
+    [],
+  );
+
+  return ok(res, maskThread(thread), 201);
+}
+
+async function listThreadMessages(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const thread = await getOwnedThread(databases, user.$id, payload.threadId);
+
+  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID, [
+    Query.equal('userId', user.$id),
+    Query.equal('threadId', thread.$id),
+    Query.orderAsc('createdAt'),
+    Query.limit(200),
+  ]);
+
+  return ok(res, response.documents.map(maskThreadMessage));
+}
+
+async function createThreadMessage(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const thread = await getOwnedThread(databases, user.$id, payload.threadId);
+  const role = ['user', 'assistant', 'status'].includes(payload.role) ? payload.role : 'status';
+  const tone = ['default', 'success', 'error', 'warning'].includes(payload.tone) ? payload.tone : 'default';
+  const content = String(payload.content || '').trim();
+
+  if (!content) {
+    return fail(res, 400, 'Message content is required.');
+  }
+
+  const now = new Date().toISOString();
+  const metadataJson = payload.metadata && typeof payload.metadata === 'object' ? JSON.stringify(payload.metadata).slice(0, 4096) : '{}';
+  const message = await databases.createDocument(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID,
+    ID.unique(),
+    {
+      userId: user.$id,
+      threadId: thread.$id,
+      role,
+      content,
+      tone,
+      metadataJson,
+      createdAt: now,
+    },
+    [],
+  );
+
+  const messageCount = Number(thread.messageCount || 0) + 1;
+  const shouldRename = messageCount === 1 && role === 'user' && (!thread.title || thread.title === 'New thread' || thread.title === 'New Chat');
+  await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, thread.$id, {
+    title: shouldRename ? defaultThreadTitle(content) : thread.title,
+    messageCount,
+    lastMessagePreview: cleanPreview(content),
+    lastMessageAt: now,
+    updatedAt: now,
+  });
+
+  return ok(res, maskThreadMessage(message), 201);
+}
+
+async function renameThread(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const thread = await getOwnedThread(databases, user.$id, payload.threadId);
+  const title = defaultThreadTitle(payload.title);
+  const updated = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, thread.$id, {
+    title,
+    updatedAt: new Date().toISOString(),
+  });
+
+  return ok(res, maskThread(updated));
+}
+
+async function deleteThread(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const thread = await getOwnedThread(databases, user.$id, payload.threadId);
+
+  await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, thread.$id, {
+    status: 'deleted',
+    updatedAt: new Date().toISOString(),
+  });
+
+  return ok(res, { deleted: true });
+}
+
 async function bootstrap(req, res) {
   const user = await resolveUser(req);
   const databases = new Databases(createAdminClient(req));
-  const [assignment, preferences, creditAccount, customCredentials, recentUsage] = await Promise.all([
+  const [assignment, preferences, creditAccount, customCredentials, recentUsage, recentThreads] = await Promise.all([
     ensureManagedAssignment(databases, user.$id),
     ensurePreferences(databases, user.$id),
     ensureCreditAccount(databases, user.$id),
     listCustomCredentials(databases, user.$id),
     listRecentUsage(databases, user.$id),
+    listThreadDocuments(databases, user.$id),
   ]);
+  const managedModelMetadata = maskManagedModelMetadata(await getManagedPoolKey(databases, assignment));
 
   return ok(res, {
     managedAvailable: Boolean(assignment),
-    managedModes: [
-      { id: 'fast', label: 'Fast', creditMultiplier: 1 },
-      { id: 'plan', label: 'Plan', creditMultiplier: 2 },
-    ],
+    managedModes: managedModesFromMetadata(managedModelMetadata),
+    managedModelMetadata,
     preferences: {
       selectedSource: preferences.selectedSource || 'managed',
       defaultMode: preferences.defaultMode || 'fast',
@@ -369,6 +648,7 @@ async function bootstrap(req, res) {
     customCredentials,
     creditAccount: maskCreditAccount(creditAccount),
     recentUsage,
+    recentThreads,
   });
 }
 
@@ -379,13 +659,30 @@ async function savePreferences(req, res) {
   const preferences = await ensurePreferences(databases, user.$id);
   const now = new Date().toISOString();
 
-  const updated = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID, preferences.$id, {
+  const update = {
     selectedSource: payload.selectedSource === 'custom' ? 'custom' : 'managed',
     defaultMode: payload.defaultMode === 'plan' ? 'plan' : 'fast',
-    selectedCustomCredentialId: payload.selectedCustomCredentialId || null,
-    selectedCustomModelName: payload.selectedCustomModelName || null,
+    selectedCustomCredentialId: payload.selectedSource === 'custom' ? payload.selectedCustomCredentialId || null : null,
     updatedAt: now,
-  });
+  };
+
+  let updated;
+  if (payload.selectedSource === 'custom' && payload.selectedCustomModelName) {
+    try {
+      updated = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID, preferences.$id, {
+        ...update,
+        selectedCustomModelName: payload.selectedCustomModelName,
+      });
+    } catch (error) {
+      if (!isUnknownSelectedCustomModelError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  if (!updated) {
+    updated = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID, preferences.$id, update);
+  }
 
   return ok(res, {
     selectedSource: updated.selectedSource,
@@ -571,6 +868,18 @@ export default async function ({ req, res, error }) {
         return await deleteCustomCredential(req, res);
       case '/custom-credentials/test':
         return await testCustomCredential(req, res);
+      case '/threads/list':
+        return await listThreads(req, res);
+      case '/threads/create':
+        return await createThread(req, res);
+      case '/threads/messages':
+        return await listThreadMessages(req, res);
+      case '/threads/message/create':
+        return await createThreadMessage(req, res);
+      case '/threads/rename':
+        return await renameThread(req, res);
+      case '/threads/delete':
+        return await deleteThread(req, res);
       default:
         return fail(res, 404, `Unknown agent settings path: ${req.path}`);
     }

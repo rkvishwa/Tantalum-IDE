@@ -2,9 +2,7 @@ import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
-import sdk from 'node-appwrite';
-
-const { Account, Client, Databases, ID, Query } = sdk;
+import { Account, Client, Databases, ID, Query } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -20,6 +18,7 @@ const {
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+const DEFAULT_PLAN_REASONING_EFFORT = 'medium';
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -150,6 +149,41 @@ async function validatePublicHttpsBaseUrl(value) {
   return rawValue.replace(/\/+$/, '');
 }
 
+function isAzureFoundryHost(hostname) {
+  return hostname.endsWith('.openai.azure.com') || hostname.endsWith('.services.ai.azure.com');
+}
+
+async function normalizeOpenAiV1BaseUrl(value) {
+  const safeBaseUrl = await validatePublicHttpsBaseUrl(value);
+  const url = new URL(safeBaseUrl);
+  const pathName = url.pathname.replace(/\/+$/, '');
+
+  if (pathName.endsWith('/openai/v1') || pathName.endsWith('/v1')) {
+    url.pathname = pathName || '/';
+    return {
+      baseUrl: url.toString().replace(/\/+$/, ''),
+      isAzure: isAzureFoundryHost(url.hostname.toLowerCase()),
+    };
+  }
+
+  url.pathname = `${pathName}${isAzureFoundryHost(url.hostname.toLowerCase()) ? '/openai/v1' : '/v1'}`;
+  return {
+    baseUrl: url.toString().replace(/\/+$/, ''),
+    isAzure: isAzureFoundryHost(url.hostname.toLowerCase()),
+  };
+}
+
+function normalizeGatewayPath(value) {
+  const rawPath = String(value || '/v1/chat/completions').trim();
+  if (rawPath.endsWith('/responses')) {
+    return '/responses';
+  }
+  if (rawPath.endsWith('/completions') && !rawPath.endsWith('/chat/completions')) {
+    return '/completions';
+  }
+  return '/chat/completions';
+}
+
 function ensureArray(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry).trim()).filter(Boolean);
@@ -241,12 +275,16 @@ async function resolveManagedProvider(databases, userId, mode, incomingModel) {
     throw new Error('The assigned managed key does not have a model configured for this mode.');
   }
 
+  const endpoint = await normalizeOpenAiV1BaseUrl(poolKey.baseUrl);
+
   return {
-    baseUrl: await validatePublicHttpsBaseUrl(poolKey.baseUrl),
+    baseUrl: endpoint.baseUrl,
+    isAzure: endpoint.isAzure,
     apiKey: poolKey.apiKey,
     model,
     modelAlias: mode === 'plan' ? 'Plan' : 'Fast',
     sourceLabel: poolKey.providerLabel || 'Managed',
+    reasoningEffort: mode === 'plan' ? poolKey.planReasoningEffort || DEFAULT_PLAN_REASONING_EFFORT : null,
   };
 }
 
@@ -266,8 +304,11 @@ async function resolveCustomProvider(databases, userId, credentialId, modelName)
     throw new Error('The selected custom model is not configured for this credential.');
   }
 
+  const endpoint = await normalizeOpenAiV1BaseUrl(credential.baseUrl);
+
   return {
-    baseUrl: await validatePublicHttpsBaseUrl(credential.baseUrl),
+    baseUrl: endpoint.baseUrl,
+    isAzure: endpoint.isAzure,
     apiKey: credential.apiKey,
     model: cleanModelName,
     modelAlias: cleanModelName,
@@ -318,19 +359,24 @@ async function debitCredits(databases, creditAccount, chargedCredits) {
   });
 }
 
-async function callUpstream(provider, requestBody) {
+async function callUpstream(provider, requestBody, endpointPath) {
   const upstreamBody = {
     ...requestBody,
     model: provider.model,
   };
+  const headers = {
+    Authorization: `Bearer ${provider.apiKey}`,
+    'Content-Type': 'application/json',
+  };
 
-  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+  if (provider.isAzure) {
+    headers['api-key'] = provider.apiKey;
+  }
+
+  const response = await fetch(`${provider.baseUrl}${endpointPath}`, {
     method: 'POST',
     redirect: 'manual',
-    headers: {
-      Authorization: `Bearer ${provider.apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(upstreamBody),
     signal: AbortSignal.timeout(120000),
   });
@@ -362,6 +408,7 @@ async function handleChatCompletion(req, res) {
   const mode = payload.mode === 'plan' ? 'plan' : 'fast';
   const multiplier = source === 'managed' && mode === 'plan' ? 2 : 1;
   const requestBody = payload.request && typeof payload.request === 'object' ? payload.request : {};
+  const endpointPath = normalizeGatewayPath(payload.apiPath || req.path);
   const requestId = crypto.randomUUID();
   const creditAccount = await ensureCreditAccount(databases, user.$id);
 
@@ -388,7 +435,7 @@ async function handleChatCompletion(req, res) {
         ? await resolveCustomProvider(databases, user.$id, payload.customCredentialId, payload.customModelName || requestBody.model)
         : await resolveManagedProvider(databases, user.$id, mode, requestBody.model);
 
-    const upstreamResponse = await callUpstream(provider, requestBody);
+    const upstreamResponse = await callUpstream(provider, requestBody, endpointPath);
     const credits = calculateCredits(upstreamResponse, requestBody, multiplier);
     const chargedCredits = source === 'managed' ? credits.chargedCredits : 0;
     if (source === 'managed' && upstreamResponse && typeof upstreamResponse === 'object') {
@@ -442,7 +489,7 @@ export default async function ({ req, res, error }) {
       return fail(res, 500, 'Database configuration is incomplete.');
     }
 
-    if (req.path === '/chat-completions' || req.path === '/') {
+    if (['/chat-completions', '/responses', '/completions', '/gateway', '/'].includes(req.path)) {
       return await handleChatCompletion(req, res);
     }
 

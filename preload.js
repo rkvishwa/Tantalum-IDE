@@ -32,8 +32,11 @@ contextBridge.exposeInMainWorld("tantalum", {
   },
   agent: {
     getStatus: () => ipcRenderer.invoke("agent:get-status"),
+    route: (payload) => ipcRenderer.invoke("agent:route", payload),
     run: (payload) => ipcRenderer.invoke("agent:run", payload),
+    stop: (payload) => ipcRenderer.invoke("agent:stop", payload),
     resolveApproval: (payload) => ipcRenderer.invoke("agent:resolve-approval", payload),
+    onProgress: (callback) => subscribe("agent:progress", callback),
   },
   cloud: {
     auth: {
