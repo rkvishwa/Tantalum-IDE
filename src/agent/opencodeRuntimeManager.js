@@ -88,6 +88,8 @@ const MAX_COMPLETED_TASK_REFERENCES = 3;
 const MAX_COMPLETED_TASK_REFERENCE_ITEMS = 8;
 const MAX_THREAD_MEMORY_FILES = 50;
 const MAX_THREAD_MEMORY_ALIASES = 18;
+const INTENT_ROUTER_MAX_THREAD_MESSAGES = 6;
+const INTENT_ROUTER_THREAD_MESSAGE_CHARS = 3000;
 const THREAD_MEMORY_TARGET_MATCH_MIN_SCORE = 0.72;
 const THREAD_MEMORY_TARGET_MATCH_AMBIGUITY_GAP = 0.08;
 const SUPPORTED_CONTEXT_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -99,7 +101,7 @@ const KNOWN_TARGET_EXTENSIONS = new Set(["ino", "c", "cc", "cpp", "cxx", "h", "h
 const AGENT_STOPPED_ERROR_CODE = "AGENT_RUN_STOPPED";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const RESUMABLE_PENDING_STATUSES = new Set(["pending", "blocked"]);
-const PROJECT_STRUCTURE_HINT = /\b(project structure|folder structure|repo structure|repository structure|workspace structure|directory structure)\b/i;
+const PROJECT_STRUCTURE_HINT = /\b(?:project|folder|repo|repository|workspace|directory)\s+stru(?:cture|cure|ture)\b/i;
 const CONFIRMATION_ONLY_OUTPUT = [
   /\bplease confirm\b/i,
   /\bconfirm if\b/i,
@@ -2594,6 +2596,72 @@ function looksLikeUncertainWorkspaceAction(prompt) {
   );
 }
 
+function shouldRunFastIntentRouterBeforeDirect(prompt) {
+  const normalized = normalizePrompt(prompt).toLowerCase();
+  if (!normalized || isRetryPrompt(normalized) || isContinuationPrompt(normalized)) {
+    return false;
+  }
+
+  const canonical = canonicalizeCommandVerbsInText(normalized);
+  const workspaceSignal =
+    /\b(files?|folders?|directories|sketch(?:es)?|workspace|project|repo|repository|codebase|structure|strucure|markdown|md|ino)\b|\.(?:ino|c|cc|cpp|cxx|h|hh|hpp|hxx|md|js|ts|tsx|jsx|json|css|html|txt|yml|yaml|toml|py)\b/i.test(
+      normalized,
+    );
+  const taskSignal =
+    /\b(create|delete|remove|move|rename|edit|update|change|fix|write|make|replace|add|put|place|transfer|scaffold|generate)\b/i.test(canonical) ||
+    /\b(?:cre+a+te|de+le+te|re+na?me|mo+ve|u?pda?te|edi?t|wri?te|ma+ke|pla?ce|tra?nsfer|sca?ffold|genera?te)\b/i.test(normalized);
+
+  return workspaceSignal || taskSignal;
+}
+
+function compactThreadMessagesForIntentRouter(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((message) => message && (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim())
+    .slice(-INTENT_ROUTER_MAX_THREAD_MESSAGES)
+    .map((message) => ({
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: clampForPrompt(message.content, INTENT_ROUTER_THREAD_MESSAGE_CHARS),
+    }));
+}
+
+function hasPriorAssistantThreadMessage(value) {
+  return compactThreadMessagesForIntentRouter(value).some((message) => message.role === "assistant");
+}
+
+function looksLikeReferentialFollowupPrompt(prompt) {
+  const normalized = normalizePrompt(prompt).toLowerCase().replace(/[.!?]+$/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length > 8) {
+    return false;
+  }
+
+  return (
+    /^(?:do|apply|make|add|implement|use|run|execute)\s+(?:all\s+)?(?:it|that|this|those|these|them|the\s+changes?|the\s+fix(?:es)?|the\s+suggestion(?:s)?|everything)$/.test(
+      normalized,
+    ) ||
+    /^(?:yes|yep|yeah|ok|okay|please)\s+(?:do|apply|make|add|implement|use)\s+(?:it|that|this|those|these|them|the\s+changes?|the\s+fix(?:es)?|the\s+suggestion(?:s)?)$/.test(
+      normalized,
+    ) ||
+    /^(?:do all those|do those|do that|do it|apply those changes|apply that change|make those changes|make that change|yes add it)$/.test(normalized)
+  );
+}
+
+function shouldRunReferentialFollowupRouter(prompt, payload = {}) {
+  if (!looksLikeReferentialFollowupPrompt(prompt)) {
+    return false;
+  }
+
+  return hasPriorAssistantThreadMessage(payload.threadMessages);
+}
+
 function normalizeClassifierString(value, maxLength = 500) {
   const normalized = String(value || "").trim();
   return normalized ? normalized.slice(0, maxLength) : "";
@@ -2731,6 +2799,7 @@ class AgentRuntimeManager {
     const operation = classifier?.operation || "";
     const targetPhrase = classifier?.targetPhrase || "";
     const destinationPhrase = classifier?.destinationPhrase || "";
+    const instruction = normalizeClassifierString(classifier?.instruction, 1000);
     const candidatePath = this.#normalizeActionRepairCandidatePath(classifier?.candidatePath, workspaceRoot);
     const target = candidatePath || targetPhrase;
     let syntheticPrompt = "";
@@ -2764,7 +2833,22 @@ class AgentRuntimeManager {
       return null;
     }
 
-    return this.#deterministicTaskList(syntheticPrompt, actionId, workspaceRoot, payload);
+    const taskList = this.#deterministicTaskList(syntheticPrompt, actionId, workspaceRoot, payload);
+    if (operation !== "edit_file" || !instruction || !taskList) {
+      return taskList;
+    }
+
+    return {
+      ...taskList,
+      items: taskList.items.map((item) =>
+        item.kind === "opencode_edit"
+          ? {
+              ...item,
+              instruction,
+            }
+          : item,
+      ),
+    };
   }
 
   async #planEditWithFastModel({ prompt, pendingAction, workspaceRoot, payload }) {
@@ -2798,7 +2882,7 @@ class AgentRuntimeManager {
     });
   }
 
-  async #classifyUncertainWorkspaceAction({ prompt, payload, workspaceRoot, blockedTask = null, plannerClarification = "" }) {
+  async #classifyUncertainWorkspaceAction({ prompt, payload, workspaceRoot, blockedTask = null, plannerClarification = "", referentialFollowup = false }) {
     const source = payload.source === "custom" ? "custom" : "managed";
     const model = source === "custom" ? String(payload.customModelName || "").trim() : "openai/tantalum-fast";
     if (!model) {
@@ -2815,7 +2899,15 @@ class AgentRuntimeManager {
       apiPath: "/v1/chat/completions",
       request: {
         model,
-        messages: this.#buildUncertainWorkspaceActionClassifierMessages({ prompt, payload, workspaceRoot, workspaceFiles, blockedTask, plannerClarification }),
+        messages: this.#buildUncertainWorkspaceActionClassifierMessages({
+          prompt,
+          payload,
+          workspaceRoot,
+          workspaceFiles,
+          blockedTask,
+          plannerClarification,
+          referentialFollowup,
+        }),
         temperature: 0,
         stream: false,
       },
@@ -2836,6 +2928,7 @@ class AgentRuntimeManager {
       candidateSource: normalizeClassifierCandidateSource(parsed.candidateSource),
       confidence: normalizeClassifierConfidence(parsed.confidence),
       clarification: normalizeClassifierString(parsed.clarification, 800),
+      instruction: normalizeClassifierString(parsed.instruction, 1000),
     };
   }
 
@@ -2852,10 +2945,19 @@ class AgentRuntimeManager {
     }
   }
 
-  #buildUncertainWorkspaceActionClassifierMessages({ prompt, payload, workspaceRoot, workspaceFiles = [], blockedTask = null, plannerClarification = "" }) {
+  #buildUncertainWorkspaceActionClassifierMessages({
+    prompt,
+    payload,
+    workspaceRoot,
+    workspaceFiles = [],
+    blockedTask = null,
+    plannerClarification = "",
+    referentialFollowup = false,
+  }) {
     const activeEditorRelativePath = activeTabRelativePath(workspaceRoot, payload.activeTab);
     const userPayload = {
       userPrompt: String(prompt || "").trim(),
+      referentialFollowup: Boolean(referentialFollowup),
       plannerClarification: normalizePlannerString(plannerClarification, 800) || null,
       blockedTask: blockedTask
         ? {
@@ -2876,6 +2978,7 @@ class AgentRuntimeManager {
         : null,
       contextItems: this.#plannerContextItems(workspaceRoot, payload.contextItems),
       threadMemory: compactThreadMemoryForPlanner(payload.threadMemory),
+      recentThreadMessages: referentialFollowup ? compactThreadMessagesForIntentRouter(payload.threadMessages) : [],
     };
 
     return [
@@ -2883,11 +2986,17 @@ class AgentRuntimeManager {
         role: "system",
         content: [
           "You classify unclear Tantalum IDE user messages. Return strict JSON only.",
+          "This is a fast intent router before direct model inference. Decide whether the user wants a workspace task, a workspace question, ordinary chat, or a clarification.",
           "Schema:",
-          '{"intent":"workspace_edit|workspace_question|general_chat|clarify","operation":"create_file|delete_file|move_file|rename_file|edit_file|none","targetPhrase":"short user target phrase","destinationPhrase":"short destination phrase or empty","candidatePath":"workspace-relative path from workspaceFiles/context/threadMemory/activeEditor or empty","candidateSource":"prompt|workspace|active_editor|context|thread_memory|none","confidence":0.0,"clarification":"question to ask or empty"}',
+          '{"intent":"workspace_edit|workspace_question|general_chat|clarify","operation":"create_file|delete_file|move_file|rename_file|edit_file|none","targetPhrase":"short user target phrase","destinationPhrase":"short destination phrase or empty","candidatePath":"workspace-relative path from workspaceFiles/context/threadMemory/activeEditor or empty","candidateSource":"prompt|workspace|active_editor|context|thread_memory|none","confidence":0.0,"clarification":"question to ask or empty","instruction":"optional concise edit instruction"}',
           "Rules:",
           "- This is classification only. Never give commands, shell, terminal, PowerShell, Command Prompt, del, or rm instructions.",
-          "- If the user likely wants to change workspace files, use intent workspace_edit.",
+          "- If the user likely wants to change workspace files, use intent workspace_edit, even when the command verb or target wording has obvious typos or repeated letters.",
+          "- If the user is asking about files, project structure, code, or concepts without asking to change the workspace, use intent workspace_question or general_chat.",
+          "- If referentialFollowup is true, resolve short phrases like 'do all those' against recentThreadMessages. Use prior assistant recommendations only as advice to apply, not as proof that work was already done.",
+          "- For referential follow-up edit_file tasks, set instruction to the exact code change to apply from the prior assistant recommendation.",
+          "- If referentialFollowup is true and prior assistant advice has no exact target file, use intent clarify and ask for the file.",
+          "- If referentialFollowup is true and prior assistant advice mentions multiple possible target files without a clear choice, use intent clarify and list the candidates.",
           "- Use workspaceFiles to repair vague or typo file targets. If exactly one workspace file clearly matches the user phrase, put it in candidatePath and set candidateSource workspace.",
           "- candidatePath must be workspace-relative and must come from workspaceFiles, explicit context, threadMemory, or activeEditor. Do not invent existing file paths.",
           "- Use activeEditor only as candidateSource active_editor. If the prompt does not explicitly say current file, open file, active file, or this file, you may still suggest activeEditor only when it is the best available guess; Tantalum will require approval.",
@@ -3354,12 +3463,43 @@ class AgentRuntimeManager {
     return `This looks like a ${pendingAction.riskLevel}-risk workspace change. Approve to run it, or skip it.`;
   }
 
-  async #repairWorkspaceAction({ route, prompt, workspaceRoot, payload, reason, blockedTask = null, plannerClarification = "", fallbackTaskList = null }) {
-    if (payload.intent === "ask" || !workspaceRoot || (!looksLikeUncertainWorkspaceAction(prompt) && !blockedTask && !plannerClarification)) {
+  async #repairWorkspaceAction({
+    route,
+    prompt,
+    workspaceRoot,
+    payload,
+    reason,
+    blockedTask = null,
+    plannerClarification = "",
+    fallbackTaskList = null,
+    forceClassifier = false,
+    allowImmediateLowRisk = false,
+    referentialFollowup = false,
+    clarifyNonEdit = false,
+    blockAskMode = false,
+  }) {
+    if (payload.intent === "ask") {
+      if (blockAskMode) {
+        return {
+          ...route,
+          engine: LOCAL_ENGINE,
+          reason: `${reason || "action_repair"}_ask_mode_blocks_edit`,
+          confidence: 0.88,
+          persistThread: true,
+          userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply workspace changes.",
+          requiresUserDecision: false,
+          decisionKind: "none",
+          taskList: fallbackTaskList || undefined,
+        };
+      }
       return null;
     }
 
-    const classifier = await this.#classifyUncertainWorkspaceAction({ prompt, payload, workspaceRoot, blockedTask, plannerClarification }).catch(() => null);
+    if (!workspaceRoot || (!forceClassifier && !looksLikeUncertainWorkspaceAction(prompt) && !blockedTask && !plannerClarification)) {
+      return null;
+    }
+
+    const classifier = await this.#classifyUncertainWorkspaceAction({ prompt, payload, workspaceRoot, blockedTask, plannerClarification, referentialFollowup }).catch(() => null);
     if (!classifier) {
       return {
         ...route,
@@ -3374,13 +3514,13 @@ class AgentRuntimeManager {
     }
 
     if (classifier.intent === "workspace_question" || classifier.intent === "general_chat") {
-      return blockedTask || plannerClarification
+      return blockedTask || plannerClarification || clarifyNonEdit
         ? {
             ...route,
             engine: LOCAL_ENGINE,
             reason: `${reason || "action_repair"}_non_edit`,
             confidence: Math.max(0.72, classifier.confidence || 0),
-            userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer workspace action before changing files.",
+            userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer prior workspace change before changing files.",
             requiresUserDecision: true,
             decisionKind: "clarify",
             taskList: fallbackTaskList || undefined,
@@ -3402,8 +3542,10 @@ class AgentRuntimeManager {
     }
 
     const activeEditorSuggestion = this.#isActiveEditorActionRepairSuggestion(classifier, workspaceRoot, payload) && !promptExplicitlyReferencesActiveFile(prompt);
-    const pendingAction = createFallbackPendingAction(prompt, activeEditorSuggestion ? "high" : fallbackRiskForOperation(classifier.operation));
-    const taskList = this.#taskListFromClassifierResult(classifier, pendingAction.id, workspaceRoot, payload);
+    const requiresApproval =
+      !allowImmediateLowRisk || activeEditorSuggestion || ["delete_file", "move_file", "rename_file"].includes(classifier.operation);
+    const pendingAction = requiresApproval ? createFallbackPendingAction(prompt, activeEditorSuggestion ? "high" : fallbackRiskForOperation(classifier.operation)) : null;
+    const taskList = this.#taskListFromClassifierResult(classifier, pendingAction?.id || null, workspaceRoot, payload);
     if (!taskList) {
       return {
         ...route,
@@ -3438,16 +3580,22 @@ class AgentRuntimeManager {
       reason: reason || "action_repair",
       confidence: classifier.confidence,
       persistThread: true,
-      userMessage: this.#actionRepairApprovalMessage(prompt, classifier, pendingAction, activeEditorSuggestion),
-      pendingAction,
-      requiresUserDecision: true,
-      decisionKind: "approve_skip",
+      userMessage: pendingAction ? this.#actionRepairApprovalMessage(prompt, classifier, pendingAction, activeEditorSuggestion) : undefined,
+      pendingAction: pendingAction || undefined,
+      requiresUserDecision: Boolean(pendingAction),
+      decisionKind: pendingAction ? "approve_skip" : "none",
       taskList: checkedTaskList,
     };
   }
 
   async #routeUncertainWorkspaceAction({ route, prompt, workspaceRoot, payload }) {
-    if (route.engine !== DIRECT_LLM_ENGINE || !looksLikeUncertainWorkspaceAction(prompt)) {
+    if (route.engine !== DIRECT_LLM_ENGINE) {
+      return null;
+    }
+
+    const uncertainWorkspaceAction = looksLikeUncertainWorkspaceAction(prompt);
+    const fastIntentRouterCandidate = !uncertainWorkspaceAction && shouldRunFastIntentRouterBeforeDirect(prompt);
+    if (!uncertainWorkspaceAction && !fastIntentRouterCandidate) {
       return null;
     }
 
@@ -3456,7 +3604,28 @@ class AgentRuntimeManager {
       prompt,
       workspaceRoot,
       payload,
-      reason: "uncertain_workspace_action_repair",
+      reason: uncertainWorkspaceAction ? "uncertain_workspace_action_repair" : "fast_intent_router",
+      forceClassifier: fastIntentRouterCandidate,
+      allowImmediateLowRisk: true,
+    });
+  }
+
+  async #routeReferentialFollowup({ route, prompt, workspaceRoot, payload }) {
+    if (!shouldRunReferentialFollowupRouter(prompt, payload)) {
+      return null;
+    }
+
+    return this.#repairWorkspaceAction({
+      route,
+      prompt,
+      workspaceRoot,
+      payload,
+      reason: "referential_followup",
+      forceClassifier: true,
+      allowImmediateLowRisk: true,
+      referentialFollowup: true,
+      clarifyNonEdit: true,
+      blockAskMode: true,
     });
   }
 
@@ -3496,12 +3665,20 @@ class AgentRuntimeManager {
       }
     }
 
+    const routePendingAction = normalizePendingAction(route.pendingAction);
+    if (!payloadPendingAction && !routePendingAction) {
+      const followupRoute = await this.#routeReferentialFollowup({ route, prompt, workspaceRoot, payload });
+      if (followupRoute) {
+        return followupRoute;
+      }
+    }
+
     if (route.engine !== OPENCODE_EDIT_ENGINE) {
       const uncertainRoute = await this.#routeUncertainWorkspaceAction({ route, prompt, workspaceRoot, payload });
       return uncertainRoute || route;
     }
 
-    const pendingAction = normalizePendingAction(route.pendingAction) || payloadPendingAction;
+    const pendingAction = routePendingAction || payloadPendingAction;
     const reusableTaskList = payloadPendingAction ? providedTaskList : null;
     let taskList = reusableTaskList;
 

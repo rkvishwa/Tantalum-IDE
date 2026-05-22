@@ -298,6 +298,204 @@
   height: 100%;
 }
 
+.library-notification-menu {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.library-notification-trigger {
+  position: relative;
+}
+
+.library-notification-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-grid;
+  min-width: 14px;
+  height: 14px;
+  place-items: center;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.library-notification-dropdown {
+  position: absolute;
+  top: 33px;
+  right: 0;
+  z-index: 85;
+  width: min(330px, calc(100vw - 1rem));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.24);
+}
+
+.library-notification-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.library-notification-head strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.library-notification-head span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.library-notification-list {
+  display: grid;
+  gap: 2px;
+  padding: 5px 0;
+}
+
+.library-notification-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.library-notification-item:disabled {
+  cursor: default;
+}
+
+.library-notification-item:not(:disabled):hover,
+.library-notification-item:not(:disabled):focus-visible {
+  background: var(--bg-hover);
+}
+
+.library-notification-status {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.library-install-success .library-notification-status,
+.library-install-success .library-install-history-icon {
+  color: var(--success);
+}
+
+.library-install-error .library-notification-status,
+.library-install-error .library-install-history-icon {
+  color: var(--danger);
+}
+
+.library-notification-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 8px;
+}
+
+.library-notification-title-row strong,
+.library-install-history-main strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-notification-title-row span,
+.library-install-history-main div span {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.library-notification-item p,
+.library-install-history-main p,
+.library-install-history-main small {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.library-install-progress {
+  position: relative;
+  height: 3px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.library-install-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.library-install-progress-indeterminate span {
+  width: 42%;
+  animation: library-install-progress-slide 1.15s ease-in-out infinite;
+}
+
+@keyframes library-install-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+.library-notification-empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 18px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.library-notification-view-all {
+  width: 100%;
+  min-height: 28px;
+  border-top: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.library-notification-view-all:hover {
+  background: var(--bg-hover);
+}
+
 .account-menu-trigger {
   gap: 3px;
   height: 28px;
@@ -675,6 +873,96 @@
   height: 16px;
   margin: 0;
   accent-color: var(--accent);
+}
+
+.settings-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.arduino-library-path-card,
+.arduino-migration-summary {
+  display: grid;
+  gap: 6px;
+}
+
+.arduino-library-path-card span,
+.arduino-migration-summary span {
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+.arduino-library-path-card code,
+.arduino-migration-summary code {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-alt);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.arduino-inline-banner {
+  margin: 0;
+}
+
+.arduino-migration-progress {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-alt);
+}
+
+.arduino-migration-progress div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.arduino-migration-progress strong {
+  font-size: 0.84rem;
+}
+
+.arduino-migration-progress span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.arduino-progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.arduino-progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+.arduino-migration-summary {
+  padding-top: 2px;
+}
+
+.arduino-migration-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.arduino-migration-summary small {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .accent-picker {

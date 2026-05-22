@@ -8,7 +8,7 @@ const path = require("node:path");
 const os = require("node:os");
 const { execFile } = require("node:child_process");
 
-const { getCliPath } = require("../../arduinoHandler");
+const { getArduinoCliEnv, getCliPath } = require("../../arduinoHandler");
 
 class ProvisioningService {
   constructor() {
@@ -18,7 +18,7 @@ class ProvisioningService {
   runCliCommand(args, options = {}) {
     return new Promise((resolve) => {
       try {
-        execFile(getCliPath(), args, options, (error, stdout, stderr) => {
+        execFile(getCliPath(), args, { ...options, env: getArduinoCliEnv(options.env) }, (error, stdout, stderr) => {
           if (error) {
             resolve({
               success: false,
@@ -171,7 +171,7 @@ class ProvisioningService {
         "--additional-urls",
         "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json",
       ],
-      { timeout: 300000 }
+      { timeout: 10 * 60 * 1000 }
     );
 
     if (!updateResult.success) {
@@ -186,7 +186,7 @@ class ProvisioningService {
         "--additional-urls",
         "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json",
       ],
-      { timeout: 900000 }
+      { timeout: 2 * 60 * 60 * 1000 }
     );
 
     if (!installResult.success) {

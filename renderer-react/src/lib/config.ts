@@ -28,6 +28,7 @@ export const appwriteConfig = {
   deviceGatewayFunctionId: readConfig('VITE_APPWRITE_DEVICE_GATEWAY_FUNCTION_ID', desktopCloudConfig.deviceGatewayFunctionId ?? ''),
   agentSettingsFunctionId: readConfig('VITE_APPWRITE_AGENT_SETTINGS_FUNCTION_ID', desktopCloudConfig.agentSettingsFunctionId ?? ''),
   agentGatewayFunctionId: readConfig('VITE_APPWRITE_AGENT_GATEWAY_FUNCTION_ID', desktopCloudConfig.agentGatewayFunctionId ?? ''),
+  boardDetectionFunctionId: readConfig('VITE_APPWRITE_BOARD_DETECTION_FUNCTION_ID', desktopCloudConfig.boardDetectionFunctionId ?? ''),
 };
 
 export function hasRequiredCloudConfiguration() {

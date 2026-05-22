@@ -779,6 +779,351 @@ async function runActionRepairMoveIntentSmoke() {
   });
 }
 
+async function runFastIntentRouterCreateProjectStructureSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    const events = [];
+    const classifierRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        classifierRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            intent: "workspace_edit",
+            operation: "create_file",
+            targetPhrase: "agent md file with project strucure",
+            destinationPhrase: "",
+            candidatePath: "",
+            candidateSource: "prompt",
+            confidence: 0.93,
+            clarification: "",
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "creeeeeate a agent md file with project strucure",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-fast-intent-router-project-structure",
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected fast intent router before direct inference");
+    assert.equal(route.engine, "opencode_edit");
+    assert.equal(route.reason, "fast_intent_router");
+    assert.equal(route.requiresUserDecision, false);
+    const structureTask = route.taskList.items.find((item) => item.kind === "create_project_structure_doc");
+    assert.ok(structureTask, "expected project-structure document task");
+    assert.equal(structureTask.targetPath, "agent.md");
+
+    const result = await manager.run({
+      prompt: "creeeeeate a agent md file with project strucure",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-fast-intent-router-project-structure-run",
+    });
+
+    assert.equal(classifierRequests.length, 2, "expected fast intent router during route and run");
+    assert.equal(result.requiresApproval, false);
+    assert.ok(result.changedFiles.some((file) => file.path === "agent.md" && file.changeType === "create"));
+    assert.match(await fs.readFile(path.join(workspaceRoot, "agent.md"), "utf8"), /# Project Structure/);
+  });
+}
+
+async function runFastIntentRouterQuestionSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    const events = [];
+    const classifierRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        classifierRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            intent: "workspace_question",
+            operation: "none",
+            targetPhrase: "agent md file",
+            destinationPhrase: "",
+            candidatePath: "",
+            candidateSource: "none",
+            confidence: 0.9,
+            clarification: "",
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "is agent md a file",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-fast-intent-router-question",
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected workspace-like direct prompt to use the fast intent router");
+    assert.equal(route.engine, "direct_llm");
+    assert.equal(route.requiresUserDecision, false);
+    assert.equal(route.taskList, undefined);
+
+    const plainQuestionRoute = await manager.route({
+      prompt: "what is two plus two?",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-fast-intent-router-plain-question",
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected plain non-workspace question to skip the fast intent router");
+    assert.equal(plainQuestionRoute.engine, "direct_llm");
+  });
+}
+
+async function runFastIntentRouterLowConfidenceSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    const events = [];
+    const classifierRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        classifierRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            intent: "clarify",
+            operation: "none",
+            targetPhrase: "agent md file project strucure",
+            destinationPhrase: "",
+            candidatePath: "",
+            candidateSource: "none",
+            confidence: 0.48,
+            clarification: "Do you want me to create agent.md with the project structure, or are you asking what it should contain?",
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "agent md file project strucure",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-fast-intent-router-low-confidence",
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected low-confidence workspace-like prompt to use the fast intent router");
+    assert.equal(route.engine, "local");
+    assert.equal(route.decisionKind, "clarify");
+    assert.match(route.userMessage, /create agent\.md/i);
+    assert.equal(route.taskList, undefined);
+  });
+}
+
+async function runReferentialFollowupSerialEditSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "esp32_inbuild_rgb_to_light.ino"), "void setup() {\n  pinMode(48, OUTPUT);\n}\n", "utf8");
+
+    const events = [];
+    const classifierRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        classifierRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            intent: "workspace_edit",
+            operation: "edit_file",
+            targetPhrase: "esp32_inbuild_rgb_to_light.ino",
+            destinationPhrase: "",
+            candidatePath: "esp32_inbuild_rgb_to_light.ino",
+            candidateSource: "workspace",
+            confidence: 0.94,
+            clarification: "",
+            instruction: "Add Serial.begin(115200) at the start of setup() and print a startup message with Serial.println().",
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "do all those",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-referential-followup-serial-edit",
+      threadMessages: [
+        {
+          role: "user",
+          content: "I pushed esp32_inbuild_rgb_to_light.ino and got garbled serial text.",
+        },
+        {
+          role: "assistant",
+          content:
+            "Add Serial.begin(115200) at the start of setup() in esp32_inbuild_rgb_to_light.ino and add Serial.println(\"ESP32 S3 RGB LED setup starting...\"); to confirm the sketch is running.",
+        },
+      ],
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected referential follow-up classifier");
+    assert.equal(route.engine, "opencode_edit");
+    assert.equal(route.reason, "referential_followup");
+    assert.equal(route.requiresUserDecision, false);
+    const editTask = route.taskList.items.find((item) => item.kind === "opencode_edit");
+    assert.ok(editTask, "expected referential follow-up edit task");
+    assert.equal(editTask.targetPath, "esp32_inbuild_rgb_to_light.ino");
+    assert.match(editTask.instruction, /Serial\.begin\(115200\)/);
+    const requestText = JSON.stringify(classifierRequests[0]);
+    assert.match(requestText, /referentialFollowup/);
+    assert.match(requestText, /recentThreadMessages/);
+  });
+}
+
+async function runReferentialFollowupNoActionClarificationSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    const events = [];
+    const classifierRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        classifierRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            intent: "clarify",
+            operation: "none",
+            targetPhrase: "",
+            destinationPhrase: "",
+            candidatePath: "",
+            candidateSource: "none",
+            confidence: 0.42,
+            clarification: "What workspace change should I apply?",
+            instruction: "",
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "do all those",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-referential-followup-no-action",
+      threadMessages: [
+        { role: "user", content: "what is two plus two?" },
+        { role: "assistant", content: "Two plus two is four." },
+      ],
+    });
+
+    assert.equal(classifierRequests.length, 1, "expected referential follow-up classifier");
+    assert.equal(route.engine, "local");
+    assert.equal(route.decisionKind, "clarify");
+    assert.match(route.userMessage, /workspace change/i);
+  });
+}
+
+async function runReferentialFollowupAmbiguousTargetSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "first.ino"), "void setup() {}\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "second.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () =>
+        fakeChatCompletion(
+          JSON.stringify({
+            intent: "clarify",
+            operation: "edit_file",
+            targetPhrase: "first.ino or second.ino",
+            destinationPhrase: "",
+            candidatePath: "",
+            candidateSource: "none",
+            confidence: 0.64,
+            clarification: "Should I apply the serial setup change to first.ino or second.ino?",
+            instruction: "Add Serial.begin(115200) in setup().",
+          }),
+        ),
+    });
+
+    const route = await manager.route({
+      prompt: "do that",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-referential-followup-ambiguous-target",
+      threadMessages: [
+        { role: "user", content: "which files need serial setup?" },
+        { role: "assistant", content: "You could add Serial.begin(115200) to first.ino or second.ino." },
+      ],
+    });
+
+    assert.equal(route.engine, "local");
+    assert.equal(route.decisionKind, "clarify");
+    assert.match(route.userMessage, /first\.ino or second\.ino/i);
+  });
+}
+
+async function runReferentialFollowupDestructiveApprovalSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "old_debug.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () =>
+        fakeChatCompletion(
+          JSON.stringify({
+            intent: "workspace_edit",
+            operation: "delete_file",
+            targetPhrase: "old_debug.ino",
+            destinationPhrase: "",
+            candidatePath: "old_debug.ino",
+            candidateSource: "workspace",
+            confidence: 0.91,
+            clarification: "",
+            instruction: "",
+          }),
+        ),
+    });
+
+    const route = await manager.route({
+      prompt: "do that",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-referential-followup-destructive",
+      threadMessages: [
+        { role: "user", content: "what should I clean up?" },
+        { role: "assistant", content: "Delete old_debug.ino if you no longer need that debug sketch." },
+      ],
+    });
+
+    assert.equal(route.engine, "opencode_edit");
+    assert.equal(route.reason, "referential_followup");
+    assert.equal(route.requiresUserDecision, true);
+    assert.equal(route.decisionKind, "approve_skip");
+    const deleteTask = route.taskList.items.find((item) => item.kind === "delete_file");
+    assert.ok(deleteTask, "expected destructive follow-up delete task");
+    assert.equal(deleteTask.targetPath, "old_debug.ino");
+  });
+}
+
 async function runPlannerClarificationActionRepairSmoke() {
   await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
     await fs.mkdir(path.join(workspaceRoot, "sketches"), { recursive: true });
@@ -1987,6 +2332,13 @@ async function main() {
   await runUncertainWorkspaceActionClarificationSmoke();
   await runUncertainWorkspaceActionLowConfidenceSmoke();
   await runActionRepairMoveIntentSmoke();
+  await runFastIntentRouterCreateProjectStructureSmoke();
+  await runFastIntentRouterQuestionSmoke();
+  await runFastIntentRouterLowConfidenceSmoke();
+  await runReferentialFollowupSerialEditSmoke();
+  await runReferentialFollowupNoActionClarificationSmoke();
+  await runReferentialFollowupAmbiguousTargetSmoke();
+  await runReferentialFollowupDestructiveApprovalSmoke();
   await runPlannerClarificationActionRepairSmoke();
   await runActiveEditorSuggestionActionRepairSmoke();
   await runActionRepairRejectsCommandOutputSmoke();

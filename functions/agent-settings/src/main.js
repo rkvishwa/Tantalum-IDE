@@ -2,6 +2,12 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 
 import { Account, Client, Databases, ID, Query } from 'node-appwrite';
+import {
+  LEGACY_RAW_KEY_SENTINEL,
+  encryptSecret,
+  isLegacyRawSecret,
+  resolveStoredApiKey,
+} from './secretEnvelope.js';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -123,7 +129,7 @@ function maskCredential(document) {
     baseUrl: document.baseUrl || '',
     modelNames: ensureArray(document.modelNames),
     enabled: Boolean(document.enabled),
-    apiKeyPreview: document.apiKeyPreview || redactSecret(document.apiKey),
+    apiKeyPreview: document.apiKeyPreview || (isLegacyRawSecret(document.apiKey) ? redactSecret(document.apiKey) : ''),
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
     lastUsedAt: document.lastUsedAt || null,
@@ -800,7 +806,8 @@ async function createCustomCredential(req, res) {
       userId: user.$id,
       displayName,
       baseUrl,
-      apiKey,
+      apiKey: LEGACY_RAW_KEY_SENTINEL,
+      apiKeyEnvelope: encryptSecret(apiKey),
       apiKeyPreview: redactSecret(apiKey),
       modelNames,
       enabled: payload.enabled !== false,
@@ -858,8 +865,10 @@ async function updateCustomCredential(req, res) {
   }
 
   if (String(payload.apiKey || '').trim()) {
-    update.apiKey = String(payload.apiKey).trim();
-    update.apiKeyPreview = redactSecret(update.apiKey);
+    const apiKey = String(payload.apiKey).trim();
+    update.apiKey = LEGACY_RAW_KEY_SENTINEL;
+    update.apiKeyEnvelope = encryptSecret(apiKey);
+    update.apiKeyPreview = redactSecret(apiKey);
   }
 
   const document = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID, credentialId, update);
@@ -901,11 +910,12 @@ async function testCustomCredential(req, res) {
   }
 
   const baseUrl = await validatePublicHttpsBaseUrl(credential.baseUrl);
+  const apiKey = resolveStoredApiKey(credential, 'Custom credential');
   const response = await fetch(`${baseUrl}/models`, {
     method: 'GET',
     redirect: 'manual',
     headers: {
-      Authorization: `Bearer ${credential.apiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       Accept: 'application/json',
     },
     signal: AbortSignal.timeout(15000),

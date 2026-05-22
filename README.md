@@ -63,6 +63,36 @@ Function variables:
 
 - `board-admin`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`
 - `device-gateway`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`, `APPWRITE_FIRMWARE_BUCKET_ID`
+- AI key functions (`agent-settings`, `agent-gateway`, `board-detection`) also require `TANTALUM_SECRET_KEK_V1` as an Appwrite secret variable. Generate it with:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+```
+
+Optional AI key variables:
+
+- `TANTALUM_SECRET_ACTIVE_KEK_VERSION`: defaults to `v1`
+- `TANTALUM_ALLOW_LEGACY_RAW_KEYS`: set to `true` only during migration if functions must temporarily read legacy raw `apiKey` fields
+
+API key records now store encrypted `apiKeyEnvelope` values and keep legacy `apiKey` as a sentinel placeholder. After adding the `apiKeyEnvelope` attributes and setting the KEK secret on the functions, run a dry-run migration:
+
+```bash
+npm run migrate:api-key-envelopes
+```
+
+Then run the write migration with `APPWRITE_API_KEY` and the same `TANTALUM_SECRET_KEK_V1` value in the shell:
+
+```bash
+npm run migrate:api-key-envelopes -- --apply
+```
+
+For new managed-pool or board-detection provider keys without an admin UI, generate an encrypted document fragment with:
+
+```bash
+npm run secret:encrypt-api-key
+```
+
+Rotate provider keys that were visible in Appwrite Console before this migration.
 
 If you redeploy later, package each function directory as a `tar.gz` archive and upload that archive to Appwrite. The source folders in `appwrite/functions/` are the canonical copies.
 

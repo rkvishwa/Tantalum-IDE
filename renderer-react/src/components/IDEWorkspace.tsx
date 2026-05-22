@@ -27,8 +27,10 @@ import {
   BookmarkCheck,
   BookmarkPlus,
   BookOpen,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
+  CircleStop,
   Clipboard,
   Copy,
   Cpu,
@@ -80,7 +82,23 @@ import {
   parentPath,
   sha256Hex,
 } from '@/lib/utils';
-import type { FileTreeNativeContextMenuRequest, GitStatus, MenuAction, ProjectFolder, WorkspaceReplaceChangedFile, WorkspaceSearchResult } from '@/types/electron';
+import type {
+  FileTreeNativeContextMenuRequest,
+  GitStatus,
+  LibraryInstallProgressEvent,
+  LibraryMigrationProgressEvent,
+  LocalBoardDetection,
+  LocalBoardPort,
+  LocalBoardProfile,
+  MenuAction,
+  ProjectFolder,
+  ToolchainNotification,
+  ToolchainNotificationInput,
+  ToolchainNotificationKind,
+  UsbUploadProgressEvent,
+  WorkspaceReplaceChangedFile,
+  WorkspaceSearchResult,
+} from '@/types/electron';
 import type { AgentChangePreview } from '@/types/electron';
 
 import { ConsoleTerminal } from './ConsoleTerminal';
@@ -112,10 +130,17 @@ type IDEWorkspaceProps = {
   onWorkspaceSearchOpenChange: (open: boolean) => void;
   uiPreferences: UiPreferences;
   resolvedTheme: 'dark' | 'light';
+  restoreToolchainNotificationRequest?: {
+    requestId: number;
+    notification: ToolchainNotification;
+  } | null;
 };
 
 export type SidebarView = 'explorer' | 'boards' | 'libraries' | 'git' | 'platforms' | 'terminal' | 'my-projects';
 type ConsoleView = 'output' | 'terminal';
+type LibraryManagerTab = 'all' | 'installed';
+type LibraryDetailTab = 'overview' | 'versions' | 'examples' | 'dependencies';
+type PlatformDetailTab = 'overview' | 'versions';
 type FileTabState = 'temporary' | 'preview' | 'saved';
 type ProjectSortMode = 'recent' | 'name' | 'favorites';
 type ProjectViewMode = 'grid' | 'list';
@@ -201,9 +226,14 @@ type Toast = {
   id: number;
   tone: 'info' | 'success' | 'error';
   message: string;
+  detail?: string;
+  progress?: number | null;
+  persistent?: boolean;
+  notificationId?: string;
   actions?: Array<{
     label: string;
     onSelect: () => void;
+    dismissOnSelect?: boolean;
   }>;
 };
 
@@ -212,28 +242,94 @@ type BoardPlatform = {
   name: string;
   latest?: string;
   version?: string;
+  versions?: string[];
+  installedVersion?: string;
   maintainer?: string;
   description?: string;
   website?: string;
   installed?: boolean;
 };
 
+type PlatformInstallProgressTask = {
+  installId: string;
+  platformId: string;
+  name: string;
+  operation: 'install' | 'remove';
+  notificationKind: ToolchainNotificationKind;
+  toastId: number;
+  version?: string;
+  progress: number | null;
+  stopping?: boolean;
+};
+
+type UsbUploadProgressTask = {
+  uploadId: string;
+  toastId: number;
+  notificationId: string;
+  lineBuffer: string;
+  lastProgress: number | null;
+};
+
+type LibraryDependency = string | {
+  name?: string;
+  version?: string;
+  version_constraint?: string;
+  versionConstraint?: string;
+};
+
+type LibraryExample = {
+  name: string;
+  relativePath?: string;
+  sketchPath?: string;
+};
+
+type LibraryReleaseSummary = {
+  version: string;
+  archiveFileName?: string;
+  downloadSize?: number;
+  resourceUrl?: string;
+  checksum?: string;
+  dependencies?: LibraryDependency[];
+};
+
 type LibraryEntry = {
   name: string;
   version?: string;
+  versions?: string[];
   sentence?: string;
   paragraph?: string;
   author?: string;
   maintainer?: string;
   category?: string;
+  architecture?: string;
+  architectures?: string[];
+  types?: string[];
+  license?: string;
+  website?: string;
+  installedVersion?: string;
+  dependencies?: LibraryDependency[];
+  resources?: {
+    url?: string;
+    archive_filename?: string;
+    size?: number;
+    cache_path?: string;
+  };
+  resourceUrl?: string;
+  archiveFileName?: string;
+  downloadSize?: number;
+  releases?: LibraryReleaseSummary[];
+  examples?: LibraryExample[];
+  installDir?: string;
+  sourceDir?: string;
   installed?: boolean;
 };
 
 const DEFAULT_MANAGER_RESULT_LIMIT = 20;
-const MANAGER_LOAD_TIMEOUT_MS = 8000;
+const MANAGER_LOAD_TIMEOUT_MS = 20000;
 const EDITOR_TAB_WHEEL_LINE_DELTA = 1;
 const EDITOR_TAB_WHEEL_PAGE_DELTA = 2;
 const EDITOR_TAB_SCROLL_MARGIN = 8;
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 
 const FALLBACK_LIBRARY_RESULTS: LibraryEntry[] = [
   { name: 'ArduinoJson', version: 'latest', sentence: 'JSON serialization and parsing for embedded projects.', author: 'Benoit Blanchon', category: 'Data Processing' },
@@ -306,20 +402,675 @@ function normalizePackageKey(value: string) {
   return value.trim().toLowerCase();
 }
 
+function createToolchainTaskId(prefix: string) {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getBoardOptionLabel(fqbn: string) {
+  return BOARD_OPTIONS.find((option) => option.value === fqbn)?.label ?? fqbn;
+}
+
+function isNonUploadableBoardFqbn(fqbn: string | null | undefined) {
+  const normalized = String(fqbn || '').trim().toLowerCase();
+  return normalized === 'esp32:esp32:esp32_family' || normalized.endsWith(':esp32_family') || normalized.endsWith('_family');
+}
+
+function isUploadableBoardFqbn(fqbn: string | null | undefined) {
+  return Boolean(String(fqbn || '').trim()) && !isNonUploadableBoardFqbn(fqbn);
+}
+
+function isOfficialArduinoBoardFqbn(fqbn: string | null | undefined) {
+  return String(fqbn || '').trim().toLowerCase().startsWith('arduino:');
+}
+
+function normalizeUploadableBoardFqbn(fqbn: string | null | undefined) {
+  const normalized = String(fqbn || '').trim();
+  return isUploadableBoardFqbn(normalized) ? normalized : '';
+}
+
+function firstUploadableBoardFqbn(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const normalized = normalizeUploadableBoardFqbn(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return '';
+}
+
+function normalizeBoardOptionFromCatalog(entry: Record<string, unknown>): LocalBoardOption | null {
+  const value = String(entry.fqbn || entry.FQBN || '').trim();
+  if (!isUploadableBoardFqbn(value)) {
+    return null;
+  }
+
+  const label = String(entry.name || entry.label || value).trim() || value;
+  return { value, label };
+}
+
+function uniqueBoardOptions(options: LocalBoardOption[]) {
+  const optionMap = new Map<string, LocalBoardOption>();
+  for (const option of options) {
+    if (option.value && !optionMap.has(option.value)) {
+      optionMap.set(option.value, option);
+    }
+  }
+
+  return Array.from(optionMap.values());
+}
+
+function boardOptionMatchesQuery(option: LocalBoardOption, query: string) {
+  if (!query) {
+    return true;
+  }
+
+  const normalized = query.toLowerCase();
+  return option.label.toLowerCase().includes(normalized) || option.value.toLowerCase().includes(normalized);
+}
+
+function pickBestLocalBoardDetection(detections: LocalBoardDetection[]) {
+  return (
+    detections.find((detection) => isUploadableBoardFqbn(detection.fqbn) && Number(detection.confidence || 0) >= 0.9) ??
+    detections.find((detection) => isUploadableBoardFqbn(detection.fqbn)) ??
+    detections[0] ??
+    null
+  );
+}
+
+function localBoardDisplayName(row: Pick<LocalBoardRow, 'name' | 'boardLabel' | 'fqbn' | 'port'>) {
+  return row.name || row.boardLabel || getBoardOptionLabel(row.fqbn) || row.port || 'Local board';
+}
+
+function localBoardConfidenceLabel(confidence: number | null | undefined) {
+  if (typeof confidence !== 'number') {
+    return 'manual';
+  }
+
+  if (confidence >= 0.9) {
+    return 'high';
+  }
+
+  if (confidence >= 0.55) {
+    return 'medium';
+  }
+
+  return 'low';
+}
+
+function localBoardConfidenceText(row: LocalBoardRow) {
+  if (row.source === 'manual') {
+    return 'Manual';
+  }
+
+  const label = row.confidenceLabel || localBoardConfidenceLabel(row.confidence);
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)} confidence`;
+}
+
+function canUploadLocalBoard(row: Pick<LocalBoardRow, 'fqbn' | 'port' | 'connected' | 'source'> | null | undefined) {
+  if (!row || !isUploadableBoardFqbn(row.fqbn) || !row.port) {
+    return false;
+  }
+
+  return row.connected || row.source === 'manual';
+}
+
+function canAttemptLocalUpload(row: Pick<LocalBoardRow, 'fqbn' | 'port'> | null | undefined) {
+  return Boolean(row && isUploadableBoardFqbn(row.fqbn) && row.port);
+}
+
+function isLocalUploadBusyAction(action: string | null) {
+  return action === 'prepare-upload' || action === 'verify-before-upload' || action === 'upload-local';
+}
+
+function localBoardPortLabel(port: LocalBoardPort) {
+  const descriptor = port.protocolLabel && port.protocolLabel !== port.path ? port.protocolLabel : port.label;
+  const details = [descriptor, port.manufacturer && port.manufacturer !== descriptor ? port.manufacturer : '']
+    .filter(Boolean)
+    .join(' - ');
+
+  return details ? `${port.path} (${details})` : port.path;
+}
+
+function compareLocalBoardPorts(left: LocalBoardPort, right: LocalBoardPort) {
+  if (Boolean(left.likelyBoard) !== Boolean(right.likelyBoard)) {
+    return left.likelyBoard ? -1 : 1;
+  }
+
+  return left.path.localeCompare(right.path, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function normalizeLocalBoardHardwareValue(value: string | null | undefined) {
+  return String(value || '').trim().toLowerCase();
+}
+
+type LocalBoardHardwareIdentity = {
+  path?: string | null;
+  port?: string | null;
+  fingerprint?: string | null;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+  pnpId?: string | null;
+  locationId?: string | null;
+};
+
+function localBoardIdentityPort(identity: LocalBoardHardwareIdentity) {
+  return identity.port || identity.path || '';
+}
+
+function localBoardHardwareMatchScore(candidate: LocalBoardHardwareIdentity, row: LocalBoardHardwareIdentity) {
+  if (row.fingerprint && candidate.fingerprint && normalizeLocalBoardHardwareValue(row.fingerprint) === normalizeLocalBoardHardwareValue(candidate.fingerprint)) {
+    return 100;
+  }
+
+  if (row.serialNumber && candidate.serialNumber && normalizeLocalBoardHardwareValue(row.serialNumber) === normalizeLocalBoardHardwareValue(candidate.serialNumber)) {
+    return 85;
+  }
+
+  if (row.pnpId && candidate.pnpId && normalizeLocalBoardHardwareValue(row.pnpId) === normalizeLocalBoardHardwareValue(candidate.pnpId)) {
+    return 75;
+  }
+
+  if (row.locationId && candidate.locationId && normalizeLocalBoardHardwareValue(row.locationId) === normalizeLocalBoardHardwareValue(candidate.locationId)) {
+    return 65;
+  }
+
+  const rowPort = normalizeLocalBoardHardwareValue(localBoardIdentityPort(row));
+  const candidatePort = normalizeLocalBoardHardwareValue(localBoardIdentityPort(candidate));
+  if (rowPort && candidatePort && rowPort === candidatePort) {
+    return 55;
+  }
+
+  if (
+    row.vendorId &&
+    row.productId &&
+    candidate.vendorId &&
+    candidate.productId &&
+    normalizeLocalBoardHardwareValue(row.vendorId) === normalizeLocalBoardHardwareValue(candidate.vendorId) &&
+    normalizeLocalBoardHardwareValue(row.productId) === normalizeLocalBoardHardwareValue(candidate.productId)
+  ) {
+    return 35;
+  }
+
+  return 0;
+}
+
+function pickBestLocalBoardHardwareMatch<T extends LocalBoardHardwareIdentity>(candidates: T[], row: LocalBoardHardwareIdentity, minimumScore = 35) {
+  const scored = candidates
+    .map((candidate) => ({ candidate, score: localBoardHardwareMatchScore(candidate, row) }))
+    .filter((entry) => entry.score >= minimumScore)
+    .sort((left, right) => right.score - left.score);
+
+  const best = scored[0];
+  if (!best) {
+    return null;
+  }
+
+  const next = scored[1];
+  if (best.score < 55 && next?.score === best.score) {
+    return null;
+  }
+
+  return best.candidate;
+}
+
+function localBoardPortMatchesProfile(port: LocalBoardPort, profile: LocalBoardProfile | null | undefined, selectedPortPath?: string) {
+  const portPath = normalizeLocalBoardHardwareValue(port.path);
+  if (selectedPortPath && portPath === normalizeLocalBoardHardwareValue(selectedPortPath)) {
+    return true;
+  }
+
+  if (!port.likelyBoard) {
+    return false;
+  }
+
+  if (!profile) {
+    return false;
+  }
+
+  if (profile.port && portPath === normalizeLocalBoardHardwareValue(profile.port)) {
+    return true;
+  }
+
+  if (profile.serialNumber && port.serialNumber && normalizeLocalBoardHardwareValue(profile.serialNumber) === normalizeLocalBoardHardwareValue(port.serialNumber)) {
+    return true;
+  }
+
+  if (profile.pnpId && port.pnpId && normalizeLocalBoardHardwareValue(profile.pnpId) === normalizeLocalBoardHardwareValue(port.pnpId)) {
+    return true;
+  }
+
+  if (profile.locationId && port.locationId && normalizeLocalBoardHardwareValue(profile.locationId) === normalizeLocalBoardHardwareValue(port.locationId)) {
+    return true;
+  }
+
+  return Boolean(
+    profile.vendorId &&
+      profile.productId &&
+      port.vendorId &&
+      port.productId &&
+      normalizeLocalBoardHardwareValue(profile.vendorId) === normalizeLocalBoardHardwareValue(port.vendorId) &&
+      normalizeLocalBoardHardwareValue(profile.productId) === normalizeLocalBoardHardwareValue(port.productId),
+  );
+}
+
+function pickLocalBoardDetectionForUpload(row: LocalBoardRow, detections: LocalBoardDetection[]) {
+  const exactPort = normalizeLocalBoardHardwareValue(row.port);
+  const exactDetection = exactPort
+    ? detections.find((detection) => normalizeLocalBoardHardwareValue(detection.port) === exactPort) ?? null
+    : null;
+  if (exactDetection) {
+    return exactDetection;
+  }
+
+  return pickBestLocalBoardHardwareMatch(detections, row);
+}
+
+function pickLocalBoardPortForUpload(row: LocalBoardRow, ports: LocalBoardPort[], detection: LocalBoardDetection | null) {
+  if (detection?.port) {
+    const detectionPath = normalizeLocalBoardHardwareValue(detection.port);
+    return ports.find((port) => normalizeLocalBoardHardwareValue(port.path) === detectionPath) ?? portOptionFromBoard(detection);
+  }
+
+  const exactPort = normalizeLocalBoardHardwareValue(row.port);
+  const exactMatch = exactPort ? ports.find((port) => normalizeLocalBoardHardwareValue(port.path) === exactPort) ?? null : null;
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const profileMatch = ports.find((port) => localBoardPortMatchesProfile(port, row.profile, row.port)) ?? null;
+  if (profileMatch) {
+    return profileMatch;
+  }
+
+  return pickBestLocalBoardHardwareMatch(ports, row);
+}
+
+function isLocalBoardUploadPortUnavailableError(message: string) {
+  const normalized = String(message || '');
+  return (
+    /FileNotFoundError|cannot find the file specified|doesn't exist|not currently available|No such file|ENOENT/i.test(normalized) &&
+    !/PermissionError|Access is denied/i.test(normalized)
+  );
+}
+
+function normalizeToolchainStreamChunk(chunk: string) {
+  const ansiEscapePattern = new RegExp(String.raw`\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`, 'g');
+  return String(chunk || '')
+    .replace(ansiEscapePattern, '')
+    .replace(/\r/g, '\n');
+}
+
+function portOptionFromBoard(board: Pick<LocalBoardDetection | LocalBoardProfile, 'port' | 'protocol' | 'protocolLabel' | 'manufacturer' | 'vendorId' | 'productId' | 'serialNumber' | 'pnpId' | 'locationId'>): LocalBoardPort | null {
+  if (!board.port) {
+    return null;
+  }
+
+  return {
+    path: board.port,
+    label: board.port,
+    protocol: board.protocol || 'serial',
+    protocolLabel: board.protocolLabel || 'Serial',
+    manufacturer: board.manufacturer || 'Unknown',
+    vendorId: board.vendorId ?? null,
+    productId: board.productId ?? null,
+    serialNumber: board.serialNumber ?? null,
+    pnpId: board.pnpId ?? null,
+    locationId: board.locationId ?? null,
+    likelyBoard: true,
+  };
+}
+
+function getLibraryVersionOptions(library: LibraryEntry) {
+  const versions = [library.version, ...(library.versions ?? [])]
+    .filter((version): version is string => Boolean(version && version !== 'Unknown'))
+    .map((version) => version.trim())
+    .filter((version) => version !== 'latest')
+    .filter(Boolean);
+  const uniqueVersions = Array.from(new Set(versions));
+  return ['latest', ...uniqueVersions];
+}
+
+function getInstallVersionForPayload(version: string | undefined) {
+  if (!version || version === 'latest' || version === 'Unknown') {
+    return undefined;
+  }
+
+  return version;
+}
+
+function normalizeManagerVersion(version: string | null | undefined) {
+  const normalized = String(version ?? '').trim();
+  if (!normalized || normalized.toLowerCase() === 'latest' || normalized.toLowerCase() === 'unknown') {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function managerVersionsMatch(left: string | undefined, right: string | undefined) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }) === 0;
+}
+
+function hasLibraryCatalogMetadata(library: LibraryEntry) {
+  return (
+    (library.versions?.length ?? 0) > 0 ||
+    (library.releases?.length ?? 0) > 0 ||
+    Boolean(library.resources || library.resourceUrl || library.archiveFileName || library.downloadSize)
+  );
+}
+
+function getLibraryInstalledVersion(library: LibraryEntry) {
+  return normalizeManagerVersion(library.installedVersion ?? (library.installed && !hasLibraryCatalogMetadata(library) ? library.version : undefined));
+}
+
+function getLibraryLatestVersion(library: LibraryEntry) {
+  const latestVersion = normalizeManagerVersion(library.version);
+  if (!latestVersion) {
+    return undefined;
+  }
+
+  if (library.installed && !hasLibraryCatalogMetadata(library) && managerVersionsMatch(latestVersion, getLibraryInstalledVersion(library))) {
+    return undefined;
+  }
+
+  return latestVersion;
+}
+
+function getLibraryVersionOptionLabel(library: LibraryEntry, version: string) {
+  if (version !== 'latest') {
+    return version;
+  }
+
+  const latestVersion = normalizeManagerVersion(library.version);
+  return latestVersion ? `${latestVersion} (Latest)` : 'Latest';
+}
+
+function getLibraryDropdownVersionOptions(library: LibraryEntry) {
+  const latestVersion = normalizeManagerVersion(library.version);
+  return getLibraryVersionOptions(library).filter((version) => (
+    version === 'latest' || !managerVersionsMatch(normalizeManagerVersion(version), latestVersion)
+  ));
+}
+
+function isLibraryOutdated(library: LibraryEntry) {
+  const installedVersion = getLibraryInstalledVersion(library);
+  const latestVersion = getLibraryLatestVersion(library);
+  return Boolean(library.installed && installedVersion && latestVersion && !managerVersionsMatch(installedVersion, latestVersion));
+}
+
+function getPlatformInstalledVersion(platform: BoardPlatform) {
+  return normalizeManagerVersion(platform.installedVersion ?? (platform.installed ? platform.version : undefined));
+}
+
+function getPlatformLatestVersion(platform: BoardPlatform) {
+  return normalizeManagerVersion(platform.latest);
+}
+
+function getPlatformVersionOptionLabel(platform: BoardPlatform, version: string) {
+  if (version !== 'latest') {
+    return version;
+  }
+
+  const latestVersion = getPlatformLatestVersion(platform);
+  return latestVersion ? `${latestVersion} (Latest)` : 'Latest';
+}
+
+function getPlatformDropdownVersionOptions(platform: BoardPlatform) {
+  const latestVersion = getPlatformLatestVersion(platform);
+  return getPlatformVersionOptions(platform).filter((version) => (
+    version === 'latest' || !managerVersionsMatch(normalizeManagerVersion(version), latestVersion)
+  ));
+}
+
+function isPlatformOutdated(platform: BoardPlatform) {
+  const installedVersion = getPlatformInstalledVersion(platform);
+  const latestVersion = getPlatformLatestVersion(platform);
+  return Boolean(platform.installed && installedVersion && latestVersion && !managerVersionsMatch(installedVersion, latestVersion));
+}
+
 function applyLibraryInstalledState(libraries: LibraryEntry[], installedLibraries: LibraryEntry[]) {
-  const installedNames = new Set(installedLibraries.map((entry) => normalizePackageKey(entry.name)));
+  const installedByName = new Map(installedLibraries.map((entry) => [normalizePackageKey(entry.name), entry]));
   return libraries.map((library) => ({
     ...library,
-    installed: installedNames.has(normalizePackageKey(library.name)),
+    installed: installedByName.has(normalizePackageKey(library.name)),
+    installedVersion: installedByName.get(normalizePackageKey(library.name))?.installedVersion ?? installedByName.get(normalizePackageKey(library.name))?.version,
+    examples: installedByName.get(normalizePackageKey(library.name))?.examples ?? library.examples,
+    installDir: installedByName.get(normalizePackageKey(library.name))?.installDir ?? library.installDir,
+    sourceDir: installedByName.get(normalizePackageKey(library.name))?.sourceDir ?? library.sourceDir,
   }));
 }
 
+function libraryMatchesSearch(library: LibraryEntry, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return [
+    library.name,
+    library.version,
+    library.installedVersion,
+    library.sentence,
+    library.paragraph,
+    library.author,
+    library.maintainer,
+    library.category,
+  ].some((value) => String(value ?? '').toLowerCase().includes(normalizedQuery));
+}
+
+function isGithubLibraryUrl(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    return new URL(value).hostname.toLowerCase() === 'github.com';
+  } catch {
+    return false;
+  }
+}
+
+function getLibraryArchitectures(library: LibraryEntry) {
+  if (Array.isArray(library.architectures) && library.architectures.length > 0) {
+    return library.architectures.join(', ');
+  }
+
+  return library.architecture;
+}
+
+function getLibraryArchiveFileName(library: LibraryEntry) {
+  return library.archiveFileName || library.resources?.archive_filename;
+}
+
+function getLibraryDownloadSize(library: LibraryEntry) {
+  return library.downloadSize ?? library.resources?.size;
+}
+
+function getLibraryDependencyLabel(dependency: LibraryDependency) {
+  if (typeof dependency === 'string') {
+    return dependency;
+  }
+
+  const constraint = dependency.version_constraint || dependency.versionConstraint || dependency.version;
+  return [dependency.name, constraint].filter(Boolean).join(' ');
+}
+
+function uniqueNonEmpty(values: Array<string | undefined | null>) {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function getLibraryReleases(library: LibraryEntry): LibraryReleaseSummary[] {
+  if (library.releases?.length) {
+    return library.releases;
+  }
+
+  return getLibraryVersionOptions(library)
+    .filter((version) => version !== 'latest')
+    .map((version) => ({ version }));
+}
+
+function getLibraryFeatureHighlights(library: LibraryEntry) {
+  const architectures = getLibraryArchitectures(library);
+  const dependencyCount = library.dependencies?.length ?? 0;
+  const versions = getLibraryReleases(library);
+
+  return uniqueNonEmpty([
+    library.sentence,
+    library.category ? `${library.category} category package` : undefined,
+    architectures ? `Architecture support: ${architectures}` : undefined,
+    dependencyCount > 0 ? `${dependencyCount} declared ${dependencyCount === 1 ? 'dependency' : 'dependencies'}` : undefined,
+    versions.length > 1 ? `${versions.length} published versions available` : undefined,
+    library.website ? `${isGithubLibraryUrl(library.website) ? 'Repository' : 'Official'} link available` : undefined,
+  ]).slice(0, 6);
+}
+
+function getLibraryUseCases(library: LibraryEntry) {
+  const text = [library.name, library.sentence, library.paragraph, library.category].join(' ').toLowerCase();
+  const useCases: string[] = [];
+
+  if (/(json|serialization|deserialize|serialize)/.test(text)) {
+    useCases.push('Parsing and generating JSON payloads');
+  }
+  if (/(display|oled|lcd|tft|screen|graphics|gfx)/.test(text)) {
+    useCases.push('Building display and screen interfaces');
+  }
+  if (/(sensor|temperature|humidity|pressure|accelerometer|imu|dht)/.test(text)) {
+    useCases.push('Reading sensor data in sketches');
+  }
+  if (/(led|neopixel|fastled|rgb|addressable)/.test(text)) {
+    useCases.push('Controlling LEDs and light animations');
+  }
+  if (/(mqtt|wifi|ethernet|network|http|client|server|pubsub)/.test(text)) {
+    useCases.push('Connecting devices to networks and services');
+  }
+  if (/(eeprom|flash|storage|filesystem|sd card|memory)/.test(text)) {
+    useCases.push('Persisting configuration or device data');
+  }
+  if (/(i2c|spi|wire|bus|serial|onewire|1-wire)/.test(text)) {
+    useCases.push('Communicating with peripherals and buses');
+  }
+  if (/(servo|motor|pwm|stepper|actuator)/.test(text)) {
+    useCases.push('Driving motors, servos, or actuators');
+  }
+
+  if (library.category) {
+    useCases.push(`${library.category} sketches and prototypes`);
+  }
+
+  return uniqueNonEmpty(useCases.length ? useCases : ['Arduino sketches that use this package API']).slice(0, 6);
+}
+
+function getPlatformVersionOptions(platform: BoardPlatform) {
+  const versions = [platform.latest, platform.version, platform.installedVersion, ...(platform.versions ?? [])]
+    .filter((version): version is string => Boolean(version && version !== 'Unknown'))
+    .map((version) => version.trim())
+    .filter((version) => version !== 'latest')
+    .filter(Boolean);
+  const uniqueVersions = Array.from(new Set(versions));
+  return ['latest', ...uniqueVersions];
+}
+
+function getPlatformInstallVersion(platform: BoardPlatform, selectedVersion: string | undefined) {
+  if (!selectedVersion || selectedVersion === 'latest' || selectedVersion === 'Unknown') {
+    return getPlatformLatestVersion(platform) || normalizeManagerVersion(platform.version) || 'latest';
+  }
+
+  return selectedVersion;
+}
+
+function extractInstallProgressPercent(chunk: string) {
+  const match = String(chunk || '').match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+  if (!match) {
+    return null;
+  }
+
+  const progress = Number.parseFloat(match[1]);
+  if (!Number.isFinite(progress)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, progress));
+}
+
+function formatInstallProgressMessage(chunk: string, fallback: string) {
+  const line = String(chunk || '')
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .pop();
+
+  return line || fallback;
+}
+
+function getPlatformSupportedBoards(platform: BoardPlatform) {
+  const description = platform.description?.trim();
+  const boardsPrefix = 'Boards included in this package:';
+  if (description?.startsWith(boardsPrefix)) {
+    return description
+      .slice(boardsPrefix.length)
+      .split(',')
+      .map((board) => board.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+  }
+
+  return uniqueNonEmpty([
+    description,
+    platform.id ? `Core package: ${platform.id}` : undefined,
+  ]).slice(0, 4);
+}
+
+function getPlatformUseCases(platform: BoardPlatform) {
+  const text = [platform.id, platform.name, platform.description, platform.maintainer].join(' ').toLowerCase();
+  const useCases: string[] = [];
+
+  if (/(esp32|esp8266|wifi|wireless|iot)/.test(text)) {
+    useCases.push('Wireless and IoT device firmware');
+  }
+  if (/(avr|uno|nano|mega|classic)/.test(text)) {
+    useCases.push('Classic Arduino sketch builds and uploads');
+  }
+  if (/(samd|mbed|renesas|portenta|mkr)/.test(text)) {
+    useCases.push('Modern Arduino board projects');
+  }
+  if (/(rp2040|pico)/.test(text)) {
+    useCases.push('RP2040 and Pico-compatible sketches');
+  }
+  if (/(stm32|stmicroelectronics)/.test(text)) {
+    useCases.push('STM32 microcontroller development');
+  }
+  if (/(nrf|nordic|ble|bluetooth)/.test(text)) {
+    useCases.push('Bluetooth and low-power device sketches');
+  }
+
+  return uniqueNonEmpty(useCases.length ? useCases : [`Compiling and uploading sketches for ${platform.name}`]).slice(0, 5);
+}
+
 function applyPlatformInstalledState(platforms: BoardPlatform[], installedPlatforms: BoardPlatform[]) {
-  const installedIds = new Set(installedPlatforms.map((entry) => normalizePackageKey(entry.id)));
-  return platforms.map((platform) => ({
-    ...platform,
-    installed: installedIds.has(normalizePackageKey(platform.id)),
-  }));
+  const installedById = new Map(installedPlatforms.map((entry) => [normalizePackageKey(entry.id), entry]));
+  return platforms.map((platform) => {
+    const installedPlatform = installedById.get(normalizePackageKey(platform.id));
+
+    return {
+      ...platform,
+      installed: Boolean(installedPlatform),
+      installedVersion: installedPlatform?.installedVersion ?? installedPlatform?.version ?? platform.installedVersion,
+      latest: platform.latest ?? installedPlatform?.latest,
+      version: platform.version ?? installedPlatform?.version,
+      maintainer: platform.maintainer ?? installedPlatform?.maintainer,
+      description: platform.description ?? installedPlatform?.description,
+      website: platform.website ?? installedPlatform?.website,
+      versions: platform.versions ?? installedPlatform?.versions,
+    };
+  });
 }
 
 type ResizablePanel = 'left' | 'right' | 'bottom';
@@ -340,6 +1091,8 @@ const DEFAULT_PANEL_SIZES: PanelSizes = {
   bottom: 260,
 };
 
+const MANAGER_DETAIL_PANEL_WIDTH = 460;
+
 const MIN_PANEL_SIZES: PanelSizes = {
   left: 220,
   right: 240,
@@ -353,6 +1106,8 @@ const MAX_SIDE_PANEL_WIDTH = 520;
 const MAX_CONSOLE_HEIGHT = 520;
 const PANEL_RESIZE_STEP = 16;
 const AUTO_SAVE_DELAY_MS = 1000;
+const LOCAL_BOARD_AUTO_REFRESH_MS = 5000;
+const LOCAL_BOARD_UPLOAD_SETTLE_MS = 8000;
 const RIGHT_PANEL_HIDDEN_BREAKPOINT = 1080;
 const LEFT_PANEL_HIDDEN_BREAKPOINT = 980;
 const EDITOR_PANEL_BACKGROUND = {
@@ -361,13 +1116,117 @@ const EDITOR_PANEL_BACKGROUND = {
 } as const;
 
 const BOARD_OPTIONS = [
-  { value: 'esp32:esp32:esp32', label: 'ESP32 DevKit' },
-  { value: 'esp32:esp32:esp32s2', label: 'ESP32-S2' },
-  { value: 'esp32:esp32:esp32s3', label: 'ESP32-S3' },
-  { value: 'esp32:esp32:esp32c3', label: 'ESP32-C3' },
+  { value: 'esp32:esp32:esp32', label: 'ESP32 Dev Module' },
+  { value: 'esp32:esp32:esp32c3', label: 'ESP32-C3 Dev Module' },
+  { value: 'esp32:esp32:esp32s3', label: 'ESP32-S3 Dev Module' },
+  { value: 'esp32:esp32:esp32s2', label: 'ESP32-S2 Dev Module' },
   { value: 'esp8266:esp8266:generic', label: 'ESP8266 Generic' },
   { value: 'arduino:avr:uno', label: 'Arduino Uno' },
+  { value: 'arduino:avr:nano', label: 'Arduino Nano' },
+  { value: 'arduino:avr:mega', label: 'Arduino Mega' },
 ];
+
+type LocalBoardEdit = {
+  name?: string;
+  fqbn?: string;
+  boardLabel?: string;
+  port?: string;
+};
+
+type LocalBoardOption = {
+  value: string;
+  label: string;
+};
+
+type LocalBoardRow = {
+  key: string;
+  profileId?: string;
+  profile?: LocalBoardProfile;
+  detection?: LocalBoardDetection;
+  source: 'saved' | 'detected' | 'manual';
+  connected: boolean;
+  name: string;
+  fqbn: string;
+  port: string;
+  boardLabel: string;
+  manufacturer: string;
+  protocol: string;
+  protocolLabel: string;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+  pnpId?: string | null;
+  locationId?: string | null;
+  fingerprint: string;
+  confidence?: number | null;
+  confidenceLabel?: string;
+  detectionSource?: string;
+  matchingBoards?: Array<{ name: string; fqbn: string; isHidden?: boolean }>;
+  ai?: LocalBoardDetection['ai'];
+};
+
+const ACTIVE_LOCAL_BOARD_KEY = 'active-local-board';
+const LOCAL_BOARD_EDIT_STORAGE_KEY = 'tantalum-local-board-active-draft:v1';
+
+function sanitizeLocalBoardEdit(source: unknown): LocalBoardEdit {
+  const record = source && typeof source === 'object' ? source as Record<string, unknown> : {};
+  const edit: LocalBoardEdit = {};
+
+  for (const key of ['name', 'fqbn', 'boardLabel', 'port'] as const) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      edit[key] = value.trim();
+    }
+  }
+
+  return edit;
+}
+
+function hasLocalBoardEditValue(edit: LocalBoardEdit | null | undefined) {
+  return Boolean(edit?.name || edit?.fqbn || edit?.boardLabel || edit?.port);
+}
+
+function readStoredLocalBoardEdits(): Record<string, LocalBoardEdit> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_BOARD_EDIT_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    const activeEdit = sanitizeLocalBoardEdit(
+      parsed && typeof parsed === 'object' && ACTIVE_LOCAL_BOARD_KEY in parsed
+        ? (parsed as Record<string, unknown>)[ACTIVE_LOCAL_BOARD_KEY]
+        : parsed,
+    );
+
+    return hasLocalBoardEditValue(activeEdit) ? { [ACTIVE_LOCAL_BOARD_KEY]: activeEdit } : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredLocalBoardEdits(edits: Record<string, LocalBoardEdit>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const activeEdit = sanitizeLocalBoardEdit(edits[ACTIVE_LOCAL_BOARD_KEY]);
+  try {
+    if (!hasLocalBoardEditValue(activeEdit)) {
+      window.localStorage.removeItem(LOCAL_BOARD_EDIT_STORAGE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(LOCAL_BOARD_EDIT_STORAGE_KEY, JSON.stringify({ [ACTIVE_LOCAL_BOARD_KEY]: activeEdit }));
+  } catch {
+    // Ignore storage failures; board profiles still persist through Electron preferences when saved.
+  }
+}
 
 const DEFAULT_TAB_CONTENT = `// Start writing firmware in ${new Date().getFullYear()}
 
@@ -1295,6 +2154,7 @@ export function IDEWorkspace({
   onWorkspaceSearchOpenChange,
   uiPreferences,
   resolvedTheme,
+  restoreToolchainNotificationRequest,
 }: IDEWorkspaceProps) {
   const setSidebar = useCallback((nextSidebar: SidebarView) => onSidebarChange(nextSidebar), [onSidebarChange]);
   const [consoleView, setConsoleView] = useState<ConsoleView>('output');
@@ -1320,6 +2180,17 @@ export function IDEWorkspace({
   const [boardsLoading, setBoardsLoading] = useState(() => hasRequiredCloudConfiguration());
   const [boardsError, setBoardsError] = useState<string | null>(null);
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
+  const [localBoardProfiles, setLocalBoardProfiles] = useState<LocalBoardProfile[]>([]);
+  const [detectedLocalBoards, setDetectedLocalBoards] = useState<LocalBoardDetection[]>([]);
+  const [localBoardPorts, setLocalBoardPorts] = useState<LocalBoardPort[]>([]);
+  const [localBoardAutoScanLoading, setLocalBoardAutoScanLoading] = useState(false);
+  const [localBoardsError, setLocalBoardsError] = useState<string | null>(null);
+  const [localBoardEdits, setLocalBoardEdits] = useState<Record<string, LocalBoardEdit>>(() => readStoredLocalBoardEdits());
+  const [localBoardCatalog, setLocalBoardCatalog] = useState<LocalBoardOption[]>([]);
+  const [localBoardCatalogLoading, setLocalBoardCatalogLoading] = useState(false);
+  const [localBoardCatalogError, setLocalBoardCatalogError] = useState<string | null>(null);
+  const [localBoardCatalogQuery, setLocalBoardCatalogQuery] = useState('');
+  const [localBoardAdvancedOpen, setLocalBoardAdvancedOpen] = useState(false);
   const [selectedBoardSecrets, setSelectedBoardSecrets] = useState<BoardSecret | null>(null);
   const [firmwareHistory, setFirmwareHistory] = useState<FirmwareDocument[]>([]);
   const [boardModalOpen, setBoardModalOpen] = useState(false);
@@ -1337,17 +2208,27 @@ export function IDEWorkspace({
   const [releaseNotes, setReleaseNotes] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [libraryQuery, setLibraryQuery] = useState('');
+  const [libraryManagerTab, setLibraryManagerTab] = useState<LibraryManagerTab>('all');
+  const [libraryDetailTab, setLibraryDetailTab] = useState<LibraryDetailTab>('overview');
+  const [selectedLibraryKey, setSelectedLibraryKey] = useState<string | null>(null);
   const [libraryResults, setLibraryResults] = useState<LibraryEntry[]>([]);
   const [defaultLibraryResults, setDefaultLibraryResults] = useState<LibraryEntry[]>(FALLBACK_LIBRARY_RESULTS);
   const [installedLibraries, setInstalledLibraries] = useState<LibraryEntry[]>([]);
   const [librariesLoading, setLibrariesLoading] = useState(false);
   const [librariesError, setLibrariesError] = useState<string | null>(null);
+  const [libraryVersionSelections, setLibraryVersionSelections] = useState<Record<string, string>>({});
+  const [activeLibraryInstalls, setActiveLibraryInstalls] = useState<Record<string, string>>({});
+  const [activePlatformInstalls, setActivePlatformInstalls] = useState<Record<string, string>>({});
+  const [stoppingInstallIds, setStoppingInstallIds] = useState<Record<string, boolean>>({});
   const [platformQuery, setPlatformQuery] = useState('');
   const [platformResults, setPlatformResults] = useState<BoardPlatform[]>([]);
   const [defaultPlatformResults, setDefaultPlatformResults] = useState<BoardPlatform[]>(FALLBACK_PLATFORM_RESULTS);
   const [installedPlatforms, setInstalledPlatforms] = useState<BoardPlatform[]>([]);
   const [platformsLoading, setPlatformsLoading] = useState(false);
   const [platformsError, setPlatformsError] = useState<string | null>(null);
+  const [platformDetailTab, setPlatformDetailTab] = useState<PlatformDetailTab>('overview');
+  const [selectedPlatformKey, setSelectedPlatformKey] = useState<string | null>(null);
+  const [platformVersionSelections, setPlatformVersionSelections] = useState<Record<string, string>>({});
   const [leftNavCollapsed, setLeftNavCollapsed] = useState(false);
   const [projectFolders, setProjectFolders] = useState<ProjectFolder[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -1360,25 +2241,146 @@ export function IDEWorkspace({
   const [projectRenameValue, setProjectRenameValue] = useState('');
   const [projectRemovalPrompt, setProjectRemovalPrompt] = useState<ProjectFolder | null>(null);
   const [fileTreeMoreMenu, setFileTreeMoreMenu] = useState<'workspace' | 'project' | null>(null);
+  const localBoardScanGenerationRef = useRef(0);
+  const localBoardAutoScanActiveRef = useRef(false);
+  const localBoardMonitoringPausedRef = useRef(false);
+  const localBoardMonitoringResumeTimerRef = useRef<number | null>(null);
+  const localBoardUploadInProgressRef = useRef(false);
+  const localBoardUploadProgressRef = useRef<UsbUploadProgressTask | null>(null);
+  const verifyInProgressRef = useRef(false);
 
   const deferredLibraryQuery = useDeferredValue(libraryQuery);
   const deferredPlatformQuery = useDeferredValue(platformQuery);
   const deferredProjectQuery = useDeferredValue(projectQuery);
   const librarySearchTerm = deferredLibraryQuery.trim();
   const platformSearchTerm = deferredPlatformQuery.trim();
-  const visibleLibraryResults = useMemo(
-    () => applyLibraryInstalledState(librarySearchTerm ? libraryResults : defaultLibraryResults, installedLibraries),
-    [defaultLibraryResults, installedLibraries, libraryResults, librarySearchTerm],
-  );
+  const allLibraryResults = useMemo(() => {
+    const nextLibraries = applyLibraryInstalledState(librarySearchTerm ? libraryResults : defaultLibraryResults, installedLibraries);
+    if (!librarySearchTerm) {
+      return nextLibraries.filter((library) => !library.installed);
+    }
+
+    const librariesByName = new Map<string, LibraryEntry>(nextLibraries.map((library) => [normalizePackageKey(library.name), library]));
+    for (const installedLibrary of installedLibraries) {
+      if (!libraryMatchesSearch(installedLibrary, librarySearchTerm)) {
+        continue;
+      }
+
+      const key = normalizePackageKey(installedLibrary.name);
+      if (!librariesByName.has(key)) {
+        librariesByName.set(key, { ...installedLibrary, installed: true });
+      }
+    }
+
+    return Array.from(librariesByName.values());
+  }, [defaultLibraryResults, installedLibraries, libraryResults, librarySearchTerm]);
+  const installedLibraryResults = useMemo(() => {
+    const nextLibraries = installedLibraries.map((library) => ({ ...library, installed: true }));
+    return librarySearchTerm ? nextLibraries.filter((library) => libraryMatchesSearch(library, librarySearchTerm)) : nextLibraries;
+  }, [installedLibraries, librarySearchTerm]);
+  const visibleLibraryResults = libraryManagerTab === 'installed' ? installedLibraryResults : allLibraryResults;
+  const selectedLibrary = useMemo(() => {
+    if (!selectedLibraryKey) {
+      return null;
+    }
+
+    return visibleLibraryResults.find((library) => normalizePackageKey(library.name) === selectedLibraryKey) ?? null;
+  }, [selectedLibraryKey, visibleLibraryResults]);
   const visiblePlatformResults = useMemo(
     () => applyPlatformInstalledState(platformSearchTerm ? platformResults : defaultPlatformResults, installedPlatforms),
     [defaultPlatformResults, installedPlatforms, platformResults, platformSearchTerm],
   );
+  const selectedPlatform = useMemo(() => {
+    if (!selectedPlatformKey) {
+      return null;
+    }
+
+    const visiblePlatform = visiblePlatformResults.find((platform) => normalizePackageKey(platform.id) === selectedPlatformKey);
+    if (visiblePlatform) {
+      return visiblePlatform;
+    }
+
+    return installedPlatforms.find((platform) => normalizePackageKey(platform.id) === selectedPlatformKey) ?? null;
+  }, [installedPlatforms, selectedPlatformKey, visiblePlatformResults]);
+  const visibleLocalBoardCatalog = useMemo(() => {
+    const query = localBoardCatalogQuery.trim().toLowerCase();
+    return localBoardCatalog.filter((option) => boardOptionMatchesQuery(option, query)).slice(0, 80);
+  }, [localBoardCatalog, localBoardCatalogQuery]);
+  const hasConfiguredLocalBoard = useMemo(() => {
+    return localBoardProfiles.length > 0 || hasLocalBoardEditValue(localBoardEdits[ACTIVE_LOCAL_BOARD_KEY]);
+  }, [localBoardEdits, localBoardProfiles.length]);
   const syncedTabs = useMemo(() => tabs.map(syncFileTabDirtyState), [tabs]);
   const activeTab = syncedTabs.find((tab) => tab.id === activeTabId) ?? syncedTabs[0] ?? null;
   const activeTabScrollId = activeTab?.id ?? null;
   const activeTabScrollPath = activeTab?.path ?? null;
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
+  const localBoardRows = useMemo<LocalBoardRow[]>(() => {
+    const profile = localBoardProfiles[0] ?? null;
+    const edit = localBoardEdits[ACTIVE_LOCAL_BOARD_KEY] ?? {};
+    const hasEdit = hasLocalBoardEditValue(edit);
+    const likelyPorts = localBoardPorts.filter((port) => port.likelyBoard);
+    const defaultManualPort = likelyPorts.length === 1 ? likelyPorts[0].path : '';
+    const configuredPortPath = edit.port ?? profile?.port ?? '';
+
+    const profileFingerprint = profile?.fingerprint?.toLowerCase();
+    const profileSerial = profile?.serialNumber?.toLowerCase();
+    const matchingDetection = profile
+      ? detectedLocalBoards.find((candidate) => {
+          if (profileFingerprint && candidate.fingerprint?.toLowerCase() === profileFingerprint) {
+            return true;
+          }
+
+          if (profileSerial && candidate.serialNumber?.toLowerCase() === profileSerial) {
+            return true;
+          }
+
+          return Boolean(profile.port && candidate.port === profile.port);
+        }) ?? null
+      : configuredPortPath
+        ? detectedLocalBoards.find((candidate) => normalizeLocalBoardHardwareValue(candidate.port) === normalizeLocalBoardHardwareValue(configuredPortPath)) ?? null
+      : null;
+    const restoredDraftFallbackDetection = !profile && hasEdit && !matchingDetection && detectedLocalBoards.length === 1 ? detectedLocalBoards[0] : null;
+    const detection = matchingDetection ?? restoredDraftFallbackDetection ?? (!profile && (!hasEdit || !configuredPortPath) ? pickBestLocalBoardDetection(detectedLocalBoards) : null);
+    const source: LocalBoardRow['source'] = profile ? 'saved' : detection ? 'detected' : 'manual';
+    const fqbn = firstUploadableBoardFqbn(edit.fqbn, profile?.fqbn, detection?.fqbn);
+    const selectedPortPath = edit.port ?? detection?.port ?? profile?.port ?? defaultManualPort;
+    const matchingLivePort = localBoardPorts.find((candidatePort) => localBoardPortMatchesProfile(candidatePort, profile, selectedPortPath)) ?? null;
+    const restoredDraftFallbackPort = !profile && hasEdit && !matchingLivePort && likelyPorts.length === 1 ? likelyPorts[0] : null;
+    const livePort = matchingLivePort ?? restoredDraftFallbackPort;
+    const port = livePort?.path || selectedPortPath || '';
+    const boardLabel = edit.boardLabel || profile?.boardLabel || detection?.boardLabel || (fqbn ? getBoardOptionLabel(fqbn) : 'Local board');
+    const connected = Boolean(detection || livePort);
+
+    return [
+      {
+        key: ACTIVE_LOCAL_BOARD_KEY,
+        profileId: profile?.id,
+        profile: profile ?? undefined,
+        detection: detection ?? undefined,
+        source,
+        connected,
+        name: edit.name ?? profile?.name ?? '',
+        fqbn,
+        port,
+        boardLabel,
+        manufacturer: detection?.manufacturer || livePort?.manufacturer || profile?.manufacturer || (source === 'manual' ? 'Manual' : 'Unknown'),
+        protocol: detection?.protocol || livePort?.protocol || profile?.protocol || 'serial',
+        protocolLabel: detection?.protocolLabel || livePort?.protocolLabel || profile?.protocolLabel || 'Serial',
+        vendorId: detection?.vendorId ?? livePort?.vendorId ?? profile?.vendorId,
+        productId: detection?.productId ?? livePort?.productId ?? profile?.productId,
+        serialNumber: detection?.serialNumber ?? livePort?.serialNumber ?? profile?.serialNumber,
+        pnpId: detection?.pnpId ?? livePort?.pnpId ?? profile?.pnpId,
+        locationId: detection?.locationId ?? livePort?.locationId ?? profile?.locationId,
+        fingerprint: detection?.fingerprint || profile?.fingerprint || `manual:${port}:${fqbn}`,
+        confidence: detection?.confidence ?? profile?.confidence ?? null,
+        confidenceLabel: detection?.confidenceLabel,
+        detectionSource: detection?.detectionSource,
+        matchingBoards: detection?.matchingBoards,
+        ai: detection?.ai,
+      },
+    ];
+  }, [detectedLocalBoards, localBoardEdits, localBoardPorts, localBoardProfiles]);
+  const selectedLocalBoard = localBoardRows[0] ?? null;
   const selectedProject = projectFolders.find((project) => project.id === selectedProjectId) ?? projectFolders[0] ?? null;
   const currentWorkspaceProject = useMemo(() => {
     if (!workspacePath) {
@@ -1425,6 +2427,13 @@ export function IDEWorkspace({
   const saveInProgressRef = useRef(false);
   const consoleOutputRef = useRef<HTMLDivElement | null>(null);
   const toastCounterRef = useRef(1);
+  const toastsRef = useRef<Toast[]>(toasts);
+  const toolchainNotificationToastIdsRef = useRef(new Map<string, number>());
+  const libraryInstallToastIdsRef = useRef(new Map<string, number>());
+  const libraryMigrationNotificationIdRef = useRef<string | null>(null);
+  const libraryMigrationToastIdRef = useRef<number | null>(null);
+  const platformInstallProgressRef = useRef<PlatformInstallProgressTask | null>(null);
+  const libraryMetadataRequestsRef = useRef(new Map<string, Promise<LibraryEntry | null>>());
   const agentReviewIdCounterRef = useRef(1);
   const agentReviewNoticeCounterRef = useRef(1);
   const [treeTrashMap] = useState(() => new Map<string, string>());
@@ -1647,6 +2656,18 @@ export function IDEWorkspace({
     setSinglePanelSize(panel, panelSizesRef.current[panel] + delta);
   }
 
+  const ensureManagerDetailPanelVisible = useCallback(() => {
+    onRightPanelOpenChange(true);
+    setPanelSizes((current) => {
+      const targetRightWidth = Math.min(MANAGER_DETAIL_PANEL_WIDTH, getPanelMaxSize('right', current));
+      if (current.right >= targetRightWidth) {
+        return current;
+      }
+
+      return normalizePanelSizes({ ...current, right: targetRightWidth });
+    });
+  }, [onRightPanelOpenChange]);
+
   function beginResize(panel: ResizablePanel, event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0) {
       return;
@@ -1732,15 +2753,65 @@ export function IDEWorkspace({
   }
 
   function dismissToast(id: number) {
-    setToasts((current) => current.filter((toast) => toast.id !== id));
+    setToasts((current) => {
+      const toast = current.find((item) => item.id === id);
+      if (toast?.notificationId) {
+        toolchainNotificationToastIdsRef.current.delete(toast.notificationId);
+      }
+
+      return current.filter((item) => item.id !== id);
+    });
   }
 
-  function pushToast(message: string, tone: Toast['tone'] = 'info', actions?: Toast['actions']) {
+  function pushToast(
+    message: string,
+    tone: Toast['tone'] = 'info',
+    actions?: Toast['actions'],
+    options?: Pick<Toast, 'detail' | 'persistent' | 'progress' | 'notificationId'>,
+  ) {
     const id = toastCounterRef.current++;
-    setToasts((current) => [...current, { id, tone, message, actions }]);
+    setToasts((current) => [...current, { id, tone, message, actions, ...options }]);
+    if (options?.notificationId) {
+      toolchainNotificationToastIdsRef.current.set(options.notificationId, id);
+    }
+    if (!options?.persistent) {
+      window.setTimeout(() => {
+        dismissToast(id);
+      }, 4000);
+    }
+
+    return id;
+  }
+
+  function updateToast(id: number, patch: Partial<Omit<Toast, 'id'>>) {
+    setToasts((current) => current.map((toast) => (toast.id === id ? { ...toast, ...patch } : toast)));
+  }
+
+  function finishToast(id: number, patch: Partial<Omit<Toast, 'id'>>, timeoutMs = 5000) {
+    updateToast(id, { ...patch, persistent: false });
     window.setTimeout(() => {
       dismissToast(id);
-    }, 4000);
+    }, timeoutMs);
+  }
+
+  function isActiveToolchainNotification(notification: Pick<ToolchainNotification, 'status'>) {
+    return notification.status === 'queued' || notification.status === 'running';
+  }
+
+  function getToolchainToastTone(notification: Pick<ToolchainNotification, 'status'>): Toast['tone'] {
+    if (notification.status === 'error') {
+      return 'error';
+    }
+
+    if (notification.status === 'success') {
+      return 'success';
+    }
+
+    return 'info';
+  }
+
+  function persistToolchainNotification(notification: ToolchainNotificationInput) {
+    void window.tantalum.notifications.upsert(notification);
   }
 
   const refreshGitChangeIndicator = useCallback(async (targetWorkspacePath = workspacePath) => {
@@ -2036,6 +3107,261 @@ export function IDEWorkspace({
     } catch (error) {
       pushConsole(error instanceof Error ? error.message : 'Unable to load firmware history.', 'error');
     }
+  }
+
+  async function refreshLocalBoardProfiles(options: { apply?: boolean } = {}) {
+    const result = await window.tantalum.toolchain.listLocalBoardProfiles();
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+
+    if (options.apply !== false) {
+      setLocalBoardProfiles(result.profiles);
+    }
+    return result.profiles;
+  }
+
+  async function refreshDetectedLocalBoards(options: { portsOnly?: boolean; probeEsp?: boolean; aiFallback?: boolean; apply?: boolean } = {}) {
+    const payload = options.portsOnly || options.probeEsp || options.aiFallback
+      ? {
+          ...(options.portsOnly ? { portsOnly: true } : {}),
+          ...(options.probeEsp ? { probeEsp: true } : {}),
+          ...(options.aiFallback ? { aiFallback: true } : {}),
+        }
+      : undefined;
+    const result = await window.tantalum.toolchain.detectLocalBoards(payload);
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+
+    const ports = result.ports ?? result.boards.map((board) => portOptionFromBoard(board)).filter((port): port is LocalBoardPort => Boolean(port));
+    if (options.apply !== false) {
+      setDetectedLocalBoards(result.boards);
+      setLocalBoardPorts(ports);
+    }
+    return { boards: result.boards, ports };
+  }
+
+  async function resolveLocalBoardUploadTarget(row: LocalBoardRow) {
+    const detected = await refreshDetectedLocalBoards({ portsOnly: true, apply: false });
+    setDetectedLocalBoards(detected.boards);
+    setLocalBoardPorts(detected.ports);
+
+    const detection = pickLocalBoardDetectionForUpload(row, detected.boards);
+    const matchingPort = pickLocalBoardPortForUpload(row, detected.ports, detection);
+    const resolvedPort = detection?.port || matchingPort?.path || '';
+    const resolvedFqbn = firstUploadableBoardFqbn(row.fqbn, detection?.fqbn);
+
+    return {
+      ...row,
+      detection: detection ?? row.detection,
+      connected: Boolean(resolvedPort),
+      fqbn: resolvedFqbn,
+      port: resolvedPort,
+      boardLabel: row.boardLabel || detection?.boardLabel || (resolvedFqbn ? getBoardOptionLabel(resolvedFqbn) : 'Local board'),
+      manufacturer: detection?.manufacturer || matchingPort?.manufacturer || row.manufacturer,
+      protocol: detection?.protocol || matchingPort?.protocol || row.protocol,
+      protocolLabel: detection?.protocolLabel || matchingPort?.protocolLabel || row.protocolLabel,
+      vendorId: detection?.vendorId ?? matchingPort?.vendorId ?? row.vendorId,
+      productId: detection?.productId ?? matchingPort?.productId ?? row.productId,
+      serialNumber: detection?.serialNumber ?? matchingPort?.serialNumber ?? row.serialNumber,
+      pnpId: detection?.pnpId ?? matchingPort?.pnpId ?? row.pnpId,
+      locationId: detection?.locationId ?? matchingPort?.locationId ?? row.locationId,
+      fingerprint: detection?.fingerprint || row.fingerprint,
+      confidence: detection?.confidence ?? row.confidence,
+      confidenceLabel: detection?.confidenceLabel ?? row.confidenceLabel,
+      detectionSource: detection?.detectionSource ?? row.detectionSource,
+      matchingBoards: detection?.matchingBoards ?? row.matchingBoards,
+      ai: detection?.ai ?? row.ai,
+    } satisfies LocalBoardRow;
+  }
+
+  function pauseLocalBoardMonitoring() {
+    localBoardMonitoringPausedRef.current = true;
+    localBoardScanGenerationRef.current += 1;
+
+    if (localBoardMonitoringResumeTimerRef.current !== null) {
+      window.clearTimeout(localBoardMonitoringResumeTimerRef.current);
+      localBoardMonitoringResumeTimerRef.current = null;
+    }
+  }
+
+  function resumeLocalBoardMonitoringSoon(delayMs = LOCAL_BOARD_UPLOAD_SETTLE_MS) {
+    if (localBoardMonitoringResumeTimerRef.current !== null) {
+      window.clearTimeout(localBoardMonitoringResumeTimerRef.current);
+    }
+
+    localBoardMonitoringResumeTimerRef.current = window.setTimeout(() => {
+      localBoardMonitoringResumeTimerRef.current = null;
+      localBoardMonitoringPausedRef.current = false;
+      void refreshLocalBoards({ silent: true });
+    }, delayMs);
+  }
+
+  async function refreshLocalBoards(options: { silent?: boolean; portsOnly?: boolean } = {}) {
+    if (localBoardMonitoringPausedRef.current) {
+      return;
+    }
+
+    if (options.silent && localBoardAutoScanActiveRef.current) {
+      return;
+    }
+
+    const scanGeneration = ++localBoardScanGenerationRef.current;
+    if (!options.silent) {
+      setLocalBoardsError(null);
+    }
+
+    let profilesError: unknown = null;
+    try {
+      const profiles = await refreshLocalBoardProfiles({ apply: false });
+      if (scanGeneration === localBoardScanGenerationRef.current) {
+        setLocalBoardProfiles(profiles);
+      }
+    } catch (error) {
+      profilesError = error;
+    }
+
+    try {
+      const detected = await refreshDetectedLocalBoards({ portsOnly: options.portsOnly ?? true, apply: false });
+      if (scanGeneration !== localBoardScanGenerationRef.current) {
+        return;
+      }
+
+      setDetectedLocalBoards(detected.boards);
+      setLocalBoardPorts(detected.ports);
+      if (profilesError) {
+        const message = profilesError instanceof Error ? profilesError.message : 'Unable to load saved local board.';
+        setLocalBoardsError(message);
+        if (!options.silent) {
+          pushConsole(message, 'error');
+        }
+      } else if (options.silent) {
+        setLocalBoardsError(null);
+      } else {
+        setLocalBoardsError(null);
+      }
+    } catch (error) {
+      if (scanGeneration !== localBoardScanGenerationRef.current) {
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : 'Unable to detect local boards.';
+      setDetectedLocalBoards([]);
+      setLocalBoardPorts([]);
+      setLocalBoardsError(message);
+      if (!options.silent) {
+        pushConsole(message, 'error');
+      }
+    }
+  }
+
+  async function loadLocalBoardCatalog() {
+    if (localBoardCatalogLoading || localBoardCatalog.length > 0) {
+      return;
+    }
+
+    setLocalBoardCatalogLoading(true);
+    setLocalBoardCatalogError(null);
+    try {
+      const result = await window.tantalum.toolchain.listInstalledBoards();
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      const options = uniqueBoardOptions(
+        ((result.boards as Array<Record<string, unknown>>) ?? [])
+          .map(normalizeBoardOptionFromCatalog)
+          .filter((option): option is LocalBoardOption => Boolean(option)),
+      ).sort((left, right) => left.label.localeCompare(right.label, undefined, { sensitivity: 'base' }));
+      setLocalBoardCatalog(options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to load installed boards.';
+      setLocalBoardCatalogError(message);
+      pushConsole(message, 'error');
+    } finally {
+      setLocalBoardCatalogLoading(false);
+    }
+  }
+
+  function handleToggleLocalBoardAdvanced() {
+    const willOpen = !localBoardAdvancedOpen;
+    setLocalBoardAdvancedOpen(willOpen);
+    if (willOpen) {
+      void loadLocalBoardCatalog();
+    }
+  }
+
+  async function handleAutoScanLocalBoard() {
+    if (isLocalUploadBusyAction(busyAction) || localBoardUploadInProgressRef.current) {
+      return;
+    }
+
+    localBoardMonitoringPausedRef.current = false;
+    localBoardAutoScanActiveRef.current = true;
+    const scanGeneration = ++localBoardScanGenerationRef.current;
+    setLocalBoardAutoScanLoading(true);
+    setLocalBoardsError(null);
+    try {
+      const [profiles, detected] = await Promise.all([
+        refreshLocalBoardProfiles({ apply: false }),
+        refreshDetectedLocalBoards({ probeEsp: true, aiFallback: true, apply: false }),
+      ]);
+      if (scanGeneration !== localBoardScanGenerationRef.current) {
+        return;
+      }
+
+      setLocalBoardProfiles(profiles);
+      setDetectedLocalBoards(detected.boards);
+      setLocalBoardPorts(detected.ports);
+
+      const boards = detected.boards;
+      const detectedBoard = pickBestLocalBoardDetection(boards);
+      if (!detectedBoard) {
+        pushToast('No USB boards detected.', 'error', undefined, { detail: 'Connect a board, then run Auto scan again.' });
+        return;
+      }
+
+      const detectedFqbn = normalizeUploadableBoardFqbn(detectedBoard.fqbn);
+      setLocalBoardEdits((current) => {
+        const currentEdit = current[ACTIVE_LOCAL_BOARD_KEY] ?? {};
+        return {
+          ...current,
+          [ACTIVE_LOCAL_BOARD_KEY]: {
+            ...currentEdit,
+            ...(detectedFqbn
+              ? {
+                  fqbn: detectedFqbn,
+                  boardLabel: detectedBoard.boardLabel || getBoardOptionLabel(detectedFqbn),
+                }
+              : {}),
+            port: detectedBoard.port || currentEdit.port,
+          },
+        };
+      });
+
+      if (detectedFqbn) {
+        pushToast(`Detected ${detectedBoard.boardLabel || getBoardOptionLabel(detectedFqbn)}`, 'success');
+      } else {
+        pushToast('Board port detected. Confirm the exact board type.', 'success');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to detect local boards.';
+      setLocalBoardsError(message);
+      pushConsole(message, 'error');
+    } finally {
+      localBoardAutoScanActiveRef.current = false;
+      setLocalBoardAutoScanLoading(false);
+    }
+  }
+
+  function handleResetLocalBoardEdits() {
+    setLocalBoardEdits((current) => {
+      const next = { ...current };
+      delete next[ACTIVE_LOCAL_BOARD_KEY];
+      return next;
+    });
+    setLocalBoardCatalogQuery('');
   }
 
   async function refreshInstalledLibraries() {
@@ -2822,29 +4148,347 @@ export function IDEWorkspace({
     }
   }
 
+  function resolveVerifyBoard() {
+    const compileBoard = selectedLocalBoard?.fqbn || (localBoardProfiles.length === 0 ? 'arduino:avr:uno' : '');
+    if (!compileBoard) {
+      pushToast('Choose a local board before verifying this sketch.', 'info');
+      return '';
+    }
+
+    if (!isUploadableBoardFqbn(compileBoard)) {
+      const message = 'Select an exact ESP32 board type, such as ESP32-C3, before verifying. ESP32 Family Device is only a USB detection hint.';
+      openConsolePanel('output');
+      pushConsole(message, 'error');
+      pushToast('Choose an exact board type.', 'error', undefined, { detail: 'ESP32 Family Device cannot be used for compile/upload.' });
+      return '';
+    }
+
+    return compileBoard;
+  }
+
+  async function runVerifySketch(options: { board: string; busyAction: string; title: string; detail: string; successMessage?: string }) {
+    if (!activeTab) {
+      return false;
+    }
+
+    if (verifyInProgressRef.current) {
+      return false;
+    }
+
+    verifyInProgressRef.current = true;
+    setBusyAction(options.busyAction);
+    openConsolePanel('output');
+    pushConsole(`Compiling ${activeTab.name} for ${getBoardOptionLabel(options.board)}...`);
+    const toastId = pushToast(options.title, 'info', undefined, {
+      detail: options.detail,
+      persistent: true,
+      progress: null,
+    });
+
+    try {
+      const result = await window.tantalum.toolchain.compile({
+        code: editorValue,
+        board: options.board,
+      });
+
+      if (!result.success) {
+        pushConsole(result.error, 'error');
+        finishToast(toastId, {
+          message: 'Verification failed',
+          detail: result.error,
+          tone: 'error',
+          progress: null,
+        });
+        return false;
+      }
+
+      pushConsole(normalizeOutput(result.output || 'Verification finished.'), 'success');
+      finishToast(toastId, {
+        message: options.successMessage || `Verified ${result.filename}`,
+        detail: 'Sketch compiled successfully.',
+        tone: 'success',
+        progress: 100,
+      });
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to verify sketch.';
+      pushConsole(message, 'error');
+      finishToast(toastId, {
+        message: 'Verification failed',
+        detail: message,
+        tone: 'error',
+        progress: null,
+      });
+      return false;
+    } finally {
+      verifyInProgressRef.current = false;
+      setBusyAction(null);
+    }
+  }
+
   async function handleCompile() {
     if (!activeTab) {
       return;
     }
 
-    setBusyAction('compile');
-    pushConsole(`Compiling ${activeTab.name} for ${selectedBoard?.boardType ?? 'arduino:avr:uno'}...`);
-
-    const result = await window.tantalum.toolchain.compile({
-      code: editorValue,
-      board: selectedBoard?.boardType ?? 'arduino:avr:uno',
-    });
-
-    setBusyAction(null);
-
-    if (!result.success) {
-      pushConsole(result.error, 'error');
-      pushToast('Compilation failed.', 'error');
+    if (verifyInProgressRef.current || localBoardUploadInProgressRef.current) {
       return;
     }
 
-    pushConsole(normalizeOutput(result.output || 'Compilation finished.'), 'success');
-    pushToast(`Compiled ${result.filename}`, 'success');
+    const compileBoard = resolveVerifyBoard();
+    if (!compileBoard) {
+      return;
+    }
+
+    await runVerifySketch({
+      board: compileBoard,
+      busyAction: 'compile',
+      title: `Verifying ${activeTab.name}`,
+      detail: `Compiling for ${getBoardOptionLabel(compileBoard)}...`,
+    });
+  }
+
+  async function handleUploadLocal() {
+    if (!activeTab) {
+      return;
+    }
+
+    if (localBoardUploadInProgressRef.current || verifyInProgressRef.current) {
+      return;
+    }
+
+    localBoardUploadInProgressRef.current = true;
+    try {
+    if (!selectedLocalBoard?.fqbn || !selectedLocalBoard.port) {
+      pushToast('Choose a local board with a board type and port before uploading.', 'info');
+      return;
+    }
+
+    if (!isUploadableBoardFqbn(selectedLocalBoard.fqbn)) {
+      const message = 'Select an exact ESP32 board type, such as ESP32-C3, before uploading. ESP32 Family Device is only a USB detection hint.';
+      openConsolePanel('output');
+      pushConsole(message, 'error');
+      pushToast('Choose an exact board type.', 'error', undefined, { detail: 'ESP32 Family Device cannot be used for compile/upload.' });
+      return;
+    }
+
+    let boardName = localBoardDisplayName(selectedLocalBoard);
+    if (uiPreferences.verifyBeforeUpload) {
+      const verified = await runVerifySketch({
+        board: selectedLocalBoard.fqbn,
+        busyAction: 'verify-before-upload',
+        title: `Verifying ${activeTab.name}`,
+        detail: `Checking ${activeTab.name} before uploading to ${boardName}...`,
+        successMessage: 'Verification passed',
+      });
+
+      if (!verified) {
+        return;
+      }
+    }
+
+    setBusyAction('prepare-upload');
+    openConsolePanel('output');
+    pushConsole(`Preparing USB upload for ${activeTab.name}...`);
+
+    let uploadBoard: LocalBoardRow;
+    try {
+      uploadBoard = await resolveLocalBoardUploadTarget(selectedLocalBoard);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to refresh local board ports before uploading.';
+      openConsolePanel('output');
+      pushConsole(message, 'error');
+      pushToast('Unable to refresh local board.', 'error', undefined, { detail: message });
+      return;
+    }
+
+    if (!canUploadLocalBoard(uploadBoard)) {
+      const message = `${localBoardDisplayName(uploadBoard)} is not available on ${selectedLocalBoard.port}. ESP boards can change COM ports during reset; reconnect the board or run Auto scan, then try Upload again.`;
+      openConsolePanel('output');
+      pushConsole(message, 'error');
+      pushToast('Local board unavailable.', 'error', undefined, { detail: message });
+      return;
+    }
+
+    boardName = localBoardDisplayName(uploadBoard);
+    try {
+      const previousPort = uploadBoard.port;
+      uploadBoard = await resolveLocalBoardUploadTarget(uploadBoard);
+      if (!canUploadLocalBoard(uploadBoard)) {
+        const message = `${localBoardDisplayName(uploadBoard)} is no longer available on ${previousPort || selectedLocalBoard.port}. Reconnect the board or run Auto scan, then try Upload again.`;
+        openConsolePanel('output');
+        pushConsole(message, 'error');
+        pushToast('Local board unavailable.', 'error', undefined, { detail: message });
+        return;
+      }
+
+      if (previousPort && uploadBoard.port !== previousPort) {
+        const message = `Upload port changed from ${previousPort} to ${uploadBoard.port}; using the live port.`;
+        pushConsole(message);
+        pushToast('Upload port updated.', 'info', undefined, { detail: message });
+      }
+      boardName = localBoardDisplayName(uploadBoard);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to refresh local board ports before uploading.';
+      openConsolePanel('output');
+      pushConsole(message, 'error');
+      pushToast('Unable to refresh local board.', 'error', undefined, { detail: message });
+      return;
+    }
+
+    const notificationId = createToolchainTaskId('usb-upload');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'usb-upload',
+      title: `Uploading to ${boardName}`,
+      detail: `Uploading ${activeTab.name} on ${uploadBoard.port}...`,
+      status: 'running',
+      phase: 'upload',
+      progress: null,
+      name: boardName,
+      target: uploadBoard.port,
+      metadata: {
+        board: uploadBoard.fqbn,
+        port: uploadBoard.port,
+        fileName: activeTab.name,
+      },
+    });
+    const toastId = pushToast(`Uploading to ${boardName}`, 'info', undefined, {
+      detail: `Uploading ${activeTab.name} on ${uploadBoard.port}...`,
+      persistent: true,
+      progress: null,
+      notificationId,
+    });
+    localBoardUploadProgressRef.current = {
+      uploadId: notificationId,
+      toastId,
+      notificationId,
+      lineBuffer: '',
+      lastProgress: null,
+    };
+
+    pauseLocalBoardMonitoring();
+    setBusyAction('upload-local');
+    openConsolePanel('output');
+    pushConsole(`Uploading ${activeTab.name} to ${boardName} on ${uploadBoard.port}...`);
+
+    let result;
+    try {
+      result = await window.tantalum.toolchain.uploadLocalSketch({
+        code: editorValue,
+        board: uploadBoard.fqbn,
+        port: uploadBoard.port,
+        uploadId: notificationId,
+      });
+
+      if (!result.success && isLocalBoardUploadPortUnavailableError(result.error)) {
+        const retryBoard = await resolveLocalBoardUploadTarget(uploadBoard);
+        if (retryBoard.port && retryBoard.port !== uploadBoard.port && canUploadLocalBoard(retryBoard)) {
+          const retryMessage = `Upload port changed from ${uploadBoard.port} to ${retryBoard.port}; retrying once.`;
+          uploadBoard = retryBoard;
+          boardName = localBoardDisplayName(uploadBoard);
+          pushConsole(retryMessage);
+          persistToolchainNotification({
+            id: notificationId,
+            kind: 'usb-upload',
+            title: `Retrying upload to ${boardName}`,
+            detail: retryMessage,
+            status: 'running',
+            phase: 'upload',
+            progress: null,
+            name: boardName,
+            target: uploadBoard.port,
+            metadata: {
+              board: uploadBoard.fqbn,
+              port: uploadBoard.port,
+              fileName: activeTab.name,
+            },
+          });
+          updateToast(toastId, {
+            message: `Retrying upload to ${boardName}`,
+            detail: retryMessage,
+            tone: 'info',
+            progress: null,
+          });
+          result = await window.tantalum.toolchain.uploadLocalSketch({
+            code: editorValue,
+            board: uploadBoard.fqbn,
+            port: uploadBoard.port,
+            uploadId: notificationId,
+          });
+        }
+      }
+    } catch (error) {
+      result = {
+        success: false as const,
+        error: error instanceof Error ? error.message : 'Unable to upload sketch.',
+      };
+    } finally {
+      if (localBoardUploadProgressRef.current?.uploadId === notificationId) {
+        const bufferedLine = localBoardUploadProgressRef.current.lineBuffer.trim();
+        if (bufferedLine) {
+          pushConsole(bufferedLine, 'info');
+        }
+        localBoardUploadProgressRef.current = null;
+      }
+      setBusyAction(null);
+      resumeLocalBoardMonitoringSoon();
+    }
+
+    if (!result.success) {
+      pushConsole(result.error, 'error');
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'usb-upload',
+        title: 'USB upload failed',
+        detail: result.error,
+        status: 'error',
+        phase: 'error',
+        progress: null,
+        name: boardName,
+        target: uploadBoard.port,
+        metadata: {
+          board: uploadBoard.fqbn,
+          port: uploadBoard.port,
+          fileName: activeTab.name,
+        },
+      });
+      finishToast(toastId, {
+        message: 'USB upload failed',
+        detail: result.error,
+        tone: 'error',
+        progress: null,
+      });
+      return;
+    }
+
+    pushConsole(result.message || 'Upload finished.', 'success');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'usb-upload',
+      title: `Uploaded to ${boardName}`,
+      detail: result.message || 'Upload finished.',
+      status: 'success',
+      phase: 'complete',
+      progress: 100,
+      name: boardName,
+      target: uploadBoard.port,
+      metadata: {
+        board: uploadBoard.fqbn,
+        port: uploadBoard.port,
+        fileName: activeTab.name,
+      },
+    });
+    finishToast(toastId, {
+      message: `Uploaded to ${boardName}`,
+      detail: result.message || 'Upload finished.',
+      tone: 'success',
+      progress: 100,
+    });
+    } finally {
+      setBusyAction(null);
+      localBoardUploadInProgressRef.current = false;
+    }
   }
 
   async function handleUploadRelease() {
@@ -2858,6 +4502,31 @@ export function IDEWorkspace({
       return;
     }
 
+    const boardName = selectedBoard.name;
+    const notificationId = createToolchainTaskId('firmware-upload');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'firmware-upload',
+      title: `Building ${boardName} ${releaseVersion}`,
+      detail: 'Compiling firmware release...',
+      status: 'running',
+      phase: 'compile',
+      progress: null,
+      name: boardName,
+      version: releaseVersion,
+      target: boardName,
+      metadata: {
+        boardId: selectedBoard.$id,
+        boardType: selectedBoard.boardType,
+      },
+    });
+    const toastId = pushToast(`Building ${boardName} ${releaseVersion}`, 'info', undefined, {
+      detail: 'Compiling firmware release...',
+      persistent: true,
+      progress: null,
+      notificationId,
+    });
+
     setBusyAction('upload');
     pushConsole(`Building ${selectedBoard.name} firmware release ${releaseVersion}...`);
 
@@ -2869,11 +4538,56 @@ export function IDEWorkspace({
     if (!compileResult.success) {
       setBusyAction(null);
       pushConsole(compileResult.error, 'error');
-      pushToast('Compilation failed before upload.', 'error');
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'firmware-upload',
+        title: `Failed to build ${boardName} ${releaseVersion}`,
+        detail: compileResult.error,
+        status: 'error',
+        phase: 'compile-error',
+        progress: null,
+        name: boardName,
+        version: releaseVersion,
+        target: boardName,
+        metadata: {
+          boardId: selectedBoard.$id,
+          boardType: selectedBoard.boardType,
+        },
+      });
+      finishToast(toastId, {
+        message: 'Compilation failed before upload.',
+        detail: compileResult.error,
+        tone: 'error',
+        progress: null,
+      });
       return;
     }
 
     try {
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'firmware-upload',
+        title: `Uploading ${boardName} ${releaseVersion}`,
+        detail: 'Uploading firmware to Appwrite storage...',
+        status: 'running',
+        phase: 'upload',
+        progress: null,
+        name: boardName,
+        version: releaseVersion,
+        target: boardName,
+        metadata: {
+          boardId: selectedBoard.$id,
+          boardType: selectedBoard.boardType,
+          filename: compileResult.filename,
+        },
+      });
+      updateToast(toastId, {
+        message: `Uploading ${boardName} ${releaseVersion}`,
+        detail: 'Uploading firmware to Appwrite storage...',
+        tone: 'info',
+        persistent: true,
+        progress: null,
+      });
       const checksum = await sha256Hex(compileResult.binData);
       await uploadFirmwareRelease({
         user,
@@ -2893,10 +4607,55 @@ export function IDEWorkspace({
       setReleaseModalOpen(false);
       setReleaseNotes('');
       setReleaseVersion(nextSemver(releaseVersion));
-      pushToast(`Release ${releaseVersion} uploaded for ${selectedBoard.name}`, 'success');
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'firmware-upload',
+        title: `Uploaded ${boardName} ${releaseVersion}`,
+        detail: 'Firmware uploaded to Appwrite storage and marked as current.',
+        status: 'success',
+        phase: 'complete',
+        progress: 100,
+        name: boardName,
+        version: releaseVersion,
+        target: boardName,
+        metadata: {
+          boardId: selectedBoard.$id,
+          boardType: selectedBoard.boardType,
+          filename: compileResult.filename,
+        },
+      });
+      finishToast(toastId, {
+        message: `Release ${releaseVersion} uploaded for ${boardName}`,
+        detail: 'Firmware uploaded to Appwrite storage and marked as current.',
+        tone: 'success',
+        progress: 100,
+      });
       pushConsole('Firmware uploaded to Appwrite storage and marked as current.', 'success');
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : 'Firmware upload failed.', 'error');
+      const message = error instanceof Error ? error.message : 'Firmware upload failed.';
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'firmware-upload',
+        title: `Failed to upload ${boardName} ${releaseVersion}`,
+        detail: message,
+        status: 'error',
+        phase: 'error',
+        progress: null,
+        name: boardName,
+        version: releaseVersion,
+        target: boardName,
+        metadata: {
+          boardId: selectedBoard.$id,
+          boardType: selectedBoard.boardType,
+          filename: compileResult.filename,
+        },
+      });
+      finishToast(toastId, {
+        message: 'Firmware upload failed.',
+        detail: message,
+        tone: 'error',
+        progress: null,
+      });
     } finally {
       setBusyAction(null);
     }
@@ -2977,6 +4736,107 @@ export function IDEWorkspace({
     }
   }
 
+  function updateLocalBoardEdit(rowKey: string, patch: LocalBoardEdit) {
+    setLocalBoardEdits((current) => ({
+      ...current,
+      [rowKey]: {
+        ...(current[rowKey] ?? {}),
+        ...patch,
+      },
+    }));
+  }
+
+  async function handleSaveLocalBoard(row: LocalBoardRow) {
+    const name = row.name.trim();
+    const fqbn = row.fqbn.trim();
+    const port = row.port.trim();
+
+    if (!fqbn || !port) {
+      pushToast('Choose a board type and port before saving.', 'error');
+      return;
+    }
+
+    if (!isUploadableBoardFqbn(fqbn)) {
+      pushToast('Choose an exact board type before saving.', 'error', undefined, { detail: 'ESP32 Family Device cannot be used for compile/upload.' });
+      return;
+    }
+
+    setBusyAction(`save-local-board:${row.key}`);
+    try {
+      const result = await window.tantalum.toolchain.saveLocalBoardProfile({
+        id: row.profileId,
+        name,
+        fqbn,
+        boardLabel: row.boardLabel,
+        port,
+        protocol: row.protocol,
+        protocolLabel: row.protocolLabel,
+        manufacturer: row.manufacturer,
+        vendorId: row.vendorId,
+        productId: row.productId,
+        serialNumber: row.serialNumber,
+        pnpId: row.pnpId,
+        locationId: row.locationId,
+        fingerprint: row.fingerprint,
+        confidence: row.confidence,
+        connected: row.connected,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      setLocalBoardEdits((current) => {
+        const next = { ...current };
+        delete next[row.key];
+        delete next[`local:${result.profile.id}`];
+        return next;
+      });
+      setLocalBoardProfiles((current) => {
+        const existingIndex = current.findIndex((profile) => profile.id === result.profile.id);
+        if (existingIndex < 0) {
+          return [result.profile];
+        }
+
+        return [result.profile, ...current.filter((_profile, index) => index !== existingIndex)].slice(0, 1);
+      });
+      await refreshLocalBoardProfiles();
+      pushToast(`Saved ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}`, 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to save local board.', 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDeleteLocalBoard(row: LocalBoardRow) {
+    if (!row.profileId) {
+      setLocalBoardEdits((current) => {
+        const next = { ...current };
+        delete next[row.key];
+        return next;
+      });
+      setLocalBoardCatalogQuery('');
+      return;
+    }
+
+    setBusyAction(`delete-local-board:${row.key}`);
+    try {
+      const result = await window.tantalum.toolchain.deleteLocalBoardProfile(row.profileId);
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      setLocalBoardProfiles(result.profiles);
+      handleResetLocalBoardEdits();
+      pushToast(`Forgot ${localBoardDisplayName(row)}`, 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to forget local board.', 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleRotateBoardToken() {
     if (!selectedBoard) {
       return;
@@ -3052,33 +4912,780 @@ export function IDEWorkspace({
     }
   }
 
-  async function handleInstallLibrary(library: LibraryEntry) {
-    setBusyAction(`library:${library.name}`);
-    const result = await window.tantalum.toolchain.installLibrary({ name: library.name });
-    setBusyAction(null);
+  function getSelectedLibraryVersion(library: LibraryEntry) {
+    const options = getLibraryDropdownVersionOptions(library);
+    const selectedVersion = libraryVersionSelections[normalizePackageKey(library.name)];
+    return selectedVersion && options.includes(selectedVersion) ? selectedVersion : options[0];
+  }
 
+  function handleLibraryVersionChange(library: LibraryEntry, version: string) {
+    setLibraryVersionSelections((current) => ({
+      ...current,
+      [normalizePackageKey(library.name)]: version,
+    }));
+  }
+
+  function handleSelectLibrary(library: LibraryEntry) {
+    ensureManagerDetailPanelVisible();
+    setLibraryDetailTab('overview');
+    setSelectedLibraryKey(normalizePackageKey(library.name));
+    void ensureLibraryMetadata(library);
+  }
+
+  function mergeLibraryMetadata(library: LibraryEntry) {
+    const mergeEntry = (entry: LibraryEntry) => {
+      if (normalizePackageKey(entry.name) !== normalizePackageKey(library.name)) {
+        return entry;
+      }
+
+      return {
+        ...entry,
+        ...library,
+        installed: entry.installed,
+        installedVersion: entry.installedVersion ?? library.installedVersion,
+      };
+    };
+
+    setDefaultLibraryResults((current) => current.map(mergeEntry));
+    setLibraryResults((current) => current.map(mergeEntry));
+    setInstalledLibraries((current) => current.map((entry) => {
+      if (normalizePackageKey(entry.name) !== normalizePackageKey(library.name)) {
+        return entry;
+      }
+
+      return {
+        ...entry,
+        ...library,
+        installed: true,
+        installedVersion: entry.installedVersion ?? entry.version ?? library.installedVersion,
+      };
+    }));
+  }
+
+  async function ensureLibraryMetadata(library: LibraryEntry) {
+    if ((library.versions?.length ?? 0) > 0 && (library.releases?.length ?? 0) > 0 && library.website) {
+      return library;
+    }
+
+    const libraryKey = normalizePackageKey(library.name);
+    const existingRequest = libraryMetadataRequestsRef.current.get(libraryKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = window.tantalum.toolchain.searchLibraries(library.name)
+      .then((result) => {
+        if (!result.success) {
+          return null;
+        }
+
+        const libraries = (result.libraries as LibraryEntry[]) ?? [];
+        const metadata = libraries.find((entry) => normalizePackageKey(entry.name) === libraryKey) ?? libraries[0] ?? null;
+        if (!metadata) {
+          return null;
+        }
+
+        const mergedLibrary = {
+          ...library,
+          ...metadata,
+          installed: library.installed,
+          installedVersion: library.installedVersion ?? metadata.installedVersion,
+        };
+        mergeLibraryMetadata(mergedLibrary);
+        return mergedLibrary;
+      })
+      .catch(() => null)
+      .finally(() => {
+        libraryMetadataRequestsRef.current.delete(libraryKey);
+      });
+
+    libraryMetadataRequestsRef.current.set(libraryKey, request);
+    return request;
+  }
+
+  async function handleOpenLibraryInfo(library: LibraryEntry) {
+    const metadata = await ensureLibraryMetadata(library);
+    const website = metadata?.website || library.website;
+
+    if (!website) {
+      pushToast(`No info link is available for ${library.name}.`, 'error');
+      return;
+    }
+
+    const result = await window.tantalum.shell.openExternal(website);
     if (!result.success) {
       pushToast(result.error, 'error');
+    }
+  }
+
+  function getLibraryInstallState(library: LibraryEntry) {
+    const libraryKey = normalizePackageKey(library.name);
+    const selectedVersion = getSelectedLibraryVersion(library);
+    const selectedInstallVersion = getInstallVersionForPayload(selectedVersion);
+    const latestVersion = getLibraryLatestVersion(library);
+    const installedVersion = getLibraryInstalledVersion(library);
+    const isOutdated = isLibraryOutdated(library);
+    const isInstalling = Boolean(activeLibraryInstalls[libraryKey]);
+    const isRemoving = busyAction === `remove-library:${libraryKey}`;
+    const installedSelectedVersion = Boolean(
+      library.installed &&
+        (selectedInstallVersion
+          ? !installedVersion || managerVersionsMatch(selectedInstallVersion, installedVersion)
+          : !latestVersion || !installedVersion || managerVersionsMatch(installedVersion, latestVersion))
+    );
+
+    return {
+      libraryKey,
+      selectedVersion,
+      latestVersion,
+      installedVersion,
+      isInstalling,
+      isRemoving,
+      isOutdated,
+      installedSelectedVersion,
+    };
+  }
+
+  function getLibraryNotificationKind(library?: LibraryEntry): ToolchainNotificationKind {
+    return library?.installed ? 'library-update' : 'library-install';
+  }
+
+  function getLibraryNotificationFromProgress(event: LibraryInstallProgressEvent, library?: LibraryEntry): ToolchainNotificationInput {
+    const kind = getLibraryNotificationKind(library);
+    const versionLabel = event.version ? ` ${event.version}` : '';
+    const title =
+      event.status === 'success'
+        ? `Installed ${event.name}`
+        : event.status === 'error'
+          ? `Failed to install ${event.name}`
+          : event.status === 'canceled'
+            ? `Stopped installing ${event.name}`
+            : `Installing ${event.name}${versionLabel}`;
+
+    return {
+      id: event.installId,
+      kind,
+      title,
+      detail: event.message,
+      name: event.name,
+      version: event.version ?? '',
+      target: event.name,
+      status: event.status,
+      phase: event.phase,
+      progress: event.progress,
+      metadata: {
+        installId: event.installId,
+        website: library?.website ?? null,
+      },
+    };
+  }
+
+  function clearStoppingInstall(installId: string) {
+    setStoppingInstallIds((current) => {
+      if (!current[installId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[installId];
+      return next;
+    });
+  }
+
+  async function handleCancelLibraryInstallById(installId: string, name: string) {
+    if (!installId || stoppingInstallIds[installId]) {
+      return;
+    }
+
+    if (!window.confirm(`Stop installing ${name}?`)) {
+      return;
+    }
+
+    setStoppingInstallIds((current) => ({ ...current, [installId]: true }));
+    const toastId = libraryInstallToastIdsRef.current.get(installId);
+    if (toastId) {
+      updateToast(toastId, {
+        detail: `Stopping ${name} install...`,
+        actions: [],
+        persistent: true,
+        progress: null,
+      });
+    }
+
+    const result = await window.tantalum.toolchain.cancelLibraryInstall({ installId }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to stop library install.',
+    }));
+
+    if (!result.success) {
+      clearStoppingInstall(installId);
+      if (toastId) {
+        updateToast(toastId, {
+          detail: result.error,
+          tone: 'error',
+        });
+      } else {
+        pushToast(result.error, 'error');
+      }
+    }
+  }
+
+  function handleCancelLibraryInstall(library: LibraryEntry) {
+    const installId = activeLibraryInstalls[normalizePackageKey(library.name)];
+    if (!installId) {
+      return;
+    }
+
+    void handleCancelLibraryInstallById(installId, library.name);
+  }
+
+  function updateLibraryInstallToast(event: LibraryInstallProgressEvent, library?: LibraryEntry) {
+    const notification = getLibraryNotificationFromProgress(event, library);
+    persistToolchainNotification(notification);
+    const existingToastId = libraryInstallToastIdsRef.current.get(event.installId);
+    const versionLabel = event.version ? ` ${event.version}` : '';
+    const isSettled = event.status === 'success' || event.status === 'error' || event.status === 'canceled';
+    const tone: Toast['tone'] = event.status === 'error' ? 'error' : event.status === 'success' ? 'success' : 'info';
+    const message =
+      event.status === 'success'
+        ? `Installed ${event.name}`
+        : event.status === 'error'
+          ? `Failed to install ${event.name}`
+          : event.status === 'canceled'
+            ? `Stopped installing ${event.name}`
+            : `Installing ${event.name}${versionLabel}`;
+    const detail = event.message || (event.status === 'queued' ? 'Preparing install...' : 'Downloading library...');
+    const progress = event.status === 'success' ? 100 : event.status === 'canceled' ? undefined : event.progress;
+    const isStopping = stoppingInstallIds[event.installId] || event.phase === 'stopping';
+    const actions = isSettled || isStopping
+      ? []
+      : [{
+          label: 'Stop',
+          dismissOnSelect: false,
+          onSelect: () => void handleCancelLibraryInstallById(event.installId, event.name),
+        }];
+
+    if (!existingToastId) {
+      const toastId = pushToast(message, tone, actions, {
+        detail,
+        persistent: !isSettled,
+        progress,
+        notificationId: event.installId,
+      });
+      libraryInstallToastIdsRef.current.set(event.installId, toastId);
+      if (isSettled) {
+        window.setTimeout(() => dismissToast(toastId), 5000);
+      }
+      return;
+    }
+
+    if (isSettled) {
+      clearStoppingInstall(event.installId);
+      finishToast(existingToastId, { message, detail, tone, progress, actions: [] });
+      return;
+    }
+
+    updateToast(existingToastId, {
+      message,
+      detail,
+      tone,
+      progress,
+      persistent: true,
+      actions,
+    });
+  }
+
+  async function handleInstallLibrary(library: LibraryEntry, requestedVersion?: string) {
+    const selectedVersion = requestedVersion ?? getSelectedLibraryVersion(library);
+    const version = getInstallVersionForPayload(selectedVersion);
+    const installId = createToolchainTaskId('library');
+    const libraryKey = normalizePackageKey(library.name);
+
+    setActiveLibraryInstalls((current) => ({ ...current, [libraryKey]: installId }));
+    persistToolchainNotification(getLibraryNotificationFromProgress({
+      installId,
+      name: library.name,
+      version,
+      status: 'queued',
+      phase: 'prepare',
+      message: `Preparing ${library.name} install...`,
+      progress: null,
+    }, library));
+
+    const toastId = pushToast(`Installing ${library.name}${version ? ` ${version}` : ''}`, 'info', [{
+      label: 'Stop',
+      dismissOnSelect: false,
+      onSelect: () => void handleCancelLibraryInstallById(installId, library.name),
+    }], {
+      detail: 'Preparing install...',
+      persistent: true,
+      progress: null,
+      notificationId: installId,
+    });
+    libraryInstallToastIdsRef.current.set(installId, toastId);
+
+    const result = await window.tantalum.toolchain.installLibrary({ name: library.name, version, installId }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to install library.',
+    }));
+    setActiveLibraryInstalls((current) => {
+      const next = { ...current };
+      delete next[libraryKey];
+      return next;
+    });
+    clearStoppingInstall(installId);
+
+    if (!result.success) {
+      const wasCanceled = 'canceled' in result && Boolean(result.canceled);
+      const failedEvent: LibraryInstallProgressEvent = {
+        installId,
+        name: library.name,
+        version,
+        status: wasCanceled ? 'canceled' : 'error',
+        phase: wasCanceled ? 'canceled' : 'error',
+        message: wasCanceled ? `${library.name} install stopped.` : result.error,
+        progress: null,
+      };
+      updateLibraryInstallToast(failedEvent, library);
       return;
     }
 
     pushConsole(normalizeOutput(result.output || `Installed ${library.name}`), 'success');
-    pushToast(`Installed ${library.name}`, 'success');
+    const successEvent: LibraryInstallProgressEvent = {
+      installId,
+      name: library.name,
+      version,
+      status: 'success',
+      phase: 'complete',
+      message: `${library.name} installed.`,
+      progress: 100,
+    };
+    updateLibraryInstallToast(successEvent, library);
     await refreshInstalledLibraries();
   }
 
-  async function handleInstallPlatform(platform: BoardPlatform) {
-    setBusyAction(`platform:${platform.id}`);
-    const result = await window.tantalum.toolchain.installBoardPackage({ packageName: `${platform.id}@${platform.latest || platform.version || 'latest'}` });
-    setBusyAction(null);
-
-    if (!result.success) {
-      pushToast(result.error, 'error');
+  async function handleRemoveLibrary(library: LibraryEntry) {
+    if (!window.confirm(`Remove ${library.name}?`)) {
       return;
     }
 
-    pushConsole(normalizeOutput(result.output || `Installed ${platform.id}`), 'success');
-    pushToast(`Installed ${platform.name}`, 'success');
+    const libraryKey = normalizePackageKey(library.name);
+    const notificationId = createToolchainTaskId('remove-library');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'library-remove',
+      title: `Removing ${library.name}`,
+      detail: 'Removing installed library...',
+      status: 'running',
+      phase: 'remove',
+      progress: null,
+      name: library.name,
+      target: library.name,
+      metadata: { libraryKey },
+    });
+    const toastId = pushToast(`Removing ${library.name}`, 'info', undefined, {
+      detail: 'Removing installed library...',
+      persistent: true,
+      progress: null,
+      notificationId,
+    });
+
+    setBusyAction(`remove-library:${libraryKey}`);
+    const result = await window.tantalum.toolchain.removeLibrary({ name: library.name }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to remove library.',
+    }));
+    setBusyAction(null);
+
+    if (!result.success) {
+      persistToolchainNotification({
+        id: notificationId,
+        kind: 'library-remove',
+        title: `Failed to remove ${library.name}`,
+        detail: result.error,
+        status: 'error',
+        phase: 'error',
+        progress: null,
+        name: library.name,
+        target: library.name,
+        metadata: { libraryKey },
+      });
+      finishToast(toastId, {
+        message: `Failed to remove ${library.name}`,
+        detail: result.error,
+        tone: 'error',
+        progress: null,
+      });
+      return;
+    }
+
+    pushConsole(normalizeOutput(result.output || `Removed ${library.name}`), 'success');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'library-remove',
+      title: `Removed ${library.name}`,
+      detail: `${library.name} removed.`,
+      status: 'success',
+      phase: 'complete',
+      progress: 100,
+      name: library.name,
+      target: library.name,
+      metadata: { libraryKey },
+    });
+    finishToast(toastId, {
+      message: `Removed ${library.name}`,
+      detail: `${library.name} removed.`,
+      tone: 'success',
+      progress: 100,
+    });
+    await refreshInstalledLibraries();
+  }
+
+  function getSelectedPlatformVersion(platform: BoardPlatform) {
+    const options = getPlatformDropdownVersionOptions(platform);
+    const selectedVersion = platformVersionSelections[normalizePackageKey(platform.id)];
+    return selectedVersion && options.includes(selectedVersion) ? selectedVersion : options[0];
+  }
+
+  function handlePlatformVersionChange(platform: BoardPlatform, version: string) {
+    setPlatformVersionSelections((current) => ({
+      ...current,
+      [normalizePackageKey(platform.id)]: version,
+    }));
+  }
+
+  function handleSelectPlatform(platform: BoardPlatform) {
+    ensureManagerDetailPanelVisible();
+    setPlatformDetailTab('overview');
+    setSelectedPlatformKey(normalizePackageKey(platform.id));
+  }
+
+  async function handleOpenPlatformInfo(platform: BoardPlatform) {
+    if (!platform.website) {
+      pushToast(`No info link is available for ${platform.name}.`, 'error');
+      return;
+    }
+
+    const result = await window.tantalum.shell.openExternal(platform.website);
+    if (!result.success) {
+      pushToast(result.error, 'error');
+    }
+  }
+
+  async function handleCancelPlatformInstallById(installId: string, name: string) {
+    if (!installId || stoppingInstallIds[installId]) {
+      return;
+    }
+
+    if (!window.confirm(`Stop installing ${name}?`)) {
+      return;
+    }
+
+    setStoppingInstallIds((current) => ({ ...current, [installId]: true }));
+
+    const task = platformInstallProgressRef.current?.installId === installId ? platformInstallProgressRef.current : null;
+    if (task) {
+      const nextTask = { ...task, stopping: true };
+      platformInstallProgressRef.current = nextTask;
+      updateToast(nextTask.toastId, {
+        message: `Stopping ${name}`,
+        detail: 'Stopping board core install...',
+        actions: [],
+        persistent: true,
+        progress: nextTask.progress,
+      });
+    }
+
+    const result = await window.tantalum.toolchain.cancelBoardPackageInstall({ installId }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to stop board core install.',
+    }));
+
+    if (!result.success) {
+      clearStoppingInstall(installId);
+      if (task) {
+        const nextTask = { ...task, stopping: false };
+        platformInstallProgressRef.current = nextTask;
+        updateToast(nextTask.toastId, {
+          detail: result.error,
+          tone: 'error',
+        });
+      } else {
+        pushToast(result.error, 'error');
+      }
+    }
+  }
+
+  function getPlatformInstallNotificationKind(platform: BoardPlatform): ToolchainNotificationKind {
+    return platform.installed ? 'platform-update' : 'platform-install';
+  }
+
+  function getToolchainNotificationActions(notification: ToolchainNotification): Toast['actions'] {
+    if (!isActiveToolchainNotification(notification)) {
+      return [];
+    }
+
+    const installId = typeof notification.metadata.installId === 'string' ? notification.metadata.installId : notification.id;
+    const name = notification.name || notification.target || notification.title;
+
+    if (notification.kind === 'library-install' || notification.kind === 'library-update') {
+      return [{
+        label: 'Stop',
+        dismissOnSelect: false,
+        onSelect: () => void handleCancelLibraryInstallById(installId, name),
+      }];
+    }
+
+    if (notification.kind === 'platform-install' || notification.kind === 'platform-update') {
+      return [{
+        label: 'Stop',
+        dismissOnSelect: false,
+        onSelect: () => void handleCancelPlatformInstallById(installId, name),
+      }];
+    }
+
+    return [];
+  }
+
+  function showToolchainNotificationToast(notification: ToolchainNotification) {
+    if (!isActiveToolchainNotification(notification)) {
+      return;
+    }
+
+    const existingToastId = toolchainNotificationToastIdsRef.current.get(notification.id);
+    const existingToastVisible = Boolean(existingToastId && toastsRef.current.some((toast) => toast.id === existingToastId));
+    const patch = {
+      message: notification.title,
+      detail: notification.detail,
+      tone: getToolchainToastTone(notification),
+      progress: notification.progress,
+      persistent: true,
+      actions: getToolchainNotificationActions(notification),
+      notificationId: notification.id,
+    };
+
+    if (existingToastId && existingToastVisible) {
+      updateToast(existingToastId, patch);
+      return;
+    }
+
+    if (existingToastId) {
+      toolchainNotificationToastIdsRef.current.delete(notification.id);
+    }
+
+    const toastId = pushToast(notification.title, getToolchainToastTone(notification), patch.actions, {
+      detail: notification.detail,
+      persistent: true,
+      progress: notification.progress,
+      notificationId: notification.id,
+    });
+    const installId = typeof notification.metadata.installId === 'string' ? notification.metadata.installId : notification.id;
+    if (notification.kind === 'library-install' || notification.kind === 'library-update') {
+      libraryInstallToastIdsRef.current.set(installId, toastId);
+    }
+    if (notification.kind === 'library-migration') {
+      libraryMigrationToastIdRef.current = toastId;
+    }
+    if (
+      (notification.kind === 'platform-install' || notification.kind === 'platform-update' || notification.kind === 'platform-remove') &&
+      platformInstallProgressRef.current?.installId === installId
+    ) {
+      platformInstallProgressRef.current = {
+        ...platformInstallProgressRef.current,
+        toastId,
+      };
+    }
+  }
+
+  const restoreToolchainNotificationToast = useEffectEvent((notification: ToolchainNotification) => {
+    showToolchainNotificationToast(notification);
+  });
+
+  function updatePlatformInstallProgressToast(chunk: string) {
+    let task = platformInstallProgressRef.current;
+    if (!task) {
+      return;
+    }
+
+    const nextProgress = extractInstallProgressPercent(chunk);
+    if (nextProgress !== null) {
+      task = { ...task, progress: nextProgress };
+      platformInstallProgressRef.current = task;
+    }
+
+    const fallback = task.operation === 'remove' ? 'Removing board core...' : 'Installing board core...';
+    const detail = formatInstallProgressMessage(chunk, fallback);
+    const versionLabel = task.operation === 'install' && task.version && task.version !== 'latest' ? ` ${task.version}` : '';
+    const titleVerb = task.operation === 'remove' ? 'Removing' : task.notificationKind === 'platform-update' ? 'Updating' : 'Installing';
+    const title = `${titleVerb} ${task.name}${versionLabel}`;
+
+    persistToolchainNotification({
+      id: task.installId,
+      kind: task.notificationKind,
+      title,
+      detail,
+      status: 'running',
+      phase: task.operation === 'remove' ? 'remove' : 'install',
+      progress: task.progress,
+      name: task.name,
+      version: task.version ?? '',
+      target: task.name,
+      metadata: {
+        installId: task.installId,
+        platformId: task.platformId,
+        operation: task.operation,
+      },
+    });
+
+    updateToast(task.toastId, {
+      message: title,
+      detail,
+      tone: 'info',
+      persistent: true,
+      progress: task.progress,
+      actions: task.operation === 'install' && !task.stopping
+        ? [{
+            label: 'Stop',
+            dismissOnSelect: false,
+            onSelect: () => void handleCancelPlatformInstallById(task.installId, task.name),
+          }]
+        : [],
+    });
+  }
+
+  async function handleInstallPlatform(platform: BoardPlatform, requestedVersion?: string) {
+    const selectedVersion = requestedVersion ?? getSelectedPlatformVersion(platform);
+    const installVersion = getPlatformInstallVersion(platform, selectedVersion);
+    const installId = createToolchainTaskId('platform');
+    const notificationKind = getPlatformInstallNotificationKind(platform);
+    const notificationTitle = `${notificationKind === 'platform-update' ? 'Updating' : 'Installing'} ${platform.name}${installVersion !== 'latest' ? ` ${installVersion}` : ''}`;
+    persistToolchainNotification({
+      id: installId,
+      kind: notificationKind,
+      title: notificationTitle,
+      detail: 'Preparing board core install...',
+      status: 'queued',
+      phase: 'prepare',
+      progress: null,
+      name: platform.name,
+      version: installVersion,
+      target: platform.name,
+      metadata: {
+        installId,
+        platformId: platform.id,
+        operation: 'install',
+      },
+    });
+    const toastId = pushToast(notificationTitle, 'info', [{
+      label: 'Stop',
+      dismissOnSelect: false,
+      onSelect: () => void handleCancelPlatformInstallById(installId, platform.name),
+    }], {
+      detail: 'Preparing board core install...',
+      persistent: true,
+      progress: null,
+      notificationId: installId,
+    });
+
+    platformInstallProgressRef.current = {
+      installId,
+      platformId: platform.id,
+      name: platform.name,
+      operation: 'install',
+      notificationKind,
+      toastId,
+      version: installVersion,
+      progress: null,
+    };
+
+    setActivePlatformInstalls((current) => ({ ...current, [platform.id]: installId }));
+    setBusyAction(`platform:${platform.id}`);
+    const result = await window.tantalum.toolchain.installBoardPackage({ packageName: `${platform.id}@${installVersion}`, installId }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to install board core.',
+    }));
+    setBusyAction(null);
+    setActivePlatformInstalls((current) => {
+      const next = { ...current };
+      delete next[platform.id];
+      return next;
+    });
+    clearStoppingInstall(installId);
+    const progressTask = platformInstallProgressRef.current?.toastId === toastId ? platformInstallProgressRef.current : null;
+    if (progressTask) {
+      platformInstallProgressRef.current = null;
+    }
+
+    if (!result.success) {
+      if ('canceled' in result && result.canceled) {
+        pushConsole(`Stopped installing ${platform.name}.`, 'info');
+        persistToolchainNotification({
+          id: installId,
+          kind: notificationKind,
+          title: `Stopped installing ${platform.name}`,
+          detail: 'Board core install stopped.',
+          status: 'canceled',
+          phase: 'canceled',
+          progress: progressTask?.progress ?? null,
+          name: platform.name,
+          version: installVersion,
+          target: platform.name,
+          metadata: { installId, platformId: platform.id, operation: 'install' },
+        });
+        finishToast(toastId, {
+          message: `Stopped installing ${platform.name}`,
+          detail: 'Board core install stopped.',
+          tone: 'info',
+          progress: progressTask?.progress ?? null,
+          actions: [],
+        });
+        return;
+      }
+
+      persistToolchainNotification({
+        id: installId,
+        kind: notificationKind,
+        title: `Failed to install ${platform.name}`,
+        detail: result.error,
+        status: 'error',
+        phase: 'error',
+        progress: progressTask?.progress ?? null,
+        name: platform.name,
+        version: installVersion,
+        target: platform.name,
+        metadata: { installId, platformId: platform.id, operation: 'install' },
+      });
+      finishToast(toastId, {
+        message: `Failed to install ${platform.name}`,
+        detail: result.error,
+        tone: 'error',
+        progress: progressTask?.progress ?? null,
+        actions: [],
+      });
+      return;
+    }
+
+    pushConsole(normalizeOutput(result.output || `Installed ${platform.id}@${installVersion}`), 'success');
+    persistToolchainNotification({
+      id: installId,
+      kind: notificationKind,
+      title: `${notificationKind === 'platform-update' ? 'Updated' : 'Installed'} ${platform.name}`,
+      detail: `${platform.name} ${installVersion} installed.`,
+      status: 'success',
+      phase: 'complete',
+      progress: 100,
+      name: platform.name,
+      version: installVersion,
+      target: platform.name,
+      metadata: { installId, platformId: platform.id, operation: 'install' },
+    });
+    finishToast(toastId, {
+      message: `Installed ${platform.name}`,
+      detail: `${platform.name} ${installVersion} installed.`,
+      tone: 'success',
+      progress: 100,
+      actions: [],
+    });
     await refreshInstalledPlatforms();
   }
 
@@ -3087,17 +5694,92 @@ export function IDEWorkspace({
       return;
     }
 
+    const installId = createToolchainTaskId('remove-platform');
+    persistToolchainNotification({
+      id: installId,
+      kind: 'platform-remove',
+      title: `Removing ${platform.name}`,
+      detail: 'Preparing board core removal...',
+      status: 'queued',
+      phase: 'prepare',
+      progress: null,
+      name: platform.name,
+      target: platform.name,
+      metadata: {
+        installId,
+        platformId: platform.id,
+        operation: 'remove',
+      },
+    });
+    const toastId = pushToast(`Removing ${platform.name}`, 'info', undefined, {
+      detail: 'Preparing board core removal...',
+      persistent: true,
+      progress: null,
+      notificationId: installId,
+    });
+
+    platformInstallProgressRef.current = {
+      installId,
+      platformId: platform.id,
+      name: platform.name,
+      operation: 'remove',
+      notificationKind: 'platform-remove',
+      toastId,
+      progress: null,
+    };
+
     setBusyAction(`remove-platform:${platform.id}`);
-    const result = await window.tantalum.toolchain.removeBoardPackage({ packageName: platform.id });
+    const result = await window.tantalum.toolchain.removeBoardPackage({ packageName: platform.id }).catch((error: unknown) => ({
+      success: false as const,
+      error: error instanceof Error ? error.message : 'Unable to remove board core.',
+    }));
     setBusyAction(null);
+    const progressTask = platformInstallProgressRef.current?.toastId === toastId ? platformInstallProgressRef.current : null;
+    if (progressTask) {
+      platformInstallProgressRef.current = null;
+    }
 
     if (!result.success) {
-      pushToast(result.error, 'error');
+      persistToolchainNotification({
+        id: installId,
+        kind: 'platform-remove',
+        title: `Failed to remove ${platform.name}`,
+        detail: result.error,
+        status: 'error',
+        phase: 'error',
+        progress: progressTask?.progress ?? null,
+        name: platform.name,
+        target: platform.name,
+        metadata: { installId, platformId: platform.id, operation: 'remove' },
+      });
+      finishToast(toastId, {
+        message: `Failed to remove ${platform.name}`,
+        detail: result.error,
+        tone: 'error',
+        progress: progressTask?.progress ?? null,
+      });
       return;
     }
 
     pushConsole(normalizeOutput(result.output || `Removed ${platform.id}`), 'success');
-    pushToast(`Removed ${platform.name}`, 'success');
+    persistToolchainNotification({
+      id: installId,
+      kind: 'platform-remove',
+      title: `Removed ${platform.name}`,
+      detail: `${platform.name} removed.`,
+      status: 'success',
+      phase: 'complete',
+      progress: 100,
+      name: platform.name,
+      target: platform.name,
+      metadata: { installId, platformId: platform.id, operation: 'remove' },
+    });
+    finishToast(toastId, {
+      message: `Removed ${platform.name}`,
+      detail: `${platform.name} removed.`,
+      tone: 'success',
+      progress: 100,
+    });
     await refreshInstalledPlatforms();
   }
 
@@ -3197,6 +5879,9 @@ export function IDEWorkspace({
       case 'compile':
         await handleCompile();
         break;
+      case 'upload-local':
+        await handleUploadLocal();
+        break;
       case 'upload-cloud':
         setReleaseModalOpen(true);
         break;
@@ -3245,6 +5930,145 @@ export function IDEWorkspace({
 
   const handleInstallProgress = useEffectEvent((chunk: string) => {
     pushConsole(normalizeOutput(chunk), 'info');
+    updatePlatformInstallProgressToast(chunk);
+  });
+
+  const handleUsbUploadProgress = useEffectEvent((event: UsbUploadProgressEvent) => {
+    const task = localBoardUploadProgressRef.current;
+    if (!task || task.uploadId !== event.uploadId) {
+      return;
+    }
+
+    const normalizedChunk = normalizeToolchainStreamChunk(event.chunk);
+    const combined = `${task.lineBuffer}${normalizedChunk}`;
+    const complete = combined.endsWith('\n');
+    const parts = combined.split('\n');
+    const completeLines = complete ? parts : parts.slice(0, -1);
+    task.lineBuffer = complete ? '' : parts.at(-1) ?? '';
+
+    const lines = completeLines.map((line) => line.trimEnd()).filter((line) => line.trim());
+    if (lines.length > 0) {
+      setConsoleEntries((current) => [
+        ...current,
+        ...lines.map((line) => ({
+          id: Date.now() + Math.random(),
+          level: 'info' as const,
+          message: line,
+        })),
+      ]);
+    } else if (task.lineBuffer.length > 2000) {
+      pushConsole(task.lineBuffer, 'info');
+      task.lineBuffer = '';
+    }
+
+    if (typeof event.progress === 'number') {
+      task.lastProgress = event.progress;
+    }
+
+    updateToast(task.toastId, {
+      detail: event.message || lines.at(-1) || 'Uploading over USB...',
+      progress: task.lastProgress,
+    });
+  });
+
+  const handleLibraryInstallProgress = useEffectEvent((event: LibraryInstallProgressEvent) => {
+    const matchingLibrary = [...libraryResults, ...defaultLibraryResults, ...installedLibraries].find(
+      (library) => normalizePackageKey(library.name) === normalizePackageKey(event.name),
+    );
+
+    updateLibraryInstallToast(event, matchingLibrary);
+
+    if (event.status === 'success' || event.status === 'error' || event.status === 'canceled') {
+      clearStoppingInstall(event.installId);
+      setActiveLibraryInstalls((current) => {
+        const libraryKey = normalizePackageKey(event.name);
+        if (!current[libraryKey]) {
+          return current;
+        }
+
+        const next = { ...current };
+        delete next[libraryKey];
+        return next;
+      });
+    }
+  });
+
+  const handleLibraryMigrationProgress = useEffectEvent((event: LibraryMigrationProgressEvent) => {
+    const notificationId = libraryMigrationNotificationIdRef.current ?? createToolchainTaskId('library-migration');
+    libraryMigrationNotificationIdRef.current = notificationId;
+    const complete = event.progress === 100 || event.phase.toLowerCase().includes('complete');
+    const failed = event.failed > 0 && complete;
+    const status = complete ? (failed ? 'error' : 'success') : 'running';
+    const title = complete
+      ? failed
+        ? 'Library migration completed with errors'
+        : 'Library migration complete'
+      : 'Migrating libraries';
+
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'library-migration',
+      title,
+      detail: event.message,
+      status,
+      phase: event.phase,
+      progress: event.progress,
+      name: 'Library migration',
+      target: 'Arduino libraries',
+      metadata: {
+        migrated: event.migrated,
+        skipped: event.skipped,
+        failed: event.failed,
+        total: event.total,
+      },
+    });
+
+    const existingToastId = libraryMigrationToastIdRef.current;
+    const existingToastVisible = Boolean(existingToastId && toastsRef.current.some((toast) => toast.id === existingToastId));
+
+    if (!existingToastId) {
+      const toastId = pushToast(title, failed ? 'error' : complete ? 'success' : 'info', undefined, {
+        detail: event.message,
+        persistent: !complete,
+        progress: event.progress,
+        notificationId,
+      });
+      libraryMigrationToastIdRef.current = toastId;
+      if (complete) {
+        window.setTimeout(() => dismissToast(toastId), 5000);
+        libraryMigrationNotificationIdRef.current = null;
+        libraryMigrationToastIdRef.current = null;
+      }
+      return;
+    }
+
+    if (!existingToastVisible) {
+      if (complete) {
+        libraryMigrationNotificationIdRef.current = null;
+        libraryMigrationToastIdRef.current = null;
+      }
+      return;
+    }
+
+    if (complete) {
+      finishToast(existingToastId, {
+        message: title,
+        detail: event.message,
+        tone: failed ? 'error' : 'success',
+        progress: event.progress,
+      });
+      libraryMigrationNotificationIdRef.current = null;
+      libraryMigrationToastIdRef.current = null;
+      return;
+    }
+
+    updateToast(existingToastId, {
+      message: title,
+      detail: event.message,
+      tone: 'info',
+      persistent: true,
+      progress: event.progress,
+    });
   });
 
   const handleSelectedBoardChange = useEffectEvent((board: BoardDocument | null) => {
@@ -3265,11 +6089,16 @@ export function IDEWorkspace({
     }
 
     void refreshBoardsList();
+    void refreshLocalBoards({ silent: true, portsOnly: true });
     void refreshInstalledLibraries();
     void refreshInstalledPlatforms();
     void refreshDefaultLibraries();
     void refreshDefaultPlatforms();
     void refreshProjectFolders();
+  });
+
+  const refreshLocalBoardsSilently = useEffectEvent(() => {
+    void refreshLocalBoards({ silent: true });
   });
 
   function handleTreeDeleted(targetPath: string, type: FileTreeItemType, skipBroadcast?: boolean) {
@@ -3987,6 +6816,18 @@ export function IDEWorkspace({
   });
 
   useEffect(() => {
+    toastsRef.current = toasts;
+  }, [toasts]);
+
+  useEffect(() => {
+    if (!restoreToolchainNotificationRequest) {
+      return;
+    }
+
+    restoreToolchainNotificationToast(restoreToolchainNotificationRequest.notification);
+  }, [restoreToolchainNotificationRequest]);
+
+  useEffect(() => {
     panelSizesRef.current = panelSizes;
   }, [panelSizes]);
 
@@ -4090,12 +6931,48 @@ export function IDEWorkspace({
   }, [selectedBoardId, selectedBoard]);
 
   useEffect(() => {
+    writeStoredLocalBoardEdits(localBoardEdits);
+  }, [localBoardEdits]);
+
+  useEffect(() => {
+    if (!active || (sidebar !== 'boards' && !hasConfiguredLocalBoard)) {
+      return;
+    }
+
+    const refresh = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+
+      refreshLocalBoardsSilently();
+    };
+
+    const refreshInterval = window.setInterval(refresh, LOCAL_BOARD_AUTO_REFRESH_MS);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [active, hasConfiguredLocalBoard, sidebar]);
+
+  useEffect(() => {
     if (!autoScrollLogs || !consoleOutputRef.current) {
       return;
     }
 
     consoleOutputRef.current.scrollTop = consoleOutputRef.current.scrollHeight;
   }, [consoleEntries, autoScrollLogs]);
+
+  useEffect(() => {
+    return () => {
+      if (localBoardMonitoringResumeTimerRef.current !== null) {
+        window.clearTimeout(localBoardMonitoringResumeTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     void initializeWorkspace();
@@ -4106,10 +6983,22 @@ export function IDEWorkspace({
     const offProgress = window.tantalum.toolchain.onInstallProgress((chunk) => {
       handleInstallProgress(chunk);
     });
+    const offUsbUploadProgress = window.tantalum.toolchain.onUsbUploadProgress((event) => {
+      handleUsbUploadProgress(event);
+    });
+    const offLibraryProgress = window.tantalum.toolchain.onLibraryInstallProgress((event) => {
+      handleLibraryInstallProgress(event);
+    });
+    const offLibraryMigrationProgress = window.tantalum.toolchain.onLibraryMigrationProgress((event) => {
+      handleLibraryMigrationProgress(event);
+    });
 
     return () => {
       offMenu();
       offProgress();
+      offUsbUploadProgress();
+      offLibraryProgress();
+      offLibraryMigrationProgress();
     };
   }, []);
 
@@ -4145,7 +7034,19 @@ export function IDEWorkspace({
   }, []);
 
   useEffect(() => {
+    if (sidebar === 'libraries' || sidebar === 'platforms') {
+      ensureManagerDetailPanelVisible();
+    }
+  }, [ensureManagerDetailPanelVisible, sidebar]);
+
+  useEffect(() => {
     if (sidebar !== 'libraries') {
+      return;
+    }
+
+    if (libraryManagerTab === 'installed') {
+      setLibrariesLoading(false);
+      setLibrariesError(null);
       return;
     }
 
@@ -4204,6 +7105,20 @@ export function IDEWorkspace({
     return () => {
       isCancelled = true;
     };
+  }, [sidebar, libraryManagerTab, librarySearchTerm, defaultLibraryResults]);
+
+  useEffect(() => {
+    if (sidebar !== 'libraries' || librarySearchTerm) {
+      return;
+    }
+
+    const librariesNeedingMetadata = defaultLibraryResults
+      .filter((library) => (library.versions?.length ?? 0) === 0 || !library.website)
+      .slice(0, 6);
+
+    librariesNeedingMetadata.forEach((library) => {
+      void ensureLibraryMetadata(library);
+    });
   }, [sidebar, librarySearchTerm, defaultLibraryResults]);
 
   useEffect(() => {
@@ -4422,69 +7337,1038 @@ export function IDEWorkspace({
     return <div className="manager-inline-status manager-inline-error">{message}</div>;
   }
 
-  function renderBoardsWorkspace() {
-    const hasBoards = boards.length > 0;
+  function renderLocalBoardCard(row: LocalBoardRow, portOptions: LocalBoardPort[]) {
+    const displayName = localBoardDisplayName(row);
+    const commonBoardOptions = BOARD_OPTIONS.map((option) => ({ value: option.value, label: option.label }));
+    const commonBoardValues = new Set(commonBoardOptions.map((option) => option.value));
+    const detectedBoardOptions = uniqueBoardOptions(
+      (row.matchingBoards ?? [])
+        .filter((match) => isUploadableBoardFqbn(match.fqbn) && !match.isHidden)
+        .map((match) => ({ value: match.fqbn, label: match.name || match.fqbn })),
+    ).filter((option) => !commonBoardValues.has(option.value));
+    const visibleSelectValues = new Set([...commonBoardOptions, ...detectedBoardOptions].map((option) => option.value));
+    const currentBoardOption =
+      isUploadableBoardFqbn(row.fqbn) && !visibleSelectValues.has(row.fqbn)
+        ? { value: row.fqbn, label: row.boardLabel || row.fqbn }
+        : null;
+    const selectBoardOptions = uniqueBoardOptions([
+      ...commonBoardOptions,
+      ...detectedBoardOptions,
+      ...(currentBoardOption ? [currentBoardOption] : []),
+    ]);
+    const selectBoardType = (fqbn: string) => {
+      const selectedOption = selectBoardOptions.find((option) => option.value === fqbn) ?? localBoardCatalog.find((option) => option.value === fqbn);
+      updateLocalBoardEdit(row.key, { fqbn, boardLabel: selectedOption?.label || fqbn });
+    };
+
+    const chooseInstalledBoard = (option: LocalBoardOption) => {
+      updateLocalBoardEdit(row.key, { fqbn: option.value, boardLabel: option.label });
+      setLocalBoardAdvancedOpen(false);
+      setLocalBoardCatalogQuery('');
+    };
+
+    const exactChipProbe = row.detectionSource === 'esptool-chip-probe';
+    const hasDetectionHint = row.matchingBoards?.some((match) => match.isHidden || isNonUploadableBoardFqbn(match.fqbn));
+    const needsReview = !isUploadableBoardFqbn(row.fqbn) || row.ai?.status === 'suggested';
+    const shouldShowAccuracyAdvisory =
+      row.connected &&
+      isUploadableBoardFqbn(row.fqbn) &&
+      !exactChipProbe &&
+      !isOfficialArduinoBoardFqbn(row.fqbn);
+    const statusText = row.connected ? (needsReview ? 'needs review' : 'connected') : row.profileId ? 'disconnected' : 'not set';
+    const statusClass = row.connected ? (needsReview ? 'pending' : 'online') : row.profileId ? 'offline' : 'pending';
+    const canUseBoard = isUploadableBoardFqbn(row.fqbn) && Boolean(row.port);
+    const aiMessage =
+      row.ai?.status && row.ai.status !== 'suggested' && row.ai.status !== 'no-suggestion'
+        ? row.ai.reason || 'Board detection AI is unavailable.'
+        : null;
+
+    const portOptionMap = new Map<string, LocalBoardPort>();
+    const addPortOption = (port: LocalBoardPort | null) => {
+      if (port?.path && !portOptionMap.has(port.path)) {
+        portOptionMap.set(port.path, port);
+      }
+    };
+    portOptions.forEach(addPortOption);
+    addPortOption(portOptionFromBoard(row));
+    const fullPortOptions = Array.from(portOptionMap.values()).sort(compareLocalBoardPorts);
+    const saveBusy = busyAction === `save-local-board:${row.key}`;
+    const deleteBusy = busyAction === `delete-local-board:${row.key}`;
 
     return (
-      <section className="tool-workspace manager-workspace board-manager-workspace">
+      <article key={row.key} className={`local-board-card active ${row.connected ? 'connected' : 'disconnected'}`}>
+        <div className="local-board-card-head">
+          <div>
+            <strong>{displayName}</strong>
+            <span>{row.port || 'No port selected'}</span>
+          </div>
+          <span className={`status-pill status-${statusClass}`}>{statusText}</span>
+        </div>
+
+        <div className="local-board-meta">
+          <span>{row.manufacturer || 'Unknown manufacturer'}</span>
+          <span>{localBoardConfidenceText(row)}</span>
+          {row.ai?.status === 'suggested' ? <span>AI suggested</span> : null}
+        </div>
+
+        {aiMessage ? <div className="manager-inline-status manager-inline-error">{aiMessage}</div> : null}
+        {row.matchingBoards && row.matchingBoards.length > 1 && !exactChipProbe ? (
+          <div className="manager-inline-status">Multiple board matches found. Confirm the board type before saving.</div>
+        ) : null}
+        {hasDetectionHint && !exactChipProbe ? (
+          <div className="manager-inline-status">
+            ESP32 Family Device is a detection hint, not an upload target. Select the exact board type, for example ESP32-C3.
+          </div>
+        ) : null}
+        {exactChipProbe ? <div className="manager-inline-status">Auto scan identified the ESP chip family from the board bootloader.</div> : null}
+        {shouldShowAccuracyAdvisory ? (
+          <div className="manager-inline-status">
+            Auto scan is an advisory match for this board type. If this is a clone or vendor-specific board, confirm the exact board in Advanced search before uploading.
+          </div>
+        ) : null}
+
+        <div className="local-board-fields">
+          <label>
+            Name
+            <input value={row.name} onChange={(event) => updateLocalBoardEdit(row.key, { name: event.target.value })} placeholder={row.boardLabel || 'Workbench board'} />
+          </label>
+          <label>
+            Board type
+            <select value={row.fqbn} onChange={(event) => selectBoardType(event.target.value)}>
+              <option value="">Select exact board type</option>
+              <optgroup label="Common boards">
+                {commonBoardOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </optgroup>
+              {detectedBoardOptions.length > 0 ? (
+                <optgroup label="Detected candidates">
+                  {detectedBoardOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {currentBoardOption ? (
+                <optgroup label="Current selection">
+                  <option value={currentBoardOption.value}>{currentBoardOption.label}</option>
+                </optgroup>
+              ) : null}
+            </select>
+          </label>
+          <div className="local-board-advanced-toggle">
+            <button className="secondary-button compact" type="button" onClick={handleToggleLocalBoardAdvanced}>
+              <Search size={13} />
+              {localBoardAdvancedOpen ? 'Hide installed boards' : 'Advanced board search'}
+            </button>
+          </div>
+          {localBoardAdvancedOpen ? (
+            <div className="local-board-advanced">
+              <div className="search-strip local-board-search-strip">
+                <Search size={16} />
+                <input value={localBoardCatalogQuery} onChange={(event) => setLocalBoardCatalogQuery(event.target.value)} placeholder="Search installed boards by name or FQBN" />
+              </div>
+              {localBoardCatalogLoading ? renderManagerInlineLoading('Loading installed boards...') : null}
+              {localBoardCatalogError ? renderManagerInlineError(localBoardCatalogError) : null}
+              {!localBoardCatalogLoading && !localBoardCatalogError && visibleLocalBoardCatalog.length === 0 ? (
+                <div className="manager-inline-status">No installed board matches found.</div>
+              ) : null}
+              {visibleLocalBoardCatalog.length > 0 ? (
+                <div className="local-board-catalog-list">
+                  {visibleLocalBoardCatalog.map((option) => (
+                    <button
+                      key={option.value}
+                      className={`local-board-catalog-item ${row.fqbn === option.value ? 'active' : ''}`}
+                      type="button"
+                      onClick={() => chooseInstalledBoard(option)}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.value}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <label>
+            Port
+            {fullPortOptions.length > 0 ? (
+              <select value={row.port} onChange={(event) => updateLocalBoardEdit(row.key, { port: event.target.value })}>
+                <option value="">Select port</option>
+                {fullPortOptions.map((port) => (
+                  <option key={port.path} value={port.path}>
+                    {localBoardPortLabel(port)}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input value={row.port} onChange={(event) => updateLocalBoardEdit(row.key, { port: event.target.value })} placeholder="COM3 or /dev/ttyUSB0" />
+            )}
+          </label>
+        </div>
+
+        <div className="local-board-actions">
+          <button className="secondary-button compact" type="button" onClick={handleResetLocalBoardEdits}>
+            Reset
+          </button>
+          <button className="primary-button compact" type="button" onClick={() => void handleSaveLocalBoard(row)} disabled={saveBusy || !canUseBoard}>
+            {saveBusy ? <LoaderCircle size={13} className="spin" /> : null}
+            {row.profileId ? 'Save' : 'Save board'}
+          </button>
+          {row.profileId ? (
+            <button className="danger-button compact" type="button" onClick={() => void handleDeleteLocalBoard(row)} disabled={deleteBusy}>
+              {deleteBusy ? <LoaderCircle size={13} className="spin" /> : null}
+              Forget
+            </button>
+          ) : null}
+        </div>
+      </article>
+    );
+  }
+
+  function renderBoardsWorkspace() {
+    const portOptionMap = new Map<string, LocalBoardPort>();
+    const addPortOption = (port: LocalBoardPort | null) => {
+      if (port?.path && !portOptionMap.has(port.path)) {
+        portOptionMap.set(port.path, port);
+      }
+    };
+    localBoardPorts.forEach(addPortOption);
+    detectedLocalBoards.forEach((board) => addPortOption(portOptionFromBoard(board)));
+    localBoardProfiles.forEach((board) => addPortOption(portOptionFromBoard(board)));
+    const portOptions = Array.from(portOptionMap.values()).sort(compareLocalBoardPorts);
+
+    return (
+      <section className="tool-workspace manager-workspace board-manager-workspace local-board-workspace">
         <div className="manager-page-header">
           <div className="manager-title-block">
-            <h2>Devices</h2>
+            <h2>Local board</h2>
           </div>
           <div className="panel-actions">
-            <button className="icon-button" type="button" onClick={() => setBoardModalOpen(true)} title="Add board">
-              <Plus size={16} />
-            </button>
-            <button className="icon-button" type="button" onClick={() => void refreshBoardsList()} title="Refresh boards" disabled={boardsLoading}>
-              {boardsLoading ? <LoaderCircle size={16} className="spin" /> : <RefreshCcw size={16} />}
+            <button className="primary-button compact" type="button" onClick={() => void handleAutoScanLocalBoard()} disabled={localBoardAutoScanLoading || isLocalUploadBusyAction(busyAction)}>
+              {localBoardAutoScanLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}
+              {localBoardAutoScanLoading ? 'Scanning...' : 'Auto scan'}
             </button>
           </div>
         </div>
-        <div className="panel-content manager-panel-content board-list">
-          {boardsLoading && !hasBoards ? renderManagerLoading('Loading boards...') : null}
-          {!boardsLoading && boardsError && !hasBoards ? renderManagerError(boardsError) : null}
-          {!boardsLoading && !boardsError && !hasBoards ? (
-            <div className="manager-state manager-state-empty">
-              <Cpu size={22} />
-              <span>No boards yet. Add your first device to start provisioning and OTA uploads.</span>
-              <button className="primary-button compact" type="button" onClick={() => setBoardModalOpen(true)}>
-                Add board
-              </button>
-            </div>
-          ) : null}
-          {hasBoards ? (
-            <>
-              {boardsLoading ? renderManagerInlineLoading('Refreshing boards...') : null}
-              {boardsError ? renderManagerInlineError(boardsError) : null}
-              {boards.map((board) => {
-                const status = calculateBoardStatus(board.lastSeen, board.status);
-                return (
-                  <button
-                    key={board.$id}
-                    className={`board-card manager-board-card ${selectedBoardId === board.$id ? 'active' : ''}`}
-                    type="button"
-                    onClick={() => setSelectedBoardId(board.$id)}
-                  >
-                    <div className="board-card-head">
-                      <strong>{board.name}</strong>
-                      <span className={`status-pill status-${status}`}>{status}</span>
-                    </div>
-                    <p>{board.boardType}</p>
-                    <small>Firmware {board.firmwareVersion || '1.0.0'}</small>
-                  </button>
-                );
-              })}
-            </>
-          ) : null}
+        <div className="panel-content manager-panel-content local-board-list">
+          {localBoardsError ? renderManagerInlineError(localBoardsError) : null}
+          {selectedLocalBoard ? renderLocalBoardCard(selectedLocalBoard, portOptions) : renderManagerError('Unable to initialize local board settings.')}
         </div>
       </section>
     );
   }
 
+  function renderRemoteBoardsPanel() {
+    return (
+      <div className="remote-board-panel">
+        <div className="remote-board-panel-header">
+          <div>
+            <h2>Remote boards</h2>
+            <span>{boards.length} saved</span>
+          </div>
+          <button className="primary-button compact" type="button" onClick={() => setBoardModalOpen(true)}>
+            <Plus size={14} />
+            Add board
+          </button>
+        </div>
+        <div className="remote-board-list">
+          {boardsLoading ? renderManagerInlineLoading('Loading remote boards...') : null}
+          {boardsError ? renderManagerInlineError(boardsError) : null}
+          {!boardsLoading && boards.length === 0 ? (
+            <div className="remote-board-empty">
+              <HardDriveUpload size={22} />
+              <span>No remote boards yet.</span>
+            </div>
+          ) : null}
+          {boards.map((board) => {
+            const status = calculateBoardStatus(board.lastSeen, board.status);
+            return (
+              <button key={board.$id} className={`remote-board-item ${selectedBoardId === board.$id ? 'active' : ''}`} type="button" onClick={() => setSelectedBoardId(board.$id)}>
+                <div>
+                  <strong>{board.name}</strong>
+                  <span>{board.boardType}</span>
+                </div>
+                <span className={`status-pill status-${status}`}>{status}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   /* eslint-disable react-hooks/refs */
+  function renderLibraryVersionSelect(library: LibraryEntry, ariaLabel: string) {
+    const versionOptions = getLibraryDropdownVersionOptions(library);
+    const libraryKey = normalizePackageKey(library.name);
+    const isBusy = Boolean(activeLibraryInstalls[libraryKey]) || busyAction === `remove-library:${libraryKey}`;
+
+    return (
+      <select
+        className="library-version-select"
+        value={getSelectedLibraryVersion(library)}
+        onChange={(event) => handleLibraryVersionChange(library, event.target.value)}
+        onFocus={() => void ensureLibraryMetadata(library)}
+        onMouseDown={() => void ensureLibraryMetadata(library)}
+        disabled={isBusy}
+        aria-label={ariaLabel}
+      >
+        {versionOptions.map((version) => (
+          <option key={version} value={version}>
+            {getLibraryVersionOptionLabel(library, version)}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  function renderLibraryInstallButton(library: LibraryEntry, mode: 'install' | 'update' = 'install') {
+    const { libraryKey, isInstalling, isRemoving, latestVersion } = getLibraryInstallState(library);
+    const isUpdate = mode === 'update';
+    const targetVersion = isUpdate ? latestVersion : undefined;
+    const installId = activeLibraryInstalls[libraryKey];
+    const isStopping = Boolean(installId && stoppingInstallIds[installId]);
+
+    if (isInstalling) {
+      return (
+        <button
+          className="danger-button compact manager-result-action"
+          type="button"
+          disabled={isStopping}
+          onClick={() => handleCancelLibraryInstall(library)}
+        >
+          {isStopping ? <LoaderCircle size={13} className="spin" /> : <CircleStop size={13} />}
+          {isStopping ? 'Stopping' : 'Stop'}
+        </button>
+      );
+    }
+
+    return (
+      <button
+        className="primary-button compact manager-result-action"
+        type="button"
+        disabled={isRemoving}
+        onClick={() => void handleInstallLibrary(library, targetVersion)}
+      >
+        {isUpdate ? 'Update' : 'Install'}
+      </button>
+    );
+  }
+
+  function renderLibraryRemoveButton(library: LibraryEntry) {
+    const { isInstalling, isRemoving } = getLibraryInstallState(library);
+
+    return (
+      <button
+        className="danger-button compact manager-result-action"
+        type="button"
+        disabled={isInstalling || isRemoving}
+        onClick={() => void handleRemoveLibrary(library)}
+      >
+        {isRemoving ? <LoaderCircle size={13} className="spin" /> : null}
+        {isRemoving ? 'Removing' : 'Remove'}
+      </button>
+    );
+  }
+
+  function renderLibraryCardActionButton(library: LibraryEntry) {
+    const { isOutdated } = getLibraryInstallState(library);
+
+    if (!library.installed) {
+      return renderLibraryInstallButton(library);
+    }
+
+    if (isOutdated) {
+      return renderLibraryInstallButton(library, 'update');
+    }
+
+    return renderLibraryRemoveButton(library);
+  }
+
+  function renderLibraryDetailActionButtons(library: LibraryEntry) {
+    const { isOutdated } = getLibraryInstallState(library);
+
+    if (!library.installed) {
+      return renderLibraryInstallButton(library);
+    }
+
+    if (isOutdated) {
+      return (
+        <>
+          {renderLibraryInstallButton(library, 'update')}
+          {renderLibraryRemoveButton(library)}
+        </>
+      );
+    }
+
+    return renderLibraryRemoveButton(library);
+  }
+
+  function renderLibraryResultCard(library: LibraryEntry) {
+    const libraryKey = normalizePackageKey(library.name);
+    const isSelected = selectedLibraryKey === libraryKey;
+    const libraryProvider = library.author || library.maintainer;
+
+    return (
+      <article
+        key={library.name}
+        className={`result-card manager-result-card library-result-card ${isSelected ? 'active' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={isSelected}
+        onClick={() => handleSelectLibrary(library)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleSelectLibrary(library);
+          }
+        }}
+      >
+        <div className="manager-result-copy">
+          <div className="manager-result-title-row">
+            <strong>{library.name}</strong>
+            {libraryProvider ? <span className="manager-result-provider">by {libraryProvider}</span> : null}
+            {library.installed ? <span className="release-badge">{library.installedVersion ? `Installed ${library.installedVersion}` : 'Installed'}</span> : null}
+          </div>
+          <p>{library.sentence || library.paragraph || 'Arduino library package'}</p>
+          <div className="manager-result-meta">
+            <span>{library.version && library.version !== 'latest' ? `Latest ${library.version}` : library.version || 'latest'}</span>
+            {library.category ? <span>{library.category}</span> : null}
+          </div>
+        </div>
+        <div
+          className="manager-result-controls"
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {renderLibraryVersionSelect(library, `Version for ${library.name}`)}
+          {renderLibraryCardActionButton(library)}
+        </div>
+      </article>
+    );
+  }
+
+  function renderPlatformVersionSelect(platform: BoardPlatform, ariaLabel: string) {
+    const versionOptions = getPlatformDropdownVersionOptions(platform);
+    const isBusy = busyAction === `platform:${platform.id}` || busyAction === `remove-platform:${platform.id}`;
+
+    return (
+      <select
+        className="platform-version-select"
+        value={getSelectedPlatformVersion(platform)}
+        onChange={(event) => handlePlatformVersionChange(platform, event.target.value)}
+        disabled={isBusy}
+        aria-label={ariaLabel}
+      >
+        {versionOptions.map((version) => (
+          <option key={version} value={version}>
+            {getPlatformVersionOptionLabel(platform, version)}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  function renderPlatformInstallButton(platform: BoardPlatform, mode: 'install' | 'update' = 'install') {
+    const isInstalling = busyAction === `platform:${platform.id}`;
+    const isRemoving = busyAction === `remove-platform:${platform.id}`;
+    const isUpdate = mode === 'update';
+    const targetVersion = isUpdate ? getPlatformLatestVersion(platform) : undefined;
+    const activeInstallId = activePlatformInstalls[platform.id];
+    const isStopping = Boolean(activeInstallId && stoppingInstallIds[activeInstallId]);
+
+    if (isInstalling) {
+      return (
+        <button
+          className="danger-button compact manager-result-action"
+          type="button"
+          onClick={() => {
+            if (activeInstallId) {
+              void handleCancelPlatformInstallById(activeInstallId, platform.name);
+            }
+          }}
+          disabled={isStopping}
+        >
+          {isStopping ? <LoaderCircle size={13} className="spin" /> : <CircleStop size={13} />}
+          {isStopping ? 'Stopping' : 'Stop'}
+        </button>
+      );
+    }
+
+    return (
+      <button
+        className="primary-button compact manager-result-action"
+        type="button"
+        onClick={() => void handleInstallPlatform(platform, targetVersion)}
+        disabled={isRemoving}
+      >
+        {isUpdate ? 'Update' : 'Install'}
+      </button>
+    );
+  }
+
+  function renderPlatformRemoveButton(platform: BoardPlatform) {
+    const isInstalling = busyAction === `platform:${platform.id}`;
+    const isRemoving = busyAction === `remove-platform:${platform.id}`;
+
+    return (
+      <button
+        className="danger-button compact manager-result-action"
+        type="button"
+        onClick={() => void handleRemovePlatform(platform)}
+        disabled={isInstalling || isRemoving}
+      >
+        {isRemoving ? <LoaderCircle size={13} className="spin" /> : null}
+        {isRemoving ? 'Removing' : 'Remove'}
+      </button>
+    );
+  }
+
+  function renderPlatformCardActionButton(platform: BoardPlatform) {
+    if (!platform.installed) {
+      return renderPlatformInstallButton(platform);
+    }
+
+    if (isPlatformOutdated(platform)) {
+      return renderPlatformInstallButton(platform, 'update');
+    }
+
+    return renderPlatformRemoveButton(platform);
+  }
+
+  function renderPlatformDetailActionButtons(platform: BoardPlatform) {
+    if (!platform.installed) {
+      return renderPlatformInstallButton(platform);
+    }
+
+    if (isPlatformOutdated(platform)) {
+      return (
+        <>
+          {renderPlatformInstallButton(platform, 'update')}
+          {renderPlatformRemoveButton(platform)}
+        </>
+      );
+    }
+
+    return renderPlatformRemoveButton(platform);
+  }
+
+  function renderPlatformResultCard(platform: BoardPlatform) {
+    const platformKey = normalizePackageKey(platform.id);
+    const isSelected = selectedPlatformKey === platformKey;
+    const installedVersion = platform.installedVersion || platform.version;
+    const platformProvider = platform.maintainer;
+    const latestLabel = platform.latest && platform.latest !== 'Unknown'
+      ? `Latest ${platform.latest}`
+      : platform.version
+        ? `Version ${platform.version}`
+        : 'latest';
+
+    return (
+      <article
+        key={platform.id}
+        className={`result-card manager-result-card platform-result-card ${isSelected ? 'active' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-pressed={isSelected}
+        onClick={() => handleSelectPlatform(platform)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleSelectPlatform(platform);
+          }
+        }}
+      >
+        <div className="manager-result-copy">
+          <div className="manager-result-title-row">
+            <strong>{platform.name}</strong>
+            {platformProvider ? <span className="manager-result-provider">by {platformProvider}</span> : null}
+            {platform.installed ? <span className="release-badge">{installedVersion ? `Installed ${installedVersion}` : 'Installed'}</span> : null}
+          </div>
+          <p>{platform.description || 'Board platform package'}</p>
+          <div className="manager-result-meta">
+            <span>{latestLabel}</span>
+            <span>{platform.id}</span>
+          </div>
+        </div>
+        <div
+          className="manager-result-controls"
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {renderPlatformVersionSelect(platform, `Version for ${platform.name}`)}
+          {renderPlatformCardActionButton(platform)}
+        </div>
+      </article>
+    );
+  }
+
+  function renderLibraryFilterTabs() {
+    return (
+      <div className="manager-filter-tabs" role="tablist" aria-label="Library filter">
+        <button
+          className={libraryManagerTab === 'all' ? 'active' : ''}
+          type="button"
+          role="tab"
+          aria-selected={libraryManagerTab === 'all'}
+          onClick={() => setLibraryManagerTab('all')}
+        >
+          All
+        </button>
+        <button
+          className={libraryManagerTab === 'installed' ? 'active' : ''}
+          type="button"
+          role="tab"
+          aria-selected={libraryManagerTab === 'installed'}
+          onClick={() => setLibraryManagerTab('installed')}
+        >
+          Installed
+          <span>{installedLibraries.length}</span>
+        </button>
+      </div>
+    );
+  }
+
+  function renderLibraryDetailField(label: string, value: ReactNode) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+
+    return (
+      <div>
+        <dt>{label}</dt>
+        <dd>{value}</dd>
+      </div>
+    );
+  }
+
+  function renderLibraryDetailTabButton(tab: LibraryDetailTab, label: string, count?: number) {
+    return (
+      <button
+        className={libraryDetailTab === tab ? 'active' : ''}
+        type="button"
+        role="tab"
+        aria-selected={libraryDetailTab === tab}
+        onClick={() => setLibraryDetailTab(tab)}
+      >
+        {label}
+        {typeof count === 'number' && count > 0 ? <span>{count}</span> : null}
+      </button>
+    );
+  }
+
+  function renderDetailBulletList(items: string[]) {
+    if (items.length === 0) {
+      return <span className="library-detail-muted">No metadata available.</span>;
+    }
+
+    return (
+      <ul className="library-detail-bullet-list">
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    );
+  }
+
+  function renderLibraryOverviewTab(library: LibraryEntry) {
+    const architectures = getLibraryArchitectures(library);
+
+    return (
+      <>
+        <section className="library-detail-section">
+          <h4>Details</h4>
+          <dl className="library-detail-grid">
+            {renderLibraryDetailField('Author', library.author)}
+            {renderLibraryDetailField('Maintainer', library.maintainer)}
+            {renderLibraryDetailField('Installed version', library.installedVersion)}
+            {renderLibraryDetailField('Latest version', library.version && library.version !== 'latest' ? library.version : undefined)}
+            {renderLibraryDetailField('Category', library.category)}
+            {renderLibraryDetailField('Architectures', architectures)}
+            {renderLibraryDetailField('Types', library.types?.join(', '))}
+            {renderLibraryDetailField('License', library.license)}
+          </dl>
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Features</h4>
+          {renderDetailBulletList(getLibraryFeatureHighlights(library))}
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Use cases</h4>
+          {renderDetailBulletList(getLibraryUseCases(library))}
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Resources</h4>
+          {library.website ? (
+            <button className="secondary-button compact library-detail-resource-button" type="button" onClick={() => void handleOpenLibraryInfo(library)}>
+              <ExternalLink size={13} />
+              {isGithubLibraryUrl(library.website) ? 'Repository' : 'Official page'}
+            </button>
+          ) : (
+            <span className="library-detail-muted">No external page available.</span>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderLibraryVersionsTab(library: LibraryEntry) {
+    const releases = getLibraryReleases(library);
+
+    return (
+      <>
+        <section className="library-detail-section">
+          <h4>Changelog</h4>
+          <span className="library-detail-muted">
+            Arduino Library Manager does not provide changelog text for this library. Use the official page or repository for full release notes.
+          </span>
+          {library.website ? (
+            <button className="secondary-button compact library-detail-resource-button" type="button" onClick={() => void handleOpenLibraryInfo(library)}>
+              <ExternalLink size={13} />
+              Open release notes source
+            </button>
+          ) : null}
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Versions</h4>
+          {releases.length > 0 ? (
+            <ul className="library-release-list">
+              {releases.map((release, index) => {
+                const isLatest = release.version === library.version || (index === 0 && !library.version);
+                const isInstalled = library.installedVersion === release.version;
+                const dependencyCount = release.dependencies?.length ?? 0;
+
+                return (
+                  <li key={release.version}>
+                    <div className="library-release-copy">
+                      <div>
+                        <strong>{release.version}</strong>
+                        {isLatest ? <span className="release-badge">Latest</span> : null}
+                        {isInstalled ? <span className="release-badge">Installed</span> : null}
+                      </div>
+                      <span>
+                        {release.archiveFileName || 'Library Manager release'}
+                        {typeof release.downloadSize === 'number' ? ` - ${formatBytes(release.downloadSize)}` : ''}
+                        {dependencyCount > 0 ? ` - ${dependencyCount} ${dependencyCount === 1 ? 'dependency' : 'dependencies'}` : ''}
+                      </span>
+                    </div>
+                    <button className="secondary-button compact" type="button" onClick={() => handleLibraryVersionChange(library, release.version)}>
+                      Select
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <span className="library-detail-muted">No version history metadata available.</span>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderLibraryExamplesTab(library: LibraryEntry) {
+    const examples = library.examples ?? [];
+
+    return (
+      <section className="library-detail-section">
+        <h4>Examples</h4>
+        {!library.installed ? <span className="library-detail-muted">Install this library to inspect bundled examples.</span> : null}
+        {library.installed && examples.length === 0 ? <span className="library-detail-muted">No bundled examples found in this installed library.</span> : null}
+        {examples.length > 0 ? (
+          <ul className="library-example-list">
+            {examples.map((example) => (
+              <li key={example.relativePath || example.name}>
+                <BookOpen size={14} />
+                <div>
+                  <strong>{example.name}</strong>
+                  {example.relativePath ? <span>{example.relativePath}</span> : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderLibraryDependenciesTab(library: LibraryEntry) {
+    const archiveFileName = getLibraryArchiveFileName(library);
+    const downloadSize = getLibraryDownloadSize(library);
+    const dependencyLabels = (library.dependencies ?? []).map(getLibraryDependencyLabel).filter(Boolean);
+
+    return (
+      <>
+        <section className="library-detail-section">
+          <h4>Dependencies</h4>
+          {dependencyLabels.length > 0 ? (
+            <ul className="library-detail-list">
+              {dependencyLabels.map((dependency) => (
+                <li key={dependency}>{dependency}</li>
+              ))}
+            </ul>
+          ) : (
+            <span className="library-detail-muted">No dependency metadata available.</span>
+          )}
+        </section>
+
+        {(archiveFileName || downloadSize || library.installDir) ? (
+          <section className="library-detail-section">
+            <h4>Package</h4>
+            <dl className="library-detail-grid">
+              {renderLibraryDetailField('Archive', archiveFileName)}
+              {renderLibraryDetailField('Download size', typeof downloadSize === 'number' ? formatBytes(downloadSize) : undefined)}
+              {renderLibraryDetailField('Install folder', library.installDir)}
+            </dl>
+          </section>
+        ) : null}
+      </>
+    );
+  }
+
+  function renderLibraryDetailTabContent(library: LibraryEntry) {
+    if (libraryDetailTab === 'versions') {
+      return renderLibraryVersionsTab(library);
+    }
+
+    if (libraryDetailTab === 'examples') {
+      return renderLibraryExamplesTab(library);
+    }
+
+    if (libraryDetailTab === 'dependencies') {
+      return renderLibraryDependenciesTab(library);
+    }
+
+    return renderLibraryOverviewTab(library);
+  }
+
+  function renderLibraryDetailsPanel(library: LibraryEntry | null) {
+    if (!library) {
+      return (
+        <section className="library-manager-detail-pane library-manager-detail-empty">
+          <Library size={28} />
+          <strong>Select a library to view info.</strong>
+        </section>
+      );
+    }
+
+    const paragraph = library.paragraph && library.paragraph !== library.sentence ? library.paragraph : '';
+    const versionCount = getLibraryReleases(library).length;
+    const exampleCount = library.examples?.length ?? 0;
+    const dependencyCount = library.dependencies?.length ?? 0;
+
+    return (
+      <section className="library-manager-detail-pane" aria-label={`${library.name} details`}>
+        <div className="library-detail-header">
+          <div>
+            <h3>{library.name}</h3>
+            <div className="library-detail-badges">
+              {library.installed ? <span className="release-badge">{library.installedVersion ? `Installed ${library.installedVersion}` : 'Installed'}</span> : null}
+              {library.version && library.version !== 'latest' ? <span>Latest {library.version}</span> : null}
+              {library.category ? <span>{library.category}</span> : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="library-detail-summary">
+          <p>{library.sentence || library.paragraph || 'Arduino library package'}</p>
+          {paragraph ? <p>{paragraph}</p> : null}
+        </div>
+
+        <div className="library-detail-controls">
+          {renderLibraryVersionSelect(library, `Detail version for ${library.name}`)}
+          {renderLibraryDetailActionButtons(library)}
+          <button className="secondary-button compact manager-result-action" type="button" onClick={() => void handleOpenLibraryInfo(library)}>
+            <ExternalLink size={13} />
+            More info
+          </button>
+        </div>
+
+        <div className="library-detail-tabs" role="tablist" aria-label={`${library.name} details sections`}>
+          {renderLibraryDetailTabButton('overview', 'Overview')}
+          {renderLibraryDetailTabButton('versions', 'Versions', versionCount)}
+          {renderLibraryDetailTabButton('examples', 'Examples', exampleCount)}
+          {renderLibraryDetailTabButton('dependencies', 'Dependencies', dependencyCount)}
+        </div>
+
+        <div className="library-detail-tab-panel" role="tabpanel">
+          {renderLibraryDetailTabContent(library)}
+        </div>
+      </section>
+    );
+  }
+
+  function renderPlatformDetailTabButton(tab: PlatformDetailTab, label: string, count?: number) {
+    return (
+      <button
+        className={platformDetailTab === tab ? 'active' : ''}
+        type="button"
+        role="tab"
+        aria-selected={platformDetailTab === tab}
+        onClick={() => setPlatformDetailTab(tab)}
+      >
+        {label}
+        {typeof count === 'number' && count > 0 ? <span>{count}</span> : null}
+      </button>
+    );
+  }
+
+  function renderPlatformOverviewTab(platform: BoardPlatform) {
+    return (
+      <>
+        <section className="library-detail-section">
+          <h4>Details</h4>
+          <dl className="library-detail-grid">
+            {renderLibraryDetailField('Package ID', platform.id)}
+            {renderLibraryDetailField('Maintainer', platform.maintainer)}
+            {renderLibraryDetailField('Installed version', platform.installedVersion || (platform.installed ? platform.version : undefined))}
+            {renderLibraryDetailField('Latest version', platform.latest && platform.latest !== 'Unknown' ? platform.latest : undefined)}
+            {renderLibraryDetailField('Website', platform.website ? platform.website.replace(/^https?:\/\//, '') : undefined)}
+          </dl>
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Supported boards</h4>
+          {renderDetailBulletList(getPlatformSupportedBoards(platform))}
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Use cases</h4>
+          {renderDetailBulletList(getPlatformUseCases(platform))}
+        </section>
+
+        <section className="library-detail-section">
+          <h4>Resources</h4>
+          {platform.website ? (
+            <button className="secondary-button compact library-detail-resource-button" type="button" onClick={() => void handleOpenPlatformInfo(platform)}>
+              <ExternalLink size={13} />
+              Official page
+            </button>
+          ) : (
+            <span className="library-detail-muted">No external page available.</span>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderPlatformVersionsTab(platform: BoardPlatform) {
+    const selectedVersion = getSelectedPlatformVersion(platform);
+    const versions = getPlatformVersionOptions(platform).filter((version) => version !== 'latest');
+
+    return (
+      <section className="library-detail-section">
+        <h4>Versions</h4>
+        {versions.length > 0 ? (
+          <ul className="library-release-list">
+            {versions.map((version) => {
+              const isLatest = version === platform.latest;
+              const isInstalled = version === platform.installedVersion || (platform.installed && version === platform.version);
+              const isSelected = version === selectedVersion;
+
+              return (
+                <li key={version}>
+                  <div className="library-release-copy">
+                    <div>
+                      <strong>{version}</strong>
+                      {isLatest ? <span className="release-badge">Latest</span> : null}
+                      {isInstalled ? <span className="release-badge">Installed</span> : null}
+                    </div>
+                    <span>{platform.id}</span>
+                  </div>
+                  <button className="secondary-button compact" type="button" onClick={() => handlePlatformVersionChange(platform, version)} disabled={isSelected}>
+                    {isSelected ? 'Selected' : 'Select'}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <span className="library-detail-muted">No version history metadata available.</span>
+        )}
+      </section>
+    );
+  }
+
+  function renderPlatformDetailTabContent(platform: BoardPlatform) {
+    if (platformDetailTab === 'versions') {
+      return renderPlatformVersionsTab(platform);
+    }
+
+    return renderPlatformOverviewTab(platform);
+  }
+
+  function renderPlatformDetailsPanel(platform: BoardPlatform | null) {
+    if (!platform) {
+      return (
+        <section className="platform-manager-detail-pane library-manager-detail-empty">
+          <BookOpen size={28} />
+          <strong>Select a board core to view info.</strong>
+        </section>
+      );
+    }
+
+    const installedVersion = platform.installedVersion || (platform.installed ? platform.version : undefined);
+    const versionCount = getPlatformVersionOptions(platform).filter((version) => version !== 'latest').length;
+
+    return (
+      <section className="platform-manager-detail-pane" aria-label={`${platform.name} details`}>
+        <div className="library-detail-header">
+          <div>
+            <h3>{platform.name}</h3>
+            <div className="library-detail-badges">
+              {platform.installed ? <span className="release-badge">{installedVersion ? `Installed ${installedVersion}` : 'Installed'}</span> : null}
+              {platform.latest && platform.latest !== 'Unknown' ? <span>Latest {platform.latest}</span> : null}
+              {platform.maintainer ? <span>{platform.maintainer}</span> : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="library-detail-summary">
+          <p>{platform.description || 'Board platform package for Arduino-compatible cores.'}</p>
+        </div>
+
+        <div className="library-detail-controls platform-detail-controls">
+          {renderPlatformVersionSelect(platform, `Detail version for ${platform.name}`)}
+          {renderPlatformDetailActionButtons(platform)}
+          <button className="secondary-button compact manager-result-action" type="button" onClick={() => void handleOpenPlatformInfo(platform)}>
+            <ExternalLink size={13} />
+            More info
+          </button>
+        </div>
+
+        <div className="library-detail-tabs" role="tablist" aria-label={`${platform.name} details sections`}>
+          {renderPlatformDetailTabButton('overview', 'Overview')}
+          {renderPlatformDetailTabButton('versions', 'Versions', versionCount)}
+        </div>
+
+        <div className="library-detail-tab-panel" role="tabpanel">
+          {renderPlatformDetailTabContent(platform)}
+        </div>
+      </section>
+    );
+  }
+
   function renderLibrariesWorkspace() {
     const hasLibraries = visibleLibraryResults.length > 0;
     const loadingMessage = librarySearchTerm ? 'Searching libraries...' : 'Loading libraries...';
+    const emptyLibraryMessage = libraryManagerTab === 'installed'
+      ? librarySearchTerm
+        ? 'No installed libraries match your search.'
+        : 'No installed libraries yet.'
+      : librarySearchTerm
+        ? 'No libraries found. Try a different search.'
+        : 'No uninstalled featured libraries to show.';
 
     return (
       <section className="tool-workspace manager-workspace library-manager-workspace">
@@ -4497,47 +8381,21 @@ export function IDEWorkspace({
           <Search size={15} />
           <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Search Arduino libraries" />
         </div>
+        {renderLibraryFilterTabs()}
         <div className="panel-content manager-panel-content result-list">
           {librariesLoading && !hasLibraries ? renderManagerLoading(loadingMessage) : null}
           {!librariesLoading && librariesError && !hasLibraries ? renderManagerError(librariesError) : null}
           {!librariesLoading && !librariesError && !hasLibraries ? (
             <div className="manager-state manager-state-empty">
               <Library size={22} />
-              <span>No libraries found.</span>
+              <span>{emptyLibraryMessage}</span>
             </div>
           ) : null}
           {hasLibraries ? (
             <>
               {librariesLoading ? renderManagerInlineLoading(loadingMessage) : null}
               {librariesError ? renderManagerInlineError(librariesError) : null}
-              {visibleLibraryResults.map((library) => {
-                const isInstalling = busyAction === `library:${library.name}`;
-                return (
-                  <article key={library.name} className="result-card manager-result-card">
-                    <div className="manager-result-copy">
-                      <div className="manager-result-title-row">
-                        <strong>{library.name}</strong>
-                        {library.installed ? <span className="release-badge">Installed</span> : null}
-                      </div>
-                      <p>{library.sentence || library.paragraph || library.author || 'Arduino library package'}</p>
-                      <div className="manager-result-meta">
-                        <span>{library.version || 'latest'}</span>
-                        {library.category ? <span>{library.category}</span> : null}
-                        {library.author ? <span>{library.author}</span> : null}
-                      </div>
-                    </div>
-                    <button
-                      className={`compact manager-result-action ${library.installed ? 'secondary-button' : 'primary-button'}`}
-                      type="button"
-                      disabled={Boolean(library.installed) || isInstalling}
-                      onClick={() => void handleInstallLibrary(library)}
-                    >
-                      {isInstalling ? <LoaderCircle size={13} className="spin" /> : null}
-                      {library.installed ? 'Installed' : isInstalling ? 'Installing' : 'Install'}
-                    </button>
-                  </article>
-                );
-              })}
+              {visibleLibraryResults.map((library) => renderLibraryResultCard(library))}
             </>
           ) : null}
         </div>
@@ -4573,47 +8431,7 @@ export function IDEWorkspace({
             <>
               {platformsLoading ? renderManagerInlineLoading(loadingMessage) : null}
               {platformsError ? renderManagerInlineError(platformsError) : null}
-              {visiblePlatformResults.map((platform) => {
-                const isInstalling = busyAction === `platform:${platform.id}`;
-                const isRemoving = busyAction === `remove-platform:${platform.id}`;
-                return (
-                  <article key={platform.id} className="result-card manager-result-card">
-                    <div className="manager-result-copy">
-                      <div className="manager-result-title-row">
-                        <strong>{platform.name}</strong>
-                        {platform.installed ? <span className="release-badge">Installed</span> : null}
-                      </div>
-                      <p>{platform.description || platform.maintainer || 'Board platform package'}</p>
-                      <div className="manager-result-meta">
-                        <span>{platform.latest || platform.version || 'latest'}</span>
-                        {platform.maintainer ? <span>{platform.maintainer}</span> : null}
-                        {platform.website ? <span>{platform.website.replace(/^https?:\/\//, '')}</span> : null}
-                      </div>
-                    </div>
-                    {platform.installed ? (
-                      <button
-                        className="danger-button compact manager-result-action"
-                        type="button"
-                        onClick={() => void handleRemovePlatform(platform)}
-                        disabled={isRemoving}
-                      >
-                        {isRemoving ? <LoaderCircle size={13} className="spin" /> : null}
-                        {isRemoving ? 'Removing' : 'Remove'}
-                      </button>
-                    ) : (
-                      <button
-                        className="primary-button compact manager-result-action"
-                        type="button"
-                        onClick={() => void handleInstallPlatform(platform)}
-                        disabled={isInstalling}
-                      >
-                        {isInstalling ? <LoaderCircle size={13} className="spin" /> : null}
-                        {isInstalling ? 'Installing' : 'Install'}
-                      </button>
-                    )}
-                  </article>
-                );
-              })}
+              {visiblePlatformResults.map((platform) => renderPlatformResultCard(platform))}
             </>
           ) : null}
         </div>
@@ -5147,32 +8965,9 @@ export function IDEWorkspace({
                 <Search size={16} />
                 <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Search Arduino libraries" />
               </div>
+              {renderLibraryFilterTabs()}
               <div className="panel-content result-list" aria-busy={librariesLoading} title={librariesError ?? undefined}>
-                {visibleLibraryResults.map((library) => (
-                  <article key={library.name} className="result-card manager-result-card">
-                    <div className="manager-result-copy">
-                      <div className="manager-result-title-row">
-                        <strong>{library.name}</strong>
-                        {library.installed ? <span className="release-badge">Installed</span> : null}
-                      </div>
-                      <p>{library.sentence || library.paragraph || library.author || 'Arduino library package'}</p>
-                      <div className="manager-result-meta">
-                        <span>{library.version || 'latest'}</span>
-                        {library.category ? <span>{library.category}</span> : null}
-                        {library.author ? <span>{library.author}</span> : null}
-                      </div>
-                    </div>
-                    <button
-                      className={`compact manager-result-action ${library.installed ? 'secondary-button' : 'primary-button'}`}
-                      type="button"
-                      disabled={Boolean(library.installed) || busyAction === `library:${library.name}`}
-                      onClick={() => void handleInstallLibrary(library)}
-                    >
-                      {busyAction === `library:${library.name}` ? <LoaderCircle size={14} className="spin" /> : null}
-                      {library.installed ? 'Installed' : 'Install'}
-                    </button>
-                  </article>
-                ))}
+                {visibleLibraryResults.map((library) => renderLibraryResultCard(library))}
               </div>
             </>
           ) : null}
@@ -5189,42 +8984,7 @@ export function IDEWorkspace({
                 <input value={platformQuery} onChange={(event) => setPlatformQuery(event.target.value)} placeholder="Search board cores" />
               </div>
               <div className="panel-content result-list" aria-busy={platformsLoading} title={platformsError ?? undefined}>
-                {visiblePlatformResults.map((platform) => (
-                  <article key={platform.id} className="result-card manager-result-card">
-                    <div className="manager-result-copy">
-                      <div className="manager-result-title-row">
-                        <strong>{platform.name}</strong>
-                        {platform.installed ? <span className="release-badge">Installed</span> : null}
-                      </div>
-                      <p>{platform.description || platform.maintainer || 'Board platform package'}</p>
-                      <div className="manager-result-meta">
-                        <span>{platform.latest || platform.version || 'latest'}</span>
-                        {platform.maintainer ? <span>{platform.maintainer}</span> : null}
-                        {platform.website ? <span>{platform.website.replace(/^https?:\/\//, '')}</span> : null}
-                      </div>
-                    </div>
-                    {platform.installed ? (
-                      <button
-                        className="danger-button compact manager-result-action"
-                        type="button"
-                        onClick={() => void handleRemovePlatform(platform)}
-                        disabled={busyAction === `remove-platform:${platform.id}`}
-                      >
-                        Remove
-                      </button>
-                    ) : (
-                      <button
-                        className="primary-button compact manager-result-action"
-                        type="button"
-                        onClick={() => void handleInstallPlatform(platform)}
-                        disabled={busyAction === `platform:${platform.id}`}
-                      >
-                        {busyAction === `platform:${platform.id}` ? <LoaderCircle size={14} className="spin" /> : null}
-                        Install
-                      </button>
-                    )}
-                  </article>
-                ))}
+                {visiblePlatformResults.map((platform) => renderPlatformResultCard(platform))}
               </div>
             </>
           ) : null}
@@ -5306,32 +9066,9 @@ export function IDEWorkspace({
               <Search size={16} />
               <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Search Arduino libraries" />
             </div>
+            {renderLibraryFilterTabs()}
             <div className="panel-content result-list">
-              {visibleLibraryResults.map((library) => (
-                <article key={library.name} className="result-card manager-result-card">
-                  <div className="manager-result-copy">
-                    <div className="manager-result-title-row">
-                      <strong>{library.name}</strong>
-                      {library.installed ? <span className="release-badge">Installed</span> : null}
-                    </div>
-                    <p>{library.sentence || library.paragraph || library.author || 'Arduino library package'}</p>
-                    <div className="manager-result-meta">
-                      <span>{library.version || 'latest'}</span>
-                      {library.category ? <span>{library.category}</span> : null}
-                      {library.author ? <span>{library.author}</span> : null}
-                    </div>
-                  </div>
-                  <button
-                    className={`compact manager-result-action ${library.installed ? 'secondary-button' : 'primary-button'}`}
-                    type="button"
-                    disabled={Boolean(library.installed) || busyAction === `library:${library.name}`}
-                    onClick={() => void handleInstallLibrary(library)}
-                  >
-                    {busyAction === `library:${library.name}` ? <LoaderCircle size={14} className="spin" /> : null}
-                    {library.installed ? 'Installed' : 'Install'}
-                  </button>
-                </article>
-              ))}
+              {visibleLibraryResults.map((library) => renderLibraryResultCard(library))}
             </div>
           </section>
         ) : null}
@@ -5354,32 +9091,7 @@ export function IDEWorkspace({
               <input value={platformQuery} onChange={(event) => setPlatformQuery(event.target.value)} placeholder="Search board cores" />
             </div>
             <div className="panel-content result-list">
-              {visiblePlatformResults.map((platform) => (
-                <article key={platform.id} className="result-card manager-result-card">
-                  <div className="manager-result-copy">
-                    <div className="manager-result-title-row">
-                      <strong>{platform.name}</strong>
-                      {platform.installed ? <span className="release-badge">Installed</span> : null}
-                    </div>
-                    <p>{platform.description || platform.maintainer || 'Board platform package'}</p>
-                    <div className="manager-result-meta">
-                      <span>{platform.latest || platform.version || 'latest'}</span>
-                      {platform.maintainer ? <span>{platform.maintainer}</span> : null}
-                      {platform.website ? <span>{platform.website.replace(/^https?:\/\//, '')}</span> : null}
-                    </div>
-                  </div>
-                  {platform.installed ? (
-                    <button className="danger-button compact manager-result-action" type="button" onClick={() => void handleRemovePlatform(platform)} disabled={busyAction === `remove-platform:${platform.id}`}>
-                      Remove
-                    </button>
-                  ) : (
-                    <button className="primary-button compact manager-result-action" type="button" onClick={() => void handleInstallPlatform(platform)} disabled={busyAction === `platform:${platform.id}`}>
-                      {busyAction === `platform:${platform.id}` ? <LoaderCircle size={14} className="spin" /> : null}
-                      Install
-                    </button>
-                  )}
-                </article>
-              ))}
+              {visiblePlatformResults.map((platform) => renderPlatformResultCard(platform))}
             </div>
           </section>
         ) : null}
@@ -5394,6 +9106,54 @@ export function IDEWorkspace({
 
         {sidebar === 'explorer' ? (
         <section className="editor-shell">
+          <div className="editor-board-toolbar">
+            <div className="editor-board-selector">
+              <Cpu size={15} />
+              <select value={selectedLocalBoard ? ACTIVE_LOCAL_BOARD_KEY : ''} onChange={() => undefined} title="Selected board">
+                <optgroup label="Local boards">
+                  <option value={ACTIVE_LOCAL_BOARD_KEY}>
+                    {selectedLocalBoard ? `${localBoardDisplayName(selectedLocalBoard)}${selectedLocalBoard.port ? ` (${selectedLocalBoard.port})` : ''}` : 'No local board'}
+                  </option>
+                </optgroup>
+                <optgroup label="Remote boards">
+                  <option value="" disabled>
+                    OTA boards later
+                  </option>
+                </optgroup>
+              </select>
+              <span className={`editor-board-status ${selectedLocalBoard?.connected ? 'connected' : ''}`}>
+                {selectedLocalBoard
+                  ? isUploadableBoardFqbn(selectedLocalBoard.fqbn)
+                    ? canUploadLocalBoard(selectedLocalBoard)
+                      ? selectedLocalBoard.port || getBoardOptionLabel(selectedLocalBoard.fqbn)
+                      : 'Disconnected'
+                    : 'Set exact board type'
+                  : localBoardProfiles.length === 0
+                    ? 'Default Uno'
+                    : 'No board'}
+              </span>
+            </div>
+            <div className="editor-board-actions">
+              <button
+                className="secondary-button compact"
+                type="button"
+                onClick={() => void handleCompile()}
+                disabled={!activeTab || busyAction === 'compile' || isLocalUploadBusyAction(busyAction)}
+              >
+                {busyAction === 'compile' || busyAction === 'verify-before-upload' ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={14} />}
+                Verify
+              </button>
+              <button
+                className="primary-button compact"
+                type="button"
+                onClick={() => void handleUploadLocal()}
+                disabled={!activeTab || busyAction === 'compile' || isLocalUploadBusyAction(busyAction) || !canAttemptLocalUpload(selectedLocalBoard)}
+              >
+                {isLocalUploadBusyAction(busyAction) ? <LoaderCircle size={13} className="spin" /> : <HardDriveUpload size={14} />}
+                {busyAction === 'verify-before-upload' ? 'Verifying...' : busyAction === 'prepare-upload' ? 'Preparing...' : busyAction === 'upload-local' ? 'Uploading...' : 'Upload'}
+              </button>
+            </div>
+          </div>
           {syncedTabs.length > 0 ? (
             <div ref={editorTabsScrollHostRef} className="editor-tabs-scroll-host" onWheelCapture={handleEditorTabsWheel}>
               <EditorTabs
@@ -5585,13 +9345,33 @@ export function IDEWorkspace({
           onPointerDown={(event) => beginResize('right', event)}
         />
 
-        <aside className={`right-panel inspector-panel ${sidebar === 'git' ? 'git-graph-panel-host' : sidebar === 'my-projects' ? 'my-projects-panel-host' : 'chat-panel'}`}>
+        <aside
+          className={`right-panel inspector-panel ${
+            sidebar === 'git'
+              ? 'git-graph-panel-host'
+              : sidebar === 'my-projects'
+                ? 'my-projects-panel-host'
+                : sidebar === 'libraries'
+                ? 'library-detail-panel-host'
+                : sidebar === 'platforms'
+                  ? 'platform-detail-panel-host'
+                    : sidebar === 'boards'
+                      ? 'remote-board-panel-host'
+                      : 'chat-panel'
+          }`}
+        >
           <div className="inspector-tabs" style={{ display: 'none' }}></div>
           <div className="inspector-body">
             {sidebar === 'git' ? (
               <GitHistoryPanel controller={gitController} />
             ) : sidebar === 'my-projects' ? (
               myProjectsDetailPanel
+            ) : sidebar === 'libraries' ? (
+              renderLibraryDetailsPanel(selectedLibrary)
+            ) : sidebar === 'platforms' ? (
+              renderPlatformDetailsPanel(selectedPlatform)
+            ) : sidebar === 'boards' ? (
+              renderRemoteBoardsPanel()
             ) : (
               <AgentPanel
                 user={user}
@@ -5702,7 +9482,11 @@ export function IDEWorkspace({
               Open {consoleView}
             </button>
           ) : null}
-          <span>{selectedBoard ? `${selectedBoard.name} • ${selectedBoard.firmwareVersion || '1.0.0'}` : 'No board selected'}</span>
+          <span>
+            {selectedLocalBoard
+              ? `${localBoardDisplayName(selectedLocalBoard)} • ${canUploadLocalBoard(selectedLocalBoard) ? selectedLocalBoard.port || selectedLocalBoard.fqbn : 'disconnected'}`
+              : 'No local board selected'}
+          </span>
         </div>
       </footer>
 
@@ -5909,7 +9693,15 @@ export function IDEWorkspace({
       <div className="toast-stack">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast toast-${toast.tone}`}>
-            <span className="toast-message">{toast.message}</span>
+            <div className="toast-content">
+              <span className="toast-message">{toast.message}</span>
+              {toast.detail ? <span className="toast-detail">{toast.detail}</span> : null}
+              {toast.progress !== undefined ? (
+                <div className={`toast-progress ${toast.progress === null ? 'toast-progress-indeterminate' : ''}`} aria-hidden="true">
+                  <span style={toast.progress === null ? undefined : { width: `${toast.progress}%` }} />
+                </div>
+              ) : null}
+            </div>
             {toast.actions?.length ? (
               <div className="toast-actions">
                 {toast.actions.map((action) => (
@@ -5921,7 +9713,9 @@ export function IDEWorkspace({
                       try {
                         action.onSelect();
                       } finally {
-                        dismissToast(toast.id);
+                        if (action.dismissOnSelect !== false) {
+                          dismissToast(toast.id);
+                        }
                       }
                     }}
                   >
@@ -5931,7 +9725,7 @@ export function IDEWorkspace({
               </div>
             ) : null}
             <button className="toast-close-button" type="button" onClick={() => dismissToast(toast.id)} aria-label="Close notification">
-              <X aria-hidden="true" size={20} strokeWidth={2.2} />
+              <X aria-hidden="true" size={18} strokeWidth={2.2} />
             </button>
           </div>
         ))}

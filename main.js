@@ -10,20 +10,27 @@ const { TextDecoder } = require("node:util");
 
 const {
   compileArduino,
+  configureArduinoStorageRoot,
   getFeaturedLibraries,
+  getArduinoStorageInfo,
+  getArduinoLibraryDirectory,
   installBoardPackage,
   installLibrary,
   listInstalledBoards,
   listInstalledLibraries,
   listInstalledPlatforms,
+  migrateLibrariesFrom,
   removeBoardPackage,
+  removeLibrary,
   searchBoardPlatforms,
-  searchLibraries
+  searchLibraries,
+  uploadLocalSketch
 } = require("./arduinoHandler");
 const { SecurityManager } = require("./src/agent/securityManager");
 const { AgentRuntimeManager } = require("./src/agent/opencodeRuntimeManager");
-const { getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
+const { deriveFunctionId, getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
+const { detectLocalBoardsDeterministic } = require("./src/services/localBoardService");
 const provisioningService = require("./src/services/provisioningService");
 const appwriteManifest = require("./appwrite.config.json");
 
@@ -41,6 +48,11 @@ void loop() {
   // Put your main code here.
 }
 `;
+const LOCAL_BOARD_PROFILES_KEY = "localBoardProfiles";
+const ARDUINO_STORAGE_ROOT_KEY = "arduinoStorageRoot";
+const BOARD_DETECTION_FUNCTION_ID = deriveFunctionId(appwriteManifest, "board-detection");
+const TOOLCHAIN_NOTIFICATIONS_KEY = "toolchainNotifications";
+const TOOLCHAIN_NOTIFICATIONS_LIMIT = 100;
 
 let mainWindow = null;
 let preferenceStore = null;
@@ -51,6 +63,9 @@ let rendererServer = null;
 let rendererServerUrl = null;
 const trustedRoots = new Set();
 const terminalSessions = new Map();
+const activeBoardPackageInstalls = new Map();
+const activeLibraryInstallOperations = new Map();
+const activeLocalUploadPorts = new Set();
 const workspaceScanner = new WorkspaceScanner();
 const securityManager = new SecurityManager();
 const agentRuntimeManager = new AgentRuntimeManager({
@@ -123,6 +138,260 @@ function addRecentWorkspace(workspacePath) {
   preferenceStore?.set("recentWorkspaces", updated);
   createMenu();
   return { success: true, paths: updated };
+}
+
+function isActiveToolchainNotificationStatus(status) {
+  return status === "queued" || status === "running";
+}
+
+function normalizeToolchainNotificationStatus(status) {
+  return ["queued", "running", "success", "error", "canceled", "interrupted"].includes(status) ? status : "running";
+}
+
+function normalizeToolchainNotificationKind(kind) {
+  const normalized = String(kind || "").trim();
+  return normalized || "toolchain-task";
+}
+
+function normalizeNotificationProgress(progress) {
+  if (progress === null || progress === undefined) {
+    return null;
+  }
+
+  const value = Number(progress);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, value));
+}
+
+function normalizeNotificationText(value, fallback = "") {
+  return String(value ?? fallback).trim();
+}
+
+function normalizeToolchainNotification(entry, existing = null) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const now = Date.now();
+  const id = normalizeNotificationText(source.id || existing?.id || crypto.randomUUID(), crypto.randomUUID());
+  const status = normalizeToolchainNotificationStatus(source.status || existing?.status);
+  const title = normalizeNotificationText(source.title || existing?.title, "Toolchain task");
+  const createdAt = Number.isFinite(Number(source.createdAt ?? existing?.createdAt)) ? Number(source.createdAt ?? existing?.createdAt) : now;
+  const updatedAt = Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : now;
+  const metadata = source.metadata && typeof source.metadata === "object" && !Array.isArray(source.metadata)
+    ? source.metadata
+    : existing?.metadata && typeof existing.metadata === "object"
+      ? existing.metadata
+      : {};
+
+  return {
+    id,
+    kind: normalizeToolchainNotificationKind(source.kind || existing?.kind),
+    title,
+    detail: normalizeNotificationText(source.detail ?? existing?.detail),
+    status,
+    phase: normalizeNotificationText(source.phase ?? existing?.phase, status),
+    progress: normalizeNotificationProgress(source.progress !== undefined ? source.progress : existing?.progress),
+    name: normalizeNotificationText(source.name ?? existing?.name),
+    version: normalizeNotificationText(source.version ?? existing?.version),
+    target: normalizeNotificationText(source.target ?? existing?.target),
+    metadata,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function sortToolchainNotifications(notifications) {
+  return [...notifications].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
+}
+
+function getToolchainNotifications() {
+  const stored = preferenceStore?.get(TOOLCHAIN_NOTIFICATIONS_KEY);
+  const normalized = Array.isArray(stored)
+    ? sortToolchainNotifications(stored.map((entry) => normalizeToolchainNotification(entry))).slice(0, TOOLCHAIN_NOTIFICATIONS_LIMIT)
+    : [];
+
+  if (preferenceStore && JSON.stringify(stored || []) !== JSON.stringify(normalized)) {
+    preferenceStore.set(TOOLCHAIN_NOTIFICATIONS_KEY, normalized);
+  }
+
+  return normalized;
+}
+
+function persistToolchainNotifications(notifications) {
+  const nextNotifications = sortToolchainNotifications(notifications).slice(0, TOOLCHAIN_NOTIFICATIONS_LIMIT);
+  preferenceStore?.set(TOOLCHAIN_NOTIFICATIONS_KEY, nextNotifications);
+  sendRendererEvent("notifications:changed", nextNotifications);
+  return nextNotifications;
+}
+
+function upsertToolchainNotification(notification) {
+  const current = getToolchainNotifications();
+  const existing = current.find((entry) => entry.id === notification?.id) || null;
+  const nextNotification = normalizeToolchainNotification(notification, existing);
+  const notifications = existing
+    ? current.map((entry) => (entry.id === nextNotification.id ? nextNotification : entry))
+    : [nextNotification, ...current];
+
+  const nextNotifications = persistToolchainNotifications(notifications);
+  return {
+    notification: nextNotifications.find((entry) => entry.id === nextNotification.id) || nextNotification,
+    notifications: nextNotifications,
+  };
+}
+
+function clearToolchainNotifications() {
+  return persistToolchainNotifications([]);
+}
+
+function interruptActiveToolchainNotifications() {
+  const current = getToolchainNotifications();
+  let changed = false;
+  const now = Date.now();
+  const next = current.map((notification) => {
+    if (!isActiveToolchainNotificationStatus(notification.status)) {
+      return notification;
+    }
+
+    changed = true;
+    return {
+      ...notification,
+      status: "interrupted",
+      phase: "interrupted",
+      detail: notification.detail || "Task was interrupted because Tantalum IDE restarted.",
+      progress: notification.progress ?? null,
+      updatedAt: now,
+    };
+  });
+
+  if (changed) {
+    preferenceStore?.set(TOOLCHAIN_NOTIFICATIONS_KEY, sortToolchainNotifications(next).slice(0, TOOLCHAIN_NOTIFICATIONS_LIMIT));
+  }
+}
+
+function normalizeBoardText(value, maxLength = 255) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function createLocalBoardProfileId(profile) {
+  const key = [
+    profile?.fingerprint,
+    profile?.serialNumber,
+    profile?.vendorId,
+    profile?.productId,
+    profile?.port,
+    profile?.fqbn
+  ]
+    .map((value) => normalizeBoardText(value).toLowerCase())
+    .filter(Boolean)
+    .join("|");
+
+  return crypto.createHash("sha256").update(key || crypto.randomUUID()).digest("hex").slice(0, 18);
+}
+
+function normalizeLocalBoardProfile(entry) {
+  const source = entry && typeof entry === "object" ? entry : null;
+  if (!source) {
+    return null;
+  }
+
+  const fqbn = normalizeBoardText(source.fqbn || source.board || source.boardType);
+  const port = normalizeBoardText(source.port || source.path);
+  if (!fqbn && !port) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const normalized = {
+    id: normalizeBoardText(source.id, 64),
+    name: normalizeBoardText(source.name),
+    fqbn,
+    boardLabel: normalizeBoardText(source.boardLabel || source.detectedBoardName || fqbn),
+    port,
+    protocol: normalizeBoardText(source.protocol || "serial", 64) || "serial",
+    protocolLabel: normalizeBoardText(source.protocolLabel || "Serial", 128) || "Serial",
+    manufacturer: normalizeBoardText(source.manufacturer || "Unknown"),
+    vendorId: normalizeBoardText(source.vendorId, 64) || null,
+    productId: normalizeBoardText(source.productId, 64) || null,
+    serialNumber: normalizeBoardText(source.serialNumber, 128) || null,
+    pnpId: normalizeBoardText(source.pnpId, 255) || null,
+    locationId: normalizeBoardText(source.locationId, 128) || null,
+    fingerprint: normalizeBoardText(source.fingerprint, 128),
+    confidence: Number.isFinite(Number(source.confidence)) ? Number(source.confidence) : null,
+    connected: Boolean(source.connected),
+    createdAt: normalizeBoardText(source.createdAt, 64) || now,
+    updatedAt: now
+  };
+
+  normalized.id = normalized.id || createLocalBoardProfileId(normalized);
+  normalized.fingerprint = normalized.fingerprint || createLocalBoardProfileId(normalized);
+  return normalized;
+}
+
+function getLocalBoardProfiles() {
+  const storedProfiles = preferenceStore?.get(LOCAL_BOARD_PROFILES_KEY);
+  const seen = new Set();
+  const normalized = Array.isArray(storedProfiles)
+    ? storedProfiles
+        .map(normalizeLocalBoardProfile)
+        .filter((profile) => {
+          if (!profile || seen.has(profile.id)) {
+            return false;
+          }
+
+          seen.add(profile.id);
+          return true;
+        })
+    : [];
+
+  preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, normalized);
+  return normalized;
+}
+
+function saveLocalBoardProfile(profile) {
+  const normalized = normalizeLocalBoardProfile(profile);
+  if (!normalized?.fqbn) {
+    throw new Error("Choose a board type before saving this local board.");
+  }
+
+  if (!normalized.port) {
+    throw new Error("Choose a port before saving this local board.");
+  }
+
+  const profiles = getLocalBoardProfiles();
+  const existingIndex = profiles.findIndex((entry) => {
+    return (
+      entry.id === normalized.id ||
+      (normalized.fingerprint && entry.fingerprint === normalized.fingerprint) ||
+      (normalized.serialNumber && entry.serialNumber === normalized.serialNumber)
+    );
+  });
+
+  const nextProfile =
+    existingIndex >= 0
+      ? {
+          ...profiles[existingIndex],
+          ...normalized,
+          id: profiles[existingIndex].id,
+          createdAt: profiles[existingIndex].createdAt,
+          updatedAt: new Date().toISOString(),
+        }
+      : normalized;
+  const nextProfiles = [nextProfile];
+
+  preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, nextProfiles);
+  return nextProfile;
+}
+
+function deleteLocalBoardProfile(profileId) {
+  const id = normalizeBoardText(profileId, 64);
+  if (!id) {
+    throw new Error("A local board profile ID is required.");
+  }
+
+  const nextProfiles = [];
+  preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, nextProfiles);
+  return nextProfiles;
 }
 
 function createProjectFolderId(projectPath) {
@@ -351,8 +620,111 @@ function assertTrustedPath(targetPath, options = {}) {
 function toErrorResult(error) {
   return {
     success: false,
-    error: error instanceof Error ? error.message : "Unexpected error"
+    error: error instanceof Error ? error.message : "Unexpected error",
+    ...(error?.canceled || error?.name === "AbortError" || error?.code === "ABORT_ERR" ? { canceled: true } : {}),
+    ...(error?.storage ? { storage: error.storage } : {})
   };
+}
+
+function normalizeArduinoStorageRoot(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  return path.resolve(value.trim());
+}
+
+function applyArduinoStorageRootPreference() {
+  const storageRoot = normalizeArduinoStorageRoot(preferenceStore?.get(ARDUINO_STORAGE_ROOT_KEY));
+  configureArduinoStorageRoot(storageRoot);
+  if (storageRoot) {
+    registerTrustedPath(storageRoot);
+  }
+  return storageRoot;
+}
+
+function getArduinoStorageConfigurationResult() {
+  const storageRoot = normalizeArduinoStorageRoot(preferenceStore?.get(ARDUINO_STORAGE_ROOT_KEY));
+  if (storageRoot) {
+    configureArduinoStorageRoot(storageRoot);
+  }
+
+  return {
+    success: true,
+    storageRoot,
+    ...getArduinoStorageInfo()
+  };
+}
+
+function extractCliProgressPercent(chunk) {
+  const match = String(chunk || "").match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+  if (!match) {
+    return null;
+  }
+
+  const progress = Number.parseFloat(match[1]);
+  if (!Number.isFinite(progress)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, progress));
+}
+
+function extractLastCliProgressPercent(chunk) {
+  const matches = Array.from(String(chunk || "").matchAll(/(\d{1,3}(?:\.\d+)?)\s*%/g));
+  const lastMatch = matches[matches.length - 1];
+  if (!lastMatch) {
+    return null;
+  }
+
+  const progress = Number.parseFloat(lastMatch[1]);
+  if (!Number.isFinite(progress)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, progress));
+}
+
+function classifyLibraryInstallPhase(chunk) {
+  const normalized = String(chunk || "").toLowerCase();
+
+  if (normalized.includes("download")) {
+    return "download";
+  }
+
+  if (normalized.includes("extract")) {
+    return "extract";
+  }
+
+  if (normalized.includes("install")) {
+    return "install";
+  }
+
+  return "running";
+}
+
+function formatLibraryInstallMessage(chunk) {
+  const normalized = String(chunk || "")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop();
+
+  return normalized || "Installing library...";
+}
+
+function formatUsbUploadProgressMessage(chunk) {
+  const normalized = String(chunk || "")
+    .replace(/\u001b\[[0-9;]*m/g, "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop();
+
+  return normalized || "Uploading over USB...";
 }
 
 function markWorkspaceDirty(changedPath = currentWorkspace) {
@@ -2498,6 +2870,110 @@ async function executeAgentGatewayRequest(body) {
   return parsed.data;
 }
 
+function localBoardConfidenceLabel(confidence) {
+  const value = Number(confidence || 0);
+  if (value >= 0.9) {
+    return "high";
+  }
+  if (value >= 0.55) {
+    return "medium";
+  }
+  return "low";
+}
+
+function shouldUseBoardDetectionAi(candidate) {
+  if (!candidate) {
+    return false;
+  }
+
+  if (!BOARD_DETECTION_FUNCTION_ID) {
+    return false;
+  }
+
+  if (candidate.detectionSource === "esptool-chip-probe") {
+    return false;
+  }
+
+  return !candidate.fqbn || Number(candidate.confidence || 0) < 0.9 || (candidate.matchingBoards?.length || 0) !== 1;
+}
+
+async function executeBoardDetectionAi(candidate) {
+  const execution = await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(BOARD_DETECTION_FUNCTION_ID)}/executions`,
+    body: {
+      body: JSON.stringify({ candidate }),
+      async: false,
+      path: "/",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    },
+  });
+  const parsed = safeJsonParse(execution.responseBody || "{}", { ok: false, error: "Board detection AI returned an unreadable response." });
+
+  if (execution.responseStatusCode >= 400 || !parsed.ok) {
+    throw new Error(parsed.error || execution.responseBody || execution.errors || "Board detection AI failed.");
+  }
+
+  return parsed.data || null;
+}
+
+async function applyBoardDetectionAiFallback(candidate) {
+  if (!shouldUseBoardDetectionAi(candidate)) {
+    return candidate;
+  }
+
+  try {
+    const suggestion = await executeBoardDetectionAi(candidate);
+    if (!suggestion?.fqbn) {
+      return {
+        ...candidate,
+        ai: {
+          status: "no-suggestion",
+          reason: suggestion?.reason || "No confident board match was returned.",
+        },
+      };
+    }
+
+    const confidence = Number.isFinite(Number(suggestion.confidence)) ? Number(suggestion.confidence) : 0.65;
+    return {
+      ...candidate,
+      fqbn: suggestion.fqbn,
+      boardLabel: suggestion.boardLabel || suggestion.name || candidate.boardLabel,
+      confidence,
+      confidenceLabel: localBoardConfidenceLabel(confidence),
+      detectionSource: "board-detection-ai",
+      ai: {
+        status: "suggested",
+        reason: suggestion.reason || "",
+        model: suggestion.model || null,
+      },
+    };
+  } catch (error) {
+    return {
+      ...candidate,
+      ai: {
+        status: "unavailable",
+        reason: error instanceof Error ? error.message : "Board detection AI failed.",
+      },
+    };
+  }
+}
+
+async function detectLocalBoards(options = {}) {
+  const result = await detectLocalBoardsDeterministic({
+    portsOnly: Boolean(options.portsOnly),
+    probeEsp: Boolean(options.probeEsp),
+  });
+  const boards = options.aiFallback
+    ? await Promise.all(result.boards.map(applyBoardDetectionAiFallback))
+    : result.boards;
+  return {
+    ...result,
+    boards,
+  };
+}
+
 function contentTypeFor(filePath) {
   switch (path.extname(filePath).toLowerCase()) {
     case ".css":
@@ -2791,7 +3267,7 @@ function createMenu() {
       label: "Sketch",
       submenu: [
         { label: "Verify / Compile", accelerator: "CmdOrCtrl+R", click: () => sendMenuAction({ type: "compile" }) },
-        { label: "Upload OTA Firmware", accelerator: "CmdOrCtrl+U", click: () => sendMenuAction({ type: "upload-cloud" }) },
+        { label: "Upload", accelerator: "CmdOrCtrl+U", click: () => sendMenuAction({ type: "upload-local" }) },
         { type: "separator" },
         { label: "Manage Libraries...", click: () => sendMenuAction({ type: "open-library-manager" }) },
         { label: "Boards Manager...", click: () => sendMenuAction({ type: "open-board-manager" }) },
@@ -2964,6 +3440,8 @@ async function initializeStores() {
 
   preferenceStore = new Store({ name: "tantalum-preferences" });
   secretStore = new Store({ name: "tantalum-device-secrets" });
+  applyArduinoStorageRootPreference();
+  interruptActiveToolchainNotifications();
 
   const lastWorkspace = preferenceStore.get("lastWorkspace");
   if (typeof lastWorkspace === "string" && fs.existsSync(lastWorkspace)) {
@@ -3079,6 +3557,31 @@ ipcMain.handle("app:dispatch-menu-action", async (_event, action) => {
 
   sendMenuAction(action);
   return { success: true };
+});
+
+ipcMain.handle("notifications:list", async () => {
+  try {
+    return { success: true, notifications: getToolchainNotifications() };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("notifications:upsert", async (_event, notification = {}) => {
+  try {
+    const result = upsertToolchainNotification(notification);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("notifications:clear", async () => {
+  try {
+    return { success: true, notifications: clearToolchainNotifications() };
+  } catch (error) {
+    return toErrorResult(error);
+  }
 });
 
 ipcMain.on("app:get-cloud-config-sync", (event) => {
@@ -4089,16 +4592,107 @@ ipcMain.handle("toolchain:compile", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("toolchain:install-board-package", async (event, payload) => {
+ipcMain.handle("toolchain:detect-local-boards", async (_event, payload = {}) => {
   try {
-    const result = await installBoardPackage(payload.packageUrl, payload.packageName, (chunk) => {
-      event.sender.send("toolchain:install-progress", chunk);
-    });
-
-    return result;
+    return await detectLocalBoards(payload);
   } catch (error) {
     return toErrorResult(error);
   }
+});
+
+ipcMain.handle("toolchain:list-local-board-profiles", async () => {
+  try {
+    return { success: true, profiles: getLocalBoardProfiles() };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:save-local-board-profile", async (_event, payload = {}) => {
+  try {
+    return { success: true, profile: saveLocalBoardProfile(payload) };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:delete-local-board-profile", async (_event, profileId) => {
+  try {
+    return { success: true, profiles: deleteLocalBoardProfile(profileId) };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => {
+  const port = String(payload.port || "").trim();
+  const portKey = port.toLowerCase();
+  const uploadId = String(payload.uploadId || `usb-upload:${portKey || Date.now()}`);
+  if (portKey && activeLocalUploadPorts.has(portKey)) {
+    return {
+      success: false,
+      error: `A USB upload is already running on ${port}. Wait for it to finish before starting another upload.`
+    };
+  }
+
+  if (portKey) {
+    activeLocalUploadPorts.add(portKey);
+  }
+
+  try {
+    return await uploadLocalSketch(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board, port || payload.port, (chunk, stream) => {
+      _event.sender.send("toolchain:usb-upload-progress", {
+        uploadId,
+        port,
+        board: payload.board,
+        stream,
+        chunk,
+        message: formatUsbUploadProgressMessage(chunk),
+        progress: extractLastCliProgressPercent(chunk)
+      });
+    });
+  } catch (error) {
+    return toErrorResult(error);
+  } finally {
+    if (portKey) {
+      activeLocalUploadPorts.delete(portKey);
+    }
+  }
+});
+
+ipcMain.handle("toolchain:install-board-package", async (event, payload = {}) => {
+  const installId = payload.installId || crypto.randomUUID();
+  const controller = new AbortController();
+  activeBoardPackageInstalls.set(installId, controller);
+
+  try {
+    const result = await installBoardPackage(payload.packageUrl, payload.packageName, (chunk) => {
+      event.sender.send("toolchain:install-progress", chunk);
+    }, {
+      signal: controller.signal
+    });
+
+    return { ...result, installId };
+  } catch (error) {
+    return { ...toErrorResult(error), installId };
+  } finally {
+    activeBoardPackageInstalls.delete(installId);
+  }
+});
+
+ipcMain.handle("toolchain:cancel-board-package-install", async (_event, payload = {}) => {
+  const installId = payload.installId;
+  if (!installId) {
+    return { success: false, error: "installId is required." };
+  }
+
+  const controller = activeBoardPackageInstalls.get(installId);
+  if (!controller) {
+    return { success: true, alreadyStopped: true };
+  }
+
+  controller.abort();
+  return { success: true };
 });
 
 ipcMain.handle("toolchain:remove-board-package", async (event, payload) => {
@@ -4153,17 +4747,207 @@ ipcMain.handle("toolchain:get-featured-libraries", async () => {
   }
 });
 
-ipcMain.handle("toolchain:install-library", async (_event, payload) => {
+ipcMain.handle("toolchain:get-arduino-storage", async () => {
   try {
-    return await installLibrary(payload.name, payload.version);
+    return getArduinoStorageConfigurationResult();
   } catch (error) {
     return toErrorResult(error);
   }
 });
 
+ipcMain.handle("toolchain:select-arduino-storage", async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "Select Arduino storage folder",
+      properties: ["openDirectory", "createDirectory"]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+
+    const storageRoot = path.resolve(result.filePaths[0]);
+    fs.mkdirSync(storageRoot, { recursive: true });
+    preferenceStore?.set(ARDUINO_STORAGE_ROOT_KEY, storageRoot);
+    configureArduinoStorageRoot(storageRoot);
+    registerTrustedPath(storageRoot);
+    return getArduinoStorageConfigurationResult();
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:clear-arduino-storage", async () => {
+  try {
+    preferenceStore?.delete(ARDUINO_STORAGE_ROOT_KEY);
+    configureArduinoStorageRoot(null);
+    return getArduinoStorageConfigurationResult();
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:get-library-directory", async () => {
+  try {
+    const result = await getArduinoLibraryDirectory();
+    registerTrustedPath(result.userDir);
+    registerTrustedPath(result.librariesDir);
+    return result;
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:select-library-source-folder", async (_event, payload = {}) => {
+  try {
+    const defaultPath = typeof payload.defaultPath === "string" && fs.existsSync(payload.defaultPath)
+      ? path.resolve(payload.defaultPath)
+      : undefined;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "Select Arduino IDE sketchbook or libraries folder",
+      defaultPath,
+      properties: ["openDirectory"]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true };
+    }
+
+    return { success: true, path: path.resolve(result.filePaths[0]) };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:migrate-libraries", async (event, payload = {}) => {
+  try {
+    const result = await migrateLibrariesFrom(payload.sourcePath, (progressEvent) => {
+      event.sender.send("toolchain:library-migration-progress", progressEvent);
+    });
+    registerTrustedPath(result.userDir);
+    registerTrustedPath(result.targetLibrariesDir);
+    return result;
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
+  const installId = payload.installId || crypto.randomUUID();
+  const name = payload.name;
+  const version = payload.version;
+  const controller = new AbortController();
+  const emitLibraryProgress = (status, patch = {}) => {
+    event.sender.send("toolchain:library-install-progress", {
+      installId,
+      name,
+      version,
+      status,
+      phase: patch.phase || status,
+      message: patch.message || "",
+      progress: typeof patch.progress === "number" ? patch.progress : null
+    });
+  };
+
+  activeLibraryInstallOperations.set(installId, {
+    controller,
+    sender: event.sender,
+    name,
+    version
+  });
+
+  try {
+    emitLibraryProgress("queued", {
+      phase: "prepare",
+      message: `Preparing ${name} install...`
+    });
+
+    const result = await installLibrary(name, version, (progressEvent) => {
+      if (typeof progressEvent === "string") {
+        event.sender.send("toolchain:install-progress", progressEvent);
+        emitLibraryProgress("running", {
+          phase: classifyLibraryInstallPhase(progressEvent),
+          message: formatLibraryInstallMessage(progressEvent),
+          progress: extractCliProgressPercent(progressEvent)
+        });
+        return;
+      }
+
+      const message = progressEvent?.message || "";
+      if (message) {
+        event.sender.send("toolchain:install-progress", `${message}\n`);
+      }
+      emitLibraryProgress("running", {
+        phase: progressEvent?.phase || "running",
+        message,
+        progress: typeof progressEvent?.progress === "number" ? progressEvent.progress : null
+      });
+    }, {
+      signal: controller.signal
+    });
+
+    emitLibraryProgress("success", {
+      phase: "Installed",
+      message: result.installedVersion ? `${name}@${result.installedVersion} installed.` : `${name} installed.`,
+      progress: 100
+    });
+
+    return { ...result, installId };
+  } catch (error) {
+    const errorResult = toErrorResult(error);
+    if (errorResult.canceled) {
+      emitLibraryProgress("canceled", {
+        phase: "canceled",
+        message: `${name} install stopped.`
+      });
+    } else {
+      emitLibraryProgress("error", {
+        phase: "error",
+        message: errorResult.error
+      });
+    }
+    return { ...errorResult, installId };
+  } finally {
+    activeLibraryInstallOperations.delete(installId);
+  }
+});
+
+ipcMain.handle("toolchain:cancel-library-install", async (_event, payload = {}) => {
+  const installId = payload.installId;
+  if (!installId) {
+    return { success: false, error: "installId is required." };
+  }
+
+  const operation = activeLibraryInstallOperations.get(installId);
+  if (!operation) {
+    return { success: true, alreadyStopped: true };
+  }
+
+  operation.controller.abort();
+  operation.sender.send("toolchain:library-install-progress", {
+    installId,
+    name: operation.name,
+    version: operation.version,
+    status: "running",
+    phase: "stopping",
+    message: `Stopping ${operation.name} install...`,
+    progress: null
+  });
+
+  return { success: true };
+});
+
 ipcMain.handle("toolchain:list-installed-libraries", async () => {
   try {
     return await listInstalledLibraries();
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:remove-library", async (_event, payload = {}) => {
+  try {
+    return await removeLibrary(payload.name);
   } catch (error) {
     return toErrorResult(error);
   }

@@ -1234,7 +1234,12 @@ function threadMemoryPathFromContextChip(chip: AgentMessageContextChip, workspac
 
 function cleanThreadMemoryAlias(value: string | null | undefined) {
   return String(value || '')
-    .replace(/[\x00-\x1F\x7F]/g, ' ')
+    .split('')
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f ? ' ' : character;
+    })
+    .join('')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, THREAD_MEMORY_ALIAS_STRING_LIMIT);
@@ -1608,6 +1613,22 @@ function findLatestPendingAction(messages: AgentThreadMessage[]) {
   return null;
 }
 
+function threadMessagesNeedApproval(messages: AgentThreadMessage[]) {
+  return Boolean(findLatestPendingAction(messages));
+}
+
+function threadSummaryLooksWaitingForApproval(thread: AgentThreadSummary) {
+  const preview = thread.lastMessagePreview.toLowerCase();
+  return (
+    preview.includes('approve this workspace action') ||
+    preview.includes('approve to run it') ||
+    preview.includes('pending approval') ||
+    preview.includes('needs approval') ||
+    preview.includes('needs permission') ||
+    preview.includes('permission before it can make changes')
+  );
+}
+
 function findLatestTaskList(messages: AgentThreadMessage[], actionId?: string | null) {
   for (const message of [...messages].reverse()) {
     const taskList = asAgentTaskList(message.metadata?.taskList);
@@ -1866,6 +1887,7 @@ export function AgentPanel({
   const [runningThreadId, setRunningThreadId] = useState<string | null>(null);
   const [stoppingThreadId, setStoppingThreadId] = useState<string | null>(null);
   const [unreadCompletedThreadIds, setUnreadCompletedThreadIds] = useState<Set<string>>(() => new Set());
+  const [threadApprovalState, setThreadApprovalState] = useState<Map<string, boolean>>(() => new Map());
   const [liveTaskLists, setLiveTaskLists] = useState<Map<string, AgentTaskList>>(() => new Map());
   const [liveActivities, setLiveActivities] = useState<Map<string, AgentActivityEntry[]>>(() => new Map());
   const [thinkingDetailsOpen, setThinkingDetailsOpen] = useState(false);
@@ -1900,7 +1922,7 @@ export function AgentPanel({
   }, [isViewingHistory]);
 
   useEffect(() => {
-    if (pendingReview) {
+    if (pendingReview?.id) {
       setComposerReviewOpen(true);
     }
   }, [pendingReview?.id]);
@@ -1948,7 +1970,25 @@ export function AgentPanel({
     setLoadingMessages(false);
     setThreadSummaries([]);
     setLoadingThreads(false);
+    setThreadApprovalState(new Map());
   }, [workspaceKey]);
+
+  useEffect(() => {
+    if (!activeThreadId || loadingMessages) {
+      return;
+    }
+
+    const waitingForApproval = threadMessagesNeedApproval(messages);
+    setThreadApprovalState((current) => {
+      if (current.get(activeThreadId) === waitingForApproval) {
+        return current;
+      }
+
+      const next = new Map(current);
+      next.set(activeThreadId, waitingForApproval);
+      return next;
+    });
+  }, [activeThreadId, loadingMessages, messages]);
 
   useEffect(() => {
     const offProgress = window.tantalum.agent.onProgress((event: AgentProgressEvent) => {
@@ -2628,7 +2668,30 @@ export function AgentPanel({
     setContextSuggestionsLoading(false);
   }
 
+  function setThreadWaitingForApproval(threadId: string | null | undefined, waitingForApproval: boolean) {
+    if (!threadId) {
+      return;
+    }
+
+    setThreadApprovalState((current) => {
+      if (current.get(threadId) === waitingForApproval) {
+        return current;
+      }
+
+      const next = new Map(current);
+      next.set(threadId, waitingForApproval);
+      return next;
+    });
+  }
+
+  function threadIsWaitingForApproval(thread: AgentThreadSummary) {
+    return threadApprovalState.get(thread.id) ?? threadSummaryLooksWaitingForApproval(thread);
+  }
+
   function showThreadHistory() {
+    if (activeThreadIdRef.current) {
+      setThreadWaitingForApproval(activeThreadIdRef.current, threadMessagesNeedApproval(messages));
+    }
     messageLoadRequestRef.current += 1;
     activeThreadIdRef.current = null;
     setActiveThreadId(null);
@@ -2667,6 +2730,7 @@ export function AgentPanel({
       if (messageLoadRequestRef.current !== requestId || activeThreadIdRef.current !== threadId) {
         return;
       }
+      setThreadWaitingForApproval(threadId, threadMessagesNeedApproval(nextMessages));
       setMessages(nextMessages);
     } catch (error) {
       if (messageLoadRequestRef.current !== requestId || activeThreadIdRef.current !== threadId) {
@@ -2816,6 +2880,9 @@ export function AgentPanel({
         });
       }
       const actionStatus = result.actionStatus ?? (approvedAction ? (Array.isArray(result.diff) && result.diff.length > 0 ? 'executed' : 'blocked') : undefined);
+      if (approvedAction) {
+        setThreadWaitingForApproval(threadId, actionStatus === 'blocked');
+      }
       const runActivities = liveActivitiesRef.current.get(threadId) ?? [];
       const assistantMetadata = approvedAction
         ? {
@@ -2886,6 +2953,9 @@ export function AgentPanel({
             ...(taskList ? { taskList: taskListWithStatus(taskList, 'blocked') } : {}),
           }
         : undefined);
+      if (approvedAction) {
+        setThreadWaitingForApproval(threadId, true);
+      }
       if (!wasStopped) {
         pushToast(message, 'error');
       }
@@ -3116,6 +3186,7 @@ export function AgentPanel({
           },
         });
         setMessages((current) => [...current, assistantMessage]);
+        setThreadWaitingForApproval(runThreadId, true);
         pushConsole('Waiting for approval before running workspace changes.', 'info');
         await refreshThreads();
         return;
@@ -3243,6 +3314,7 @@ export function AgentPanel({
     const taskList = liveTaskLists.get(`action:${action.id}`) ?? findLatestTaskList(messages, action.id);
     const resolvedContextItems = await resolveContextItemsForRun();
     const threadMemory = buildAgentThreadMemory(messages, workspacePath);
+    setThreadWaitingForApproval(threadId, false);
     await executeAgentRun({
       threadId,
       prompt: action.originalPrompt,
@@ -3284,6 +3356,7 @@ export function AgentPanel({
       },
       ...(taskList ? { taskList: taskListWithStatus(taskList, 'skipped') } : {}),
     });
+    setThreadWaitingForApproval(threadId, false);
     await refreshThreads();
   }
 
@@ -3331,6 +3404,15 @@ export function AgentPanel({
     try {
       await deleteAgentThread(thread.id);
       setThreadSummaries((current) => current.filter((entry) => entry.id !== thread.id));
+      setThreadApprovalState((current) => {
+        if (!current.has(thread.id)) {
+          return current;
+        }
+
+        const next = new Map(current);
+        next.delete(thread.id);
+        return next;
+      });
       setUnreadCompletedThreadIds((current) => {
         if (!current.has(thread.id)) {
           return current;
@@ -4040,21 +4122,49 @@ export function AgentPanel({
     const hiddenThreadCount = Math.max(0, visibleThreadSummaries.length - THREAD_HISTORY_PREVIEW_LIMIT);
     const renderThreadItem = (thread: AgentThreadSummary) => {
       const isRunning = thread.id === runningThreadId;
+      const isStopping = thread.id === stoppingThreadId;
+      const isReviewPending = pendingReview?.threadId === thread.id;
+      const isReviewResolving = isReviewPending && resolvingReview;
+      const isWaitingForApproval = !isReviewPending && threadIsWaitingForApproval(thread);
       const hasUnreadCompletion = unreadCompletedThreadIds.has(thread.id);
       const threadTitle = formatThreadTitle(thread.title);
+      const stateKind = isRunning
+        ? 'running'
+        : isReviewResolving
+          ? 'review-resolving'
+          : isReviewPending
+            ? 'review'
+            : isWaitingForApproval
+              ? 'approval'
+              : hasUnreadCompletion
+                ? 'completed'
+                : null;
+      const stateLabel = isRunning
+        ? isStopping
+          ? 'Stopping'
+          : 'Running'
+        : isReviewResolving
+          ? 'Resolving review'
+          : isReviewPending
+            ? 'Review changes'
+            : isWaitingForApproval
+              ? 'Waiting for approval'
+              : hasUnreadCompletion
+                ? 'Completed'
+                : null;
 
       return (
         <article
           key={thread.id}
-          className={`tantalum-ai-thread-item ${isRunning ? 'running' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
+          className={`tantalum-ai-thread-item ${isRunning ? 'running' : ''} ${isWaitingForApproval ? 'waiting-approval' : ''} ${isReviewPending ? 'waiting-review' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
         >
           <span className="tantalum-ai-thread-leading" aria-hidden="true">
-            {isRunning ? (
-              <span className="tantalum-ai-thread-activity">
-                <span />
-                <span />
-                <span />
-              </span>
+            {isRunning || isReviewResolving ? (
+              <LoaderCircle size={12} className="spin tantalum-ai-thread-spinner" />
+            ) : isReviewPending ? (
+              <ShieldCheck size={12} className="tantalum-ai-thread-review-icon" />
+            ) : isWaitingForApproval ? (
+              <TriangleAlert size={12} className="tantalum-ai-thread-approval-icon" />
             ) : hasUnreadCompletion ? (
               <span className="tantalum-ai-thread-complete-dot" />
             ) : (
@@ -4063,8 +4173,13 @@ export function AgentPanel({
           </span>
           <button type="button" className="tantalum-ai-thread-main-btn" onClick={() => void openThread(thread.id)}>
             <span className="tantalum-ai-thread-title-text">{threadTitle}</span>
-            <span className="tantalum-ai-thread-time-sub">
-              {formatRelativeTime(thread.lastMessageAt)}
+            <span className="tantalum-ai-thread-meta-row">
+              {stateKind && stateLabel ? (
+                <span className={`tantalum-ai-thread-state tantalum-ai-thread-state-${stateKind}`}>{stateLabel}</span>
+              ) : null}
+              <span className="tantalum-ai-thread-time-sub">
+                {formatRelativeTime(thread.lastMessageAt)}
+              </span>
             </span>
           </button>
           <div className="tantalum-ai-thread-item-actions">

@@ -30,6 +30,12 @@ contextBridge.exposeInMainWorld("tantalum", {
     dispatchMenuAction: (action) => ipcRenderer.invoke("app:dispatch-menu-action", action),
     onMenuAction: (callback) => subscribe("app:menu-action", callback)
   },
+  notifications: {
+    list: () => ipcRenderer.invoke("notifications:list"),
+    upsert: (notification) => ipcRenderer.invoke("notifications:upsert", notification),
+    clear: () => ipcRenderer.invoke("notifications:clear"),
+    onChanged: (callback) => subscribe("notifications:changed", callback)
+  },
   agent: {
     getStatus: () => ipcRenderer.invoke("agent:get-status"),
     route: (payload) => ipcRenderer.invoke("agent:route", payload),
@@ -127,19 +133,36 @@ contextBridge.exposeInMainWorld("tantalum", {
   },
   toolchain: {
     compile: (payload) => ipcRenderer.invoke("toolchain:compile", payload),
+    detectLocalBoards: (payload) => ipcRenderer.invoke("toolchain:detect-local-boards", payload),
+    listLocalBoardProfiles: () => ipcRenderer.invoke("toolchain:list-local-board-profiles"),
+    saveLocalBoardProfile: (payload) => ipcRenderer.invoke("toolchain:save-local-board-profile", payload),
+    deleteLocalBoardProfile: (profileId) => ipcRenderer.invoke("toolchain:delete-local-board-profile", profileId),
+    uploadLocalSketch: (payload) => ipcRenderer.invoke("toolchain:upload-local-sketch", payload),
     installBoardPackage: (payload) => ipcRenderer.invoke("toolchain:install-board-package", payload),
+    cancelBoardPackageInstall: (payload) => ipcRenderer.invoke("toolchain:cancel-board-package-install", payload),
     removeBoardPackage: (payload) => ipcRenderer.invoke("toolchain:remove-board-package", payload),
     listInstalledBoards: () => ipcRenderer.invoke("toolchain:list-installed-boards"),
     searchBoardPlatforms: (query) => ipcRenderer.invoke("toolchain:search-board-platforms", query),
     listInstalledPlatforms: () => ipcRenderer.invoke("toolchain:list-installed-platforms"),
     searchLibraries: (query) => ipcRenderer.invoke("toolchain:search-libraries", query),
     getFeaturedLibraries: () => ipcRenderer.invoke("toolchain:get-featured-libraries"),
+    getArduinoStorage: () => ipcRenderer.invoke("toolchain:get-arduino-storage"),
+    selectArduinoStorage: () => ipcRenderer.invoke("toolchain:select-arduino-storage"),
+    clearArduinoStorage: () => ipcRenderer.invoke("toolchain:clear-arduino-storage"),
+    getLibraryDirectory: () => ipcRenderer.invoke("toolchain:get-library-directory"),
+    selectLibrarySourceFolder: (payload) => ipcRenderer.invoke("toolchain:select-library-source-folder", payload),
+    migrateLibraries: (payload) => ipcRenderer.invoke("toolchain:migrate-libraries", payload),
     installLibrary: (payload) => ipcRenderer.invoke("toolchain:install-library", payload),
+    cancelLibraryInstall: (payload) => ipcRenderer.invoke("toolchain:cancel-library-install", payload),
+    removeLibrary: (payload) => ipcRenderer.invoke("toolchain:remove-library", payload),
     listInstalledLibraries: () => ipcRenderer.invoke("toolchain:list-installed-libraries"),
     listPorts: () => ipcRenderer.invoke("toolchain:list-ports"),
     provisionBoard: (payload) => ipcRenderer.invoke("toolchain:provision-board", payload),
     installEsp32Support: () => ipcRenderer.invoke("toolchain:install-esp32-support"),
-    onInstallProgress: (callback) => subscribe("toolchain:install-progress", callback)
+    onInstallProgress: (callback) => subscribe("toolchain:install-progress", callback),
+    onUsbUploadProgress: (callback) => subscribe("toolchain:usb-upload-progress", callback),
+    onLibraryInstallProgress: (callback) => subscribe("toolchain:library-install-progress", callback),
+    onLibraryMigrationProgress: (callback) => subscribe("toolchain:library-migration-progress", callback)
   },
   terminal: {
     create: (options) => ipcRenderer.invoke("terminal:create", options),

@@ -16,7 +16,10 @@
     "start:fresh": "npm run build:renderer && npm run start",
     "build:renderer": "npm run build --workspace renderer-react",
     "lint:renderer": "npm run lint --workspace renderer-react",
+    "secret:encrypt-api-key": "node scripts/encrypt-api-key-envelope.mjs",
+    "migrate:api-key-envelopes": "node scripts/migrate-api-key-envelopes.mjs",
     "smoke:agent-gateway": "node scripts/smoke-agent-gateway-policy.mjs",
+    "smoke:secret-envelope": "node scripts/smoke-secret-envelope.mjs",
     "smoke:opencode": "node scripts/smoke-opencode-runtime.js",
     "dist": "npm run build:renderer && electron-builder",
     "build:mac": "npm run build:renderer && electron-builder --mac"
@@ -37,7 +40,8 @@
     "serialport": "^12.0.0",
     "uuid": "^9.0.0",
     "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0"
+    "xterm-addon-fit": "^0.8.0",
+    "yauzl": "^2.10.0"
   },
   "build": {
     "appId": "com.tantalum.ide",

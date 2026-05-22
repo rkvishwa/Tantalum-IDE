@@ -239,6 +239,46 @@
                     "value": "500"
                 }
             ]
+        },
+        {
+            "$id": "board-detection",
+            "name": "board-detection",
+            "runtime": "node-22",
+            "path": "functions/board-detection",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "users"
+            ],
+            "enabled": true,
+            "logging": true,
+            "events": [],
+            "schedule": "",
+            "timeout": 45,
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write",
+                "documents.read",
+                "documents.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID",
+                    "value": "board_detection_model_config"
+                },
+                {
+                    "key": "APPWRITE_BOARD_DETECTION_CACHE_COLLECTION_ID",
+                    "value": "board_detection_cache"
+                },
+                {
+                    "key": "APPWRITE_BOARD_DETECTION_USAGE_COLLECTION_ID",
+                    "value": "board_detection_usage"
+                }
+            ]
         }
     ],
     "sites": [
@@ -247,7 +287,6 @@
             "name": "home",
             "path": "sites/home",
             "framework": "nextjs",
-            "enabled": true,
             "logging": true,
             "timeout": 30,
             "buildRuntime": "node-22",
@@ -694,6 +733,15 @@
                     "encrypt": true
                 },
                 {
+                    "key": "apiKeyEnvelope",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 8192,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
                     "key": "status",
                     "type": "string",
                     "required": false,
@@ -974,6 +1022,15 @@
                     "size": 2048,
                     "default": null,
                     "encrypt": true
+                },
+                {
+                    "key": "apiKeyEnvelope",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 8192,
+                    "default": null,
+                    "encrypt": false
                 },
                 {
                     "key": "apiKeyPreview",
@@ -1613,6 +1670,303 @@
                     ]
                 }
             ]
+        },
+        {
+            "$id": "board_detection_model_config",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Board Detection Model Config",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "providerLabel",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "baseUrl",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 512,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "apiKey",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 2048,
+                    "default": null,
+                    "encrypt": true
+                },
+                {
+                    "key": "apiKeyEnvelope",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 8192,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "model",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "enabled",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "board_detection_model_enabled",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "enabled"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "board_detection_cache",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Board Detection Cache",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "fingerprint",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "fqbn",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "boardLabel",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "confidence",
+                    "type": "float",
+                    "required": false,
+                    "array": false,
+                    "min": 0,
+                    "max": 1,
+                    "default": 0
+                },
+                {
+                    "key": "reason",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 512,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "model",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "board_detection_cache_fingerprint",
+                    "type": "unique",
+                    "status": "available",
+                    "columns": [
+                        "fingerprint"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "board_detection_usage",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Board Detection Usage",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "fingerprint",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "fqbn",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "confidence",
+                    "type": "float",
+                    "required": false,
+                    "array": false,
+                    "min": 0,
+                    "max": 1,
+                    "default": 0
+                },
+                {
+                    "key": "model",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "errorMessage",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1024,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "board_detection_usage_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "board_detection_usage_fingerprint",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "fingerprint"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "board_detection_usage_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
+                }
+            ]
         }
     ],
     "buckets": [
@@ -1632,7 +1986,5 @@
             "encryption": true,
             "antivirus": true
         }
-    ],
-    "teams": [],
-    "topics": []
+    ]
 }

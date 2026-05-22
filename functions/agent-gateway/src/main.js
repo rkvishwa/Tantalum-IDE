@@ -9,6 +9,7 @@ import {
   applyAgentOutputPolicy,
   normalizeAgentOutputStyle,
 } from './outputPolicy.js';
+import { resolveStoredApiKey } from './secretEnvelope.js';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -301,11 +302,12 @@ async function resolveManagedProvider(databases, userId, mode, incomingModel) {
   }
 
   const endpoint = await normalizeOpenAiV1BaseUrl(poolKey.baseUrl);
+  const apiKey = resolveStoredApiKey(poolKey, 'Managed model key');
 
   return {
     baseUrl: endpoint.baseUrl,
     isAzure: endpoint.isAzure,
-    apiKey: poolKey.apiKey,
+    apiKey,
     model,
     modelAlias: mode === 'power' ? 'Power' : 'Fast',
     sourceLabel: poolKey.providerLabel || 'Managed',
@@ -330,11 +332,12 @@ async function resolveCustomProvider(databases, userId, credentialId, modelName)
   }
 
   const endpoint = await normalizeOpenAiV1BaseUrl(credential.baseUrl);
+  const apiKey = resolveStoredApiKey(credential, 'Custom credential');
 
   return {
     baseUrl: endpoint.baseUrl,
     isAzure: endpoint.isAzure,
-    apiKey: credential.apiKey,
+    apiKey,
     model: cleanModelName,
     modelAlias: cleanModelName,
     sourceLabel: credential.displayName || 'Custom',

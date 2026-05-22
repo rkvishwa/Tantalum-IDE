@@ -4,6 +4,122 @@ export type Result<T = Record<string, never>> =
   | ({ success: true } & T)
   | ({ success: false; error: string; canceled?: boolean });
 
+export type LibraryInstallProgressEvent = {
+  installId: string;
+  name: string;
+  version?: string;
+  status: 'queued' | 'running' | 'success' | 'error' | 'canceled';
+  phase: string;
+  message: string;
+  progress: number | null;
+};
+
+export type UsbUploadProgressEvent = {
+  uploadId: string;
+  port: string;
+  board: string;
+  stream: 'stdout' | 'stderr' | string;
+  chunk: string;
+  message: string;
+  progress: number | null;
+};
+
+export type ArduinoLibraryDirectoryInfo = {
+  userDir: string;
+  librariesDir: string;
+  fallback: boolean;
+  configuredUserDir: string | null;
+  failures?: string[];
+};
+
+export type ArduinoStorageInfo = {
+  configured: boolean;
+  storageRoot: string | null;
+  dataDir: string | null;
+  downloadsDir: string | null;
+  userDir: string | null;
+  librariesDir: string | null;
+  buildCacheDir: string | null;
+  tempDir: string | null;
+};
+
+export type LibraryMigrationProgressEvent = {
+  phase: string;
+  message: string;
+  progress: number | null;
+  migrated: number;
+  skipped: number;
+  failed: number;
+  total: number;
+};
+
+export type LibraryMigrationEntry = {
+  action: 'migrated' | 'skipped' | 'failed';
+  name: string;
+  version?: string;
+  sourcePath: string;
+  targetPath?: string;
+  reason?: string;
+};
+
+export type LibraryMigrationResult = {
+  sourceLibrariesDir: string;
+  targetLibrariesDir: string;
+  userDir: string;
+  migrated: LibraryMigrationEntry[];
+  skipped: LibraryMigrationEntry[];
+  failed: LibraryMigrationEntry[];
+  total: number;
+};
+
+export type ToolchainNotificationStatus = 'queued' | 'running' | 'success' | 'error' | 'canceled' | 'interrupted';
+
+export type ToolchainNotificationKind =
+  | 'library-install'
+  | 'library-update'
+  | 'library-remove'
+  | 'library-migration'
+  | 'platform-install'
+  | 'platform-update'
+  | 'platform-remove'
+  | 'usb-upload'
+  | 'firmware-upload'
+  | 'toolchain-task';
+
+export type ToolchainNotificationMetadata = Record<string, string | number | boolean | null | undefined>;
+
+export type ToolchainNotification = {
+  id: string;
+  kind: ToolchainNotificationKind | string;
+  title: string;
+  detail: string;
+  status: ToolchainNotificationStatus;
+  phase: string;
+  progress: number | null;
+  name: string;
+  version: string;
+  target: string;
+  metadata: ToolchainNotificationMetadata;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ToolchainNotificationInput = {
+  id?: string;
+  kind: ToolchainNotificationKind | string;
+  title: string;
+  detail?: string;
+  status: ToolchainNotificationStatus;
+  phase?: string;
+  progress?: number | null;
+  name?: string;
+  version?: string;
+  target?: string;
+  metadata?: ToolchainNotificationMetadata;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
 export type DirectoryItem = {
   name: string;
   path: string;
@@ -132,6 +248,7 @@ export type MenuAction =
   | { type: 'show-my-projects' }
   | { type: 'show-output' }
   | { type: 'compile' }
+  | { type: 'upload-local' }
   | { type: 'upload-cloud' }
   | { type: 'open-library-manager' }
   | { type: 'open-board-manager' }
@@ -147,6 +264,75 @@ export type PortInfo = {
   manufacturer: string;
   vendorId?: string;
   productId?: string;
+};
+
+export type LocalBoardMatch = {
+  name: string;
+  fqbn: string;
+  isHidden?: boolean;
+};
+
+export type LocalBoardDetection = {
+  id: string;
+  fingerprint: string;
+  path: string;
+  port: string;
+  label: string;
+  protocol: string;
+  protocolLabel: string;
+  manufacturer: string;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+  pnpId?: string | null;
+  locationId?: string | null;
+  boardLabel: string;
+  fqbn: string;
+  matchingBoards: LocalBoardMatch[];
+  confidence: number;
+  confidenceLabel: 'high' | 'medium' | 'low' | string;
+  detectionSource: string;
+  connected: boolean;
+  ai?: {
+    status: 'suggested' | 'no-suggestion' | 'error' | string;
+    reason?: string;
+    model?: string | null;
+  } | null;
+};
+
+export type LocalBoardPort = {
+  path: string;
+  label: string;
+  protocol: string;
+  protocolLabel: string;
+  manufacturer: string;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+  pnpId?: string | null;
+  locationId?: string | null;
+  likelyBoard?: boolean;
+};
+
+export type LocalBoardProfile = {
+  id: string;
+  name: string;
+  fqbn: string;
+  boardLabel: string;
+  port: string;
+  protocol: string;
+  protocolLabel: string;
+  manufacturer: string;
+  vendorId?: string | null;
+  productId?: string | null;
+  serialNumber?: string | null;
+  pnpId?: string | null;
+  locationId?: string | null;
+  fingerprint: string;
+  confidence?: number | null;
+  connected?: boolean;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TerminalDataEvent = {
@@ -172,6 +358,7 @@ export type CloudConfig = {
   deviceGatewayFunctionId: string;
   agentSettingsFunctionId: string;
   agentGatewayFunctionId: string;
+  boardDetectionFunctionId?: string;
 };
 
 export type AgentToolName = 'opencode_apply';
@@ -514,6 +701,12 @@ export type DesktopApi = {
     dispatchMenuAction: (action: MenuAction) => Promise<Result>;
     onMenuAction: (callback: (action: MenuAction) => void) => () => void;
   };
+  notifications: {
+    list: () => Promise<Result<{ notifications: ToolchainNotification[] }>>;
+    upsert: (notification: ToolchainNotificationInput) => Promise<Result<{ notification: ToolchainNotification; notifications: ToolchainNotification[] }>>;
+    clear: () => Promise<Result<{ notifications: ToolchainNotification[] }>>;
+    onChanged: (callback: (notifications: ToolchainNotification[]) => void) => () => void;
+  };
   agent: {
     getStatus: () => Promise<
       Result<{
@@ -663,19 +856,42 @@ export type DesktopApi = {
   };
   toolchain: {
     compile: (payload: { code: string; board: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string }>>;
-    installBoardPackage: (payload: { packageName: string; packageUrl?: string | null }) => Promise<Result<{ output?: string }>>;
+    detectLocalBoards: (payload?: { portsOnly?: boolean; probeEsp?: boolean; aiFallback?: boolean }) => Promise<Result<{ boards: LocalBoardDetection[]; ports?: LocalBoardPort[]; detectedAt: string }>>;
+    listLocalBoardProfiles: () => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
+    saveLocalBoardProfile: (payload: Partial<LocalBoardProfile>) => Promise<Result<{ profile: LocalBoardProfile }>>;
+    deleteLocalBoardProfile: (profileId: string) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
+    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string }) => Promise<Result<{ message?: string; output?: string; board: string; port: string }>>;
+    installBoardPackage: (payload: { packageName: string; packageUrl?: string | null; installId?: string }) => Promise<Result<{ output?: string; installId?: string }>>;
+    cancelBoardPackageInstall: (payload: { installId: string }) => Promise<Result<{ alreadyStopped?: boolean }>>;
     removeBoardPackage: (payload: { packageName: string }) => Promise<Result<{ output?: string }>>;
     listInstalledBoards: () => Promise<Result<{ boards: Array<Record<string, unknown>> }>>;
     searchBoardPlatforms: (query: string) => Promise<Result<{ platforms: Array<Record<string, unknown>> }>>;
     listInstalledPlatforms: () => Promise<Result<{ platforms: Array<Record<string, unknown>> }>>;
     searchLibraries: (query: string) => Promise<Result<{ libraries: Array<Record<string, unknown>> }>>;
     getFeaturedLibraries: () => Promise<Result<{ libraries: Array<Record<string, unknown>> }>>;
-    installLibrary: (payload: { name: string; version?: string }) => Promise<Result<{ output?: string }>>;
+    getArduinoStorage: () => Promise<Result<ArduinoStorageInfo>>;
+    selectArduinoStorage: () => Promise<Result<ArduinoStorageInfo>>;
+    clearArduinoStorage: () => Promise<Result<ArduinoStorageInfo>>;
+    getLibraryDirectory: () => Promise<Result<ArduinoLibraryDirectoryInfo>>;
+    selectLibrarySourceFolder: (payload?: { defaultPath?: string }) => Promise<Result<{ path: string }>>;
+    migrateLibraries: (payload: { sourcePath: string }) => Promise<Result<LibraryMigrationResult>>;
+    installLibrary: (payload: { name: string; version?: string; installId?: string }) => Promise<Result<{
+      output?: string;
+      installId?: string;
+      installedPath?: string;
+      installedVersion?: string;
+      dependenciesInstalled?: string[];
+    }>>;
+    cancelLibraryInstall: (payload: { installId: string }) => Promise<Result<{ alreadyStopped?: boolean }>>;
+    removeLibrary: (payload: { name: string }) => Promise<Result<{ output?: string; removedPath?: string }>>;
     listInstalledLibraries: () => Promise<Result<{ libraries: Array<Record<string, unknown>> }>>;
     listPorts: () => Promise<Result<{ ports: PortInfo[] }>>;
     provisionBoard: (payload: Record<string, unknown>) => Promise<Result<{ message?: string; output?: string }>>;
     installEsp32Support: () => Promise<Result<{ message?: string; output?: string }>>;
     onInstallProgress: (callback: (chunk: string) => void) => () => void;
+    onUsbUploadProgress: (callback: (event: UsbUploadProgressEvent) => void) => () => void;
+    onLibraryInstallProgress: (callback: (event: LibraryInstallProgressEvent) => void) => () => void;
+    onLibraryMigrationProgress: (callback: (event: LibraryMigrationProgressEvent) => void) => () => void;
   };
   terminal: {
     create: (options?: { cols?: number; rows?: number; cwd?: string; shell?: string }) => Promise<Result<{ sessionId: string; cwd: string; shell: string }>>;

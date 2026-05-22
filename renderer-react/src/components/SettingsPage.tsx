@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Models } from 'appwrite';
-import { Code2, Cpu, GitBranch, KeyRound, Monitor, Moon, Palette, Plus, RotateCcw, Save, Sun, Type } from 'lucide-react';
+import { AlertTriangle, Code2, Cpu, Download, FolderInput, FolderOpen, GitBranch, KeyRound, Monitor, Moon, Palette, Plus, RotateCcw, Save, Sun, Type } from 'lucide-react';
 
 import { createBoard, deleteBoard, listBoards } from '@/lib/boards';
 import { hasRequiredCloudConfiguration } from '@/lib/config';
@@ -8,7 +8,7 @@ import { hasRequiredCloudConfiguration } from '@/lib/config';
 import type { BoardDocument, BoardInput } from '@/lib/models';
 import { ACCENT_PRESETS, FONT_FAMILY_OPTIONS, type ThemePreference, type UiPreferences } from '@/lib/uiPreferences';
 import { calculateBoardStatus } from '@/lib/utils';
-import type { GitConfiguration, GitProvider } from '@/types/electron';
+import type { ArduinoLibraryDirectoryInfo, ArduinoStorageInfo, GitConfiguration, GitProvider, LibraryMigrationProgressEvent, LibraryMigrationResult } from '@/types/electron';
 
 import { AgentPanel } from './AgentPanel';
 import { Modal } from './Modal';
@@ -24,7 +24,7 @@ type SettingsPageProps = {
   onResetPreferences: () => void;
 };
 
-export type SettingsTab = 'appearance' | 'editor' | 'agent' | 'git' | 'boards';
+export type SettingsTab = 'appearance' | 'editor' | 'agent' | 'git' | 'arduino' | 'boards';
 
 const BOARD_OPTIONS = [
   { value: 'esp32:esp32:esp32', label: 'ESP32 DevKit' },
@@ -63,6 +63,14 @@ export function SettingsPage({
   const [gitConfigMessage, setGitConfigMessage] = useState('');
   const [gitConfigError, setGitConfigError] = useState('');
   const [gitTokenInputs, setGitTokenInputs] = useState({ githubToken: '', gitlabToken: '' });
+  const [arduinoStorageInfo, setArduinoStorageInfo] = useState<ArduinoStorageInfo | null>(null);
+  const [arduinoStorageMessage, setArduinoStorageMessage] = useState('');
+  const [libraryDirectoryInfo, setLibraryDirectoryInfo] = useState<ArduinoLibraryDirectoryInfo | null>(null);
+  const [libraryDirectoryError, setLibraryDirectoryError] = useState('');
+  const [libraryMigrationMessage, setLibraryMigrationMessage] = useState('');
+  const [libraryMigrationError, setLibraryMigrationError] = useState('');
+  const [libraryMigrationProgress, setLibraryMigrationProgress] = useState<LibraryMigrationProgressEvent | null>(null);
+  const [libraryMigrationResult, setLibraryMigrationResult] = useState<LibraryMigrationResult | null>(null);
   const [boardForm, setBoardForm] = useState<BoardInput>({
     name: '',
     boardType: 'esp32:esp32:esp32',
@@ -171,6 +179,135 @@ export function SettingsPage({
     void refreshGitConfiguration();
   }, [activeTab]);
 
+  async function refreshArduinoLibraryDirectory() {
+    const result = await window.tantalum.toolchain.getLibraryDirectory();
+    if (result.success) {
+      setLibraryDirectoryInfo(result);
+      setLibraryDirectoryError('');
+      return result;
+    }
+
+    setLibraryDirectoryError(result.error);
+    return null;
+  }
+
+  async function refreshArduinoStorage() {
+    const result = await window.tantalum.toolchain.getArduinoStorage();
+    if (result.success) {
+      setArduinoStorageInfo(result);
+      setLibraryDirectoryError('');
+      return result;
+    }
+
+    setLibraryDirectoryError(result.error);
+    return null;
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'arduino') {
+      return;
+    }
+
+    void refreshArduinoStorage();
+    void refreshArduinoLibraryDirectory();
+  }, [activeTab]);
+
+  useEffect(() => {
+    return window.tantalum.toolchain.onLibraryMigrationProgress((event) => {
+      setLibraryMigrationProgress(event);
+    });
+  }, []);
+
+  async function handleRevealArduinoLibraryFolder() {
+    const currentInfo = libraryDirectoryInfo ?? (await refreshArduinoLibraryDirectory());
+    if (!currentInfo) {
+      return;
+    }
+
+    const result = await window.tantalum.shell.openPath(currentInfo.librariesDir);
+    if (!result.success) {
+      setLibraryDirectoryError(result.error);
+    }
+  }
+
+  async function handleSelectArduinoStorageFolder() {
+    setBusyAction('select-arduino-storage');
+    setArduinoStorageMessage('');
+
+    try {
+      const result = await window.tantalum.toolchain.selectArduinoStorage();
+      if (!result.success) {
+        if (!result.canceled) {
+          setLibraryDirectoryError(result.error);
+        }
+        return;
+      }
+
+      setArduinoStorageInfo(result);
+      setArduinoStorageMessage('Arduino storage location updated. Restart any active installs before installing large packages.');
+      await refreshArduinoLibraryDirectory();
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleClearArduinoStorageFolder() {
+    if (!window.confirm('Use the default Arduino storage location again? Existing files on the other disk will not be deleted.')) {
+      return;
+    }
+
+    setBusyAction('clear-arduino-storage');
+    setArduinoStorageMessage('');
+
+    try {
+      const result = await window.tantalum.toolchain.clearArduinoStorage();
+      if (!result.success) {
+        setLibraryDirectoryError(result.error);
+        return;
+      }
+
+      setArduinoStorageInfo(result);
+      setArduinoStorageMessage('Arduino storage reset to the default location.');
+      await refreshArduinoLibraryDirectory();
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleMigrateArduinoLibraries() {
+    setBusyAction('migrate-libraries');
+    setLibraryMigrationMessage('');
+    setLibraryMigrationError('');
+    setLibraryMigrationResult(null);
+    setLibraryMigrationProgress(null);
+
+    try {
+      const currentInfo = libraryDirectoryInfo ?? (await refreshArduinoLibraryDirectory());
+      const defaultPath = currentInfo?.configuredUserDir || currentInfo?.userDir;
+      const selection = await window.tantalum.toolchain.selectLibrarySourceFolder({ defaultPath: defaultPath || undefined });
+
+      if (!selection.success) {
+        if (!selection.canceled) {
+          setLibraryMigrationError(selection.error);
+        }
+        return;
+      }
+
+      const result = await window.tantalum.toolchain.migrateLibraries({ sourcePath: selection.path });
+      if (result.success) {
+        setLibraryMigrationResult(result);
+        setLibraryMigrationMessage(
+          `Migration complete: ${result.migrated.length} migrated, ${result.skipped.length} skipped, ${result.failed.length} failed.`
+        );
+        await refreshArduinoLibraryDirectory();
+      } else {
+        setLibraryMigrationError(result.error);
+      }
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleCreateBoard(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusyAction('create-board');
@@ -260,6 +397,7 @@ export function SettingsPage({
           <button className={activeTab === 'editor' ? 'active' : ''} onClick={() => onActiveTabChange('editor')}>Editor</button>
           <button className={activeTab === 'agent' ? 'active' : ''} onClick={() => onActiveTabChange('agent')}>Agent Configuration</button>
           <button className={activeTab === 'git' ? 'active' : ''} onClick={() => onActiveTabChange('git')}>Git Configuration</button>
+          <button className={activeTab === 'arduino' ? 'active' : ''} onClick={() => onActiveTabChange('arduino')}>Arduino Storage</button>
           <button className={activeTab === 'boards' ? 'active' : ''} onClick={() => onActiveTabChange('boards')}>Device Management</button>
         </nav>
       </div>
@@ -607,6 +745,162 @@ export function SettingsPage({
                     Clear GitLab token
                   </button>
                 </div>
+              </section>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'arduino' && (
+          <div className="settings-pane arduino-settings-pane">
+            <div className="settings-pane-header">
+              <div>
+                <h2>Arduino Storage</h2>
+                <p className="text-muted">Move board cores, package downloads, temp extraction, build cache, and libraries off the system disk.</p>
+              </div>
+            </div>
+
+            {libraryDirectoryError ? <div className="inline-banner inline-banner-error">{libraryDirectoryError}</div> : null}
+            {arduinoStorageMessage ? <div className="inline-banner inline-banner-success">{arduinoStorageMessage}</div> : null}
+
+            <div className="appearance-grid">
+              <section className="settings-card settings-list-card">
+                <div className="settings-card-heading">
+                  <AlertTriangle size={18} />
+                  <div>
+                    <h3>Upload safety</h3>
+                    <p>Control whether USB uploads verify the sketch before writing to the board.</p>
+                  </div>
+                </div>
+                <div className="settings-row-list">
+                  {renderToggleSetting('verifyBeforeUpload', 'Verify before upload', 'Compile and check the sketch before USB upload starts.')}
+                </div>
+                {!preferences.verifyBeforeUpload ? (
+                  <div className="inline-banner inline-banner-warning arduino-inline-banner">
+                    Direct upload skips the separate Verify step. Bad firmware or incorrect board settings can crash, lock up, or misconfigure attached hardware. Use at your own risk.
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <FolderInput size={18} />
+                  <div>
+                    <h3>Toolchain storage root</h3>
+                    <p>Use a folder on another drive for Arduino15 data, downloads, temporary files, build cache, and the sketchbook.</p>
+                  </div>
+                </div>
+                <div className="arduino-library-path-card">
+                  <span>Storage root</span>
+                  <code>{arduinoStorageInfo?.configured ? arduinoStorageInfo.storageRoot : 'Default Arduino CLI location'}</code>
+                </div>
+                {arduinoStorageInfo?.configured ? (
+                  <div className="arduino-migration-summary">
+                    <div>
+                      <span>Package data</span>
+                      <code>{arduinoStorageInfo.dataDir}</code>
+                    </div>
+                    <div>
+                      <span>Downloads</span>
+                      <code>{arduinoStorageInfo.downloadsDir}</code>
+                    </div>
+                    <div>
+                      <span>Temp</span>
+                      <code>{arduinoStorageInfo.tempDir}</code>
+                    </div>
+                    <div>
+                      <span>Build cache</span>
+                      <code>{arduinoStorageInfo.buildCacheDir}</code>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="settings-action-row">
+                  <button className="primary-button compact" type="button" onClick={() => void handleSelectArduinoStorageFolder()} disabled={busyAction === 'select-arduino-storage'}>
+                    <FolderOpen size={15} /> {busyAction === 'select-arduino-storage' ? 'Choosing...' : 'Choose folder'}
+                  </button>
+                  <button className="secondary-button compact" type="button" onClick={() => void refreshArduinoStorage()}>
+                    Refresh
+                  </button>
+                  <button className="secondary-button compact" type="button" onClick={() => void handleClearArduinoStorageFolder()} disabled={!arduinoStorageInfo?.configured || busyAction === 'clear-arduino-storage'}>
+                    Use default
+                  </button>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <FolderOpen size={18} />
+                  <div>
+                    <h3>Active library folder</h3>
+                    <p>Tantalum installs and compiles libraries from this writable folder.</p>
+                  </div>
+                </div>
+                <div className="arduino-library-path-card">
+                  <span>Libraries folder</span>
+                  <code>{libraryDirectoryInfo?.librariesDir || 'Loading...'}</code>
+                </div>
+                {libraryDirectoryInfo?.fallback ? (
+                  <div className="inline-banner inline-banner-warning arduino-inline-banner">
+                    Tantalum is using its app-managed Arduino folder because the Arduino CLI sketchbook folder was not writable.
+                  </div>
+                ) : null}
+                <div className="settings-action-row">
+                  <button className="secondary-button compact" type="button" onClick={() => void refreshArduinoLibraryDirectory()}>
+                    Refresh
+                  </button>
+                  <button className="secondary-button compact" type="button" onClick={() => void handleRevealArduinoLibraryFolder()} disabled={!libraryDirectoryInfo}>
+                    <FolderOpen size={15} /> Reveal folder
+                  </button>
+                </div>
+              </section>
+
+              <section className="settings-card">
+                <div className="settings-card-heading">
+                  <FolderInput size={18} />
+                  <div>
+                    <h3>Migrate from another Arduino IDE</h3>
+                    <p>Choose the official Arduino sketchbook or its libraries folder and copy its libraries into Tantalum.</p>
+                  </div>
+                </div>
+
+                <div className="settings-action-row">
+                  <button className="primary-button compact" type="button" onClick={() => void handleMigrateArduinoLibraries()} disabled={busyAction === 'migrate-libraries'}>
+                    <Download size={15} /> {busyAction === 'migrate-libraries' ? 'Migrating...' : 'Migrate libraries'}
+                  </button>
+                </div>
+
+                {libraryMigrationProgress ? (
+                  <div className="arduino-migration-progress">
+                    <div>
+                      <strong>{libraryMigrationProgress.phase}</strong>
+                      <span>{libraryMigrationProgress.message}</span>
+                    </div>
+                    <div className="arduino-progress-track" aria-label="Library migration progress">
+                      <span style={{ width: `${Math.max(0, Math.min(100, libraryMigrationProgress.progress ?? 0))}%` }} />
+                    </div>
+                  </div>
+                ) : null}
+
+                {libraryMigrationError ? <div className="inline-banner inline-banner-error arduino-inline-banner">{libraryMigrationError}</div> : null}
+                {libraryMigrationMessage ? <div className="inline-banner inline-banner-success arduino-inline-banner">{libraryMigrationMessage}</div> : null}
+
+                {libraryMigrationResult ? (
+                  <div className="arduino-migration-summary">
+                    <div>
+                      <span>Source</span>
+                      <code>{libraryMigrationResult.sourceLibrariesDir}</code>
+                    </div>
+                    <div>
+                      <span>Target</span>
+                      <code>{libraryMigrationResult.targetLibrariesDir}</code>
+                    </div>
+                    {libraryMigrationResult.failed.slice(0, 3).map((entry) => (
+                      <div key={`${entry.sourcePath}-${entry.name}`}>
+                        <span>{entry.name}</span>
+                        <small>{entry.reason}</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </section>
             </div>
           </div>

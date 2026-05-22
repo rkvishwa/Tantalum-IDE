@@ -52,6 +52,7 @@ function getRendererCloudConfig() {
     deviceGatewayFunctionId: deriveFunctionId(appwriteManifest, 'device-gateway'),
     agentSettingsFunctionId: deriveFunctionId(appwriteManifest, 'agent-settings'),
     agentGatewayFunctionId: deriveFunctionId(appwriteManifest, 'agent-gateway'),
+    boardDetectionFunctionId: deriveFunctionId(appwriteManifest, 'board-detection'),
   };
 }
 
