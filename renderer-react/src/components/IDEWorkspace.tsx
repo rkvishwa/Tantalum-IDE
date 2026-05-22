@@ -1,7 +1,7 @@
 import '@knurdz/jack-file-tree/keyboard-shield';
 
 import { startTransition, useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent as ReactWheelEvent } from 'react';
 import type { Models } from 'appwrite';
 import {
   EditorTabs,
@@ -13,6 +13,7 @@ import {
 import {
   FileTree,
   type FileTreeContextMenuActionId,
+  type FileTreeContextMenuActionItem,
   type FileTreeContextMenuRenderProps,
   type FileTreeFsAdapter,
   type FileTreeHeaderActionRenderProps,
@@ -52,6 +53,7 @@ import {
   Star,
   TerminalSquare,
   Trash2,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import type { editor } from 'monaco-editor';
@@ -78,11 +80,11 @@ import {
   parentPath,
   sha256Hex,
 } from '@/lib/utils';
-import type { GitStatus, MenuAction, ProjectFolder, WorkspaceReplaceChangedFile, WorkspaceSearchResult } from '@/types/electron';
+import type { FileTreeNativeContextMenuRequest, GitStatus, MenuAction, ProjectFolder, WorkspaceReplaceChangedFile, WorkspaceSearchResult } from '@/types/electron';
 import type { AgentChangePreview } from '@/types/electron';
 
 import { ConsoleTerminal } from './ConsoleTerminal';
-import { AgentPanel, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
+import { AgentPanel, type AgentEditorSelectionContext, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
 import { GitHistoryPanel, GitSourceControlPanel, GitWorkspace } from './GitWorkspace';
 import { useGitWorkspaceController } from './useGitWorkspaceController';
 import { Modal } from './Modal';
@@ -134,6 +136,30 @@ type FileTab = EditorTabItem & {
   agentPreview?: AgentPreviewState;
 };
 
+type StoredWorkspaceEditorTab = {
+  id: string;
+  path: string;
+  name: string;
+  content: string;
+  savedContent: string;
+  fileState: FileTabState;
+  isDirty: boolean;
+  isDeleted?: boolean;
+  isPreviewFile?: boolean;
+  type?: EditorTabItem['type'];
+  extension?: string;
+  iconKey?: string;
+  title?: string;
+  agentPreview?: AgentPreviewState;
+};
+
+type StoredWorkspaceEditorTabsState = {
+  version: 1;
+  activeTabId: string | null;
+  tabs: StoredWorkspaceEditorTab[];
+  updatedAt: string;
+};
+
 function getFileTabSavedContent(tab: FileTab) {
   return typeof tab.savedContent === 'string' ? tab.savedContent : tab.content;
 }
@@ -175,6 +201,10 @@ type Toast = {
   id: number;
   tone: 'info' | 'success' | 'error';
   message: string;
+  actions?: Array<{
+    label: string;
+    onSelect: () => void;
+  }>;
 };
 
 type BoardPlatform = {
@@ -201,6 +231,9 @@ type LibraryEntry = {
 
 const DEFAULT_MANAGER_RESULT_LIMIT = 20;
 const MANAGER_LOAD_TIMEOUT_MS = 8000;
+const EDITOR_TAB_WHEEL_LINE_DELTA = 1;
+const EDITOR_TAB_WHEEL_PAGE_DELTA = 2;
+const EDITOR_TAB_SCROLL_MARGIN = 8;
 
 const FALLBACK_LIBRARY_RESULTS: LibraryEntry[] = [
   { name: 'ArduinoJson', version: 'latest', sentence: 'JSON serialization and parsing for embedded projects.', author: 'Benoit Blanchon', category: 'Data Processing' },
@@ -349,6 +382,8 @@ void loop() {
 
 const FILE_TREE_INTERNAL_TRASH_DIR = '.tantalum-file-tree-trash';
 const AGENT_LIVE_REVIEW_STORAGE_PREFIX = 'tantalum-agent-live-review:';
+const WORKSPACE_EDITOR_TABS_STORAGE_PREFIX = 'tantalum-workspace-editor-tabs:';
+const WORKSPACE_EDITOR_TABS_STORAGE_VERSION = 1;
 
 const FILE_TREE_THEME: FileTreeTheme = {
   backgroundPrimary: 'var(--chrome-panel-bg)',
@@ -406,6 +441,191 @@ function writeStoredAgentReview(workspacePath: string, review: AgentPendingRevie
   } catch {
     // Persistence is best-effort; the in-memory review state still works.
   }
+}
+
+function normalizeWorkspaceEditorStoragePath(workspacePath: string) {
+  return workspacePath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function workspaceEditorTabsStorageKey(workspacePath: string) {
+  return `${WORKSPACE_EDITOR_TABS_STORAGE_PREFIX}${encodeURIComponent(normalizeWorkspaceEditorStoragePath(workspacePath))}`;
+}
+
+function areSameWorkspaceEditorStoragePath(leftPath: string, rightPath: string) {
+  return normalizeWorkspaceEditorStoragePath(leftPath) === normalizeWorkspaceEditorStoragePath(rightPath);
+}
+
+function isStoredTabPathInsideWorkspace(tabPath: string, workspacePath: string) {
+  if (tabPath.startsWith('untitled:')) {
+    return true;
+  }
+
+  const normalizedTabPath = normalizeWorkspaceEditorStoragePath(tabPath);
+  const normalizedWorkspacePath = normalizeWorkspaceEditorStoragePath(workspacePath);
+
+  return normalizedTabPath === normalizedWorkspacePath || normalizedTabPath.startsWith(`${normalizedWorkspacePath}/`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStoredFileTabState(value: unknown): value is FileTabState {
+  return value === 'temporary' || value === 'preview' || value === 'saved';
+}
+
+function isStoredEditorTabType(value: unknown): value is NonNullable<EditorTabItem['type']> {
+  return value === 'file' || value === 'preview' || value === 'image';
+}
+
+function isStoredAgentChangeType(value: unknown): value is AgentChangePreview['changeType'] {
+  return value === 'create' || value === 'update' || value === 'delete';
+}
+
+function readStoredAgentPreview(value: unknown): AgentPreviewState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  if (
+    typeof value.reviewId !== 'string' ||
+    !isStoredAgentChangeType(value.changeType) ||
+    typeof value.originalContent !== 'string' ||
+    typeof value.nextContent !== 'string' ||
+    typeof value.wasOpen !== 'boolean'
+  ) {
+    return undefined;
+  }
+
+  return {
+    reviewId: value.reviewId,
+    changeType: value.changeType,
+    originalContent: value.originalContent,
+    nextContent: value.nextContent,
+    wasOpen: value.wasOpen,
+  };
+}
+
+function readStoredWorkspaceEditorTab(value: unknown, workspacePath: string): FileTab | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  if (
+    typeof value.id !== 'string' ||
+    typeof value.path !== 'string' ||
+    typeof value.name !== 'string' ||
+    typeof value.content !== 'string' ||
+    typeof value.savedContent !== 'string' ||
+    !isStoredFileTabState(value.fileState)
+  ) {
+    return null;
+  }
+
+  if (!isStoredTabPathInsideWorkspace(value.path, workspacePath)) {
+    return null;
+  }
+
+  return syncFileTabDirtyState({
+    id: value.id,
+    path: value.path,
+    name: value.name,
+    content: value.content,
+    savedContent: value.savedContent,
+    fileState: value.fileState,
+    isDirty: typeof value.isDirty === 'boolean' ? value.isDirty : value.fileState === 'temporary' || value.content !== value.savedContent,
+    isDeleted: typeof value.isDeleted === 'boolean' ? value.isDeleted : undefined,
+    isPreviewFile: typeof value.isPreviewFile === 'boolean' ? value.isPreviewFile : value.fileState === 'preview',
+    type: isStoredEditorTabType(value.type) ? value.type : 'file',
+    extension: typeof value.extension === 'string' ? value.extension : undefined,
+    iconKey: typeof value.iconKey === 'string' ? value.iconKey : undefined,
+    title: typeof value.title === 'string' ? value.title : undefined,
+    agentPreview: readStoredAgentPreview(value.agentPreview),
+  });
+}
+
+function serializeWorkspaceEditorTab(tab: FileTab): StoredWorkspaceEditorTab {
+  const syncedTab = syncFileTabDirtyState(tab);
+
+  return {
+    id: syncedTab.id,
+    path: syncedTab.path,
+    name: syncedTab.name,
+    content: syncedTab.content,
+    savedContent: syncedTab.savedContent,
+    fileState: syncedTab.fileState,
+    isDirty: Boolean(syncedTab.isDirty),
+    isDeleted: syncedTab.isDeleted,
+    isPreviewFile: syncedTab.isPreviewFile,
+    type: syncedTab.type,
+    extension: syncedTab.extension,
+    iconKey: syncedTab.iconKey,
+    title: syncedTab.title,
+    agentPreview: syncedTab.agentPreview,
+  };
+}
+
+function readStoredWorkspaceEditorTabs(workspacePath: string) {
+  try {
+    const raw = localStorage.getItem(workspaceEditorTabsStorageKey(workspacePath));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed) || parsed.version !== WORKSPACE_EDITOR_TABS_STORAGE_VERSION || !Array.isArray(parsed.tabs)) {
+      return null;
+    }
+
+    const tabs = parsed.tabs
+      .map((tab) => readStoredWorkspaceEditorTab(tab, workspacePath))
+      .filter((tab): tab is FileTab => Boolean(tab));
+    const activeTabId = typeof parsed.activeTabId === 'string' && tabs.some((tab) => tab.id === parsed.activeTabId)
+      ? parsed.activeTabId
+      : null;
+
+    return { tabs, activeTabId };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredWorkspaceEditorTabs(workspacePath: string, tabs: FileTab[], activeTabId: string | null) {
+  try {
+    const storableTabs = tabs
+      .map(syncFileTabDirtyState)
+      .filter((tab) => isStoredTabPathInsideWorkspace(tab.path, workspacePath));
+    const state: StoredWorkspaceEditorTabsState = {
+      version: WORKSPACE_EDITOR_TABS_STORAGE_VERSION,
+      activeTabId: activeTabId && storableTabs.some((tab) => tab.id === activeTabId) ? activeTabId : null,
+      tabs: storableTabs.map(serializeWorkspaceEditorTab),
+      updatedAt: new Date().toISOString(),
+    };
+
+    localStorage.setItem(workspaceEditorTabsStorageKey(workspacePath), JSON.stringify(state));
+  } catch {
+    // Tab persistence is best-effort; the active editor state still remains in memory.
+  }
+}
+
+function stripFileTabAgentPreview(tab: FileTab): FileTab {
+  if (!tab.agentPreview) {
+    return tab;
+  }
+
+  return {
+    ...tab,
+    agentPreview: undefined,
+    isDeleted: false,
+  };
+}
+
+function sanitizeRestoredEditorTabs(tabs: FileTab[], review: AgentPendingReview | null) {
+  if (!review) {
+    return tabs.map(stripFileTabAgentPreview);
+  }
+
+  return tabs.map((tab) => (tab.agentPreview?.reviewId === review.id ? tab : stripFileTabAgentPreview(tab)));
 }
 
 async function validateStoredAgentReview(workspacePath: string, review: AgentPendingReview | null) {
@@ -511,6 +731,30 @@ function renderFileTreeMoreMenuItems(actions: FileTreeMoreAction[]) {
   ));
 }
 
+function renderFileTreeHeaderExtraActions(actions: FileTreeMoreAction[]) {
+  return actions.map((action) => (
+    <button
+      aria-label={action.label}
+      aria-pressed={action.active}
+      className={`sft-tree-action-btn workspace-tree-action-btn ${action.active ? 'active' : ''}`.trim()}
+      disabled={action.disabled}
+      key={action.id}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (action.disabled) {
+          return;
+        }
+
+        action.onSelect();
+      }}
+      title={action.label}
+      type="button"
+    >
+      {action.icon}
+    </button>
+  ));
+}
+
 function renderFileTreeHeaderMoreAction(action: FileTreeHeaderActionRenderProps): FileTreeMoreAction {
   const Icon = getFileTreeHeaderActionIcon(action);
 
@@ -526,6 +770,7 @@ function renderFileTreeHeaderMoreAction(action: FileTreeHeaderActionRenderProps)
 function renderCompactFileTreeHeader(
   { actions, actionsClassName, actionsStyle, className, title, titleClassName, workspaceRoot }: FileTreeHeaderRenderProps,
   moreMenu?: ReactNode,
+  leadingActions: FileTreeMoreAction[] = [],
 ) {
   const primaryActions = actions.filter((action) => action.id === 'new-file' || action.id === 'new-folder');
 
@@ -533,6 +778,7 @@ function renderCompactFileTreeHeader(
     <div className={`${className} workspace-tree-header-compact`} title={workspaceRoot ?? title}>
       <span className={titleClassName}>{title}</span>
       <div className={`${actionsClassName} workspace-tree-header-actions`} style={actionsStyle}>
+        {renderFileTreeHeaderExtraActions(leadingActions)}
         {renderFileTreeHeaderActions(primaryActions)}
         {moreMenu}
       </div>
@@ -540,7 +786,118 @@ function renderCompactFileTreeHeader(
   );
 }
 
-function renderFileTreeContextMenu({ groups, closeMenu }: FileTreeContextMenuRenderProps) {
+type NativeFileTreeContextMenuRequestState = {
+  promise: ReturnType<Window['tantalum']['fileTree']['showContextMenu']>;
+  handled: boolean;
+};
+
+const nativeFileTreeContextMenuRequests = new Map<string, NativeFileTreeContextMenuRequestState>();
+
+function createNativeFileTreeContextMenuPayload({ groups, position }: FileTreeContextMenuRenderProps) {
+  const actionMap = new Map<string, FileTreeContextMenuActionItem>();
+  const nativeGroups = groups
+    .map((group, groupIndex) =>
+      group
+        .filter(Boolean)
+        .map((action, actionIndex) => {
+          const key = `${groupIndex}:${actionIndex}:${action.id}`;
+          actionMap.set(key, action);
+
+          return {
+            key,
+            id: action.id,
+            label: action.label,
+            shortcut: action.shortcut,
+            disabled: action.disabled,
+            danger: action.danger,
+          };
+        }),
+    )
+    .filter((group) => group.length > 0);
+
+  return {
+    actionMap,
+    payload: {
+      position,
+      groups: nativeGroups,
+    } satisfies FileTreeNativeContextMenuRequest,
+  };
+}
+
+function createNativeFileTreeContextMenuRequestKey(payload: FileTreeNativeContextMenuRequest) {
+  return JSON.stringify({
+    x: Math.round(payload.position.x),
+    y: Math.round(payload.position.y),
+    groups: payload.groups.map((group) => group.map((action) => [action.key, action.id, action.label, Boolean(action.disabled)])),
+  });
+}
+
+function getNativeFileTreeContextMenuRequest(payload: FileTreeNativeContextMenuRequest) {
+  const key = createNativeFileTreeContextMenuRequestKey(payload);
+  const existing = nativeFileTreeContextMenuRequests.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const request: NativeFileTreeContextMenuRequestState = {
+    promise: window.tantalum.fileTree.showContextMenu(payload),
+    handled: false,
+  };
+
+  nativeFileTreeContextMenuRequests.set(key, request);
+  void request.promise.finally(() => {
+    window.setTimeout(() => {
+      if (nativeFileTreeContextMenuRequests.get(key) === request) {
+        nativeFileTreeContextMenuRequests.delete(key);
+      }
+    }, 0);
+  });
+
+  return request;
+}
+
+function NativeFileTreeContextMenu(props: FileTreeContextMenuRenderProps) {
+  const { actionMap, payload } = useMemo(() => createNativeFileTreeContextMenuPayload(props), [props]);
+
+  useEffect(() => {
+    const request = getNativeFileTreeContextMenuRequest(payload);
+
+    void request.promise
+      .then(async (result) => {
+        if (request.handled) {
+          return;
+        }
+
+        request.handled = true;
+        if (!result.success) {
+          props.closeMenu();
+          return;
+        }
+
+        const selectedAction = result.actionKey ? actionMap.get(result.actionKey) : null;
+        if (!selectedAction || selectedAction.disabled) {
+          props.closeMenu();
+          return;
+        }
+
+        try {
+          await selectedAction.onSelect();
+        } finally {
+          props.closeMenu();
+        }
+      })
+      .catch(() => {
+        if (!request.handled) {
+          request.handled = true;
+          props.closeMenu();
+        }
+      });
+  }, [actionMap, payload, props]);
+
+  return null;
+}
+
+function renderInlineFileTreeContextMenu({ groups, closeMenu }: FileTreeContextMenuRenderProps) {
   const visibleGroups = groups.map((group) => group.filter(Boolean)).filter((group) => group.length > 0);
 
   return (
@@ -585,10 +942,84 @@ function renderFileTreeContextMenu({ groups, closeMenu }: FileTreeContextMenuRen
   );
 }
 
+function renderFileTreeContextMenu(props: FileTreeContextMenuRenderProps) {
+  if (typeof window !== 'undefined' && typeof window.tantalum?.fileTree?.showContextMenu === 'function') {
+    return <NativeFileTreeContextMenu {...props} />;
+  }
+
+  return renderInlineFileTreeContextMenu(props);
+}
+
 let untitledTabCounter = 0;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function getEditorTabWheelDelta(event: ReactWheelEvent<HTMLElement>, tabBar: HTMLElement) {
+  const rawDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+
+  if (event.deltaMode === EDITOR_TAB_WHEEL_LINE_DELTA) {
+    return rawDelta * 32;
+  }
+
+  if (event.deltaMode === EDITOR_TAB_WHEEL_PAGE_DELTA) {
+    return rawDelta * tabBar.clientWidth;
+  }
+
+  return rawDelta;
+}
+
+function handleEditorTabsWheel(event: ReactWheelEvent<HTMLDivElement>) {
+  if (event.ctrlKey) {
+    return;
+  }
+
+  const target = event.target instanceof Element ? event.target : null;
+  const tabBar = target?.closest<HTMLElement>('.jet-editor-tabs-bar') ?? null;
+
+  if (!tabBar || tabBar.scrollWidth <= tabBar.clientWidth) {
+    return;
+  }
+
+  const delta = getEditorTabWheelDelta(event, tabBar);
+
+  if (delta === 0) {
+    return;
+  }
+
+  const maxScrollLeft = tabBar.scrollWidth - tabBar.clientWidth;
+  const nextScrollLeft = clamp(tabBar.scrollLeft + delta, 0, maxScrollLeft);
+
+  if (nextScrollLeft === tabBar.scrollLeft) {
+    return;
+  }
+
+  tabBar.scrollLeft = nextScrollLeft;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function scrollActiveEditorTabIntoView(root: HTMLDivElement | null) {
+  const tabBar = root?.querySelector<HTMLElement>('.jet-editor-tabs-bar') ?? null;
+  const activeTabElement = tabBar?.querySelector<HTMLElement>('.jet-editor-tab[data-active="true"]') ?? null;
+
+  if (!tabBar || !activeTabElement || tabBar.scrollWidth <= tabBar.clientWidth) {
+    return;
+  }
+
+  const tabBarRect = tabBar.getBoundingClientRect();
+  const activeTabRect = activeTabElement.getBoundingClientRect();
+  let nextScrollLeft = tabBar.scrollLeft;
+
+  if (activeTabRect.left < tabBarRect.left + EDITOR_TAB_SCROLL_MARGIN) {
+    nextScrollLeft -= tabBarRect.left + EDITOR_TAB_SCROLL_MARGIN - activeTabRect.left;
+  } else if (activeTabRect.right > tabBarRect.right - EDITOR_TAB_SCROLL_MARGIN) {
+    nextScrollLeft += activeTabRect.right - (tabBarRect.right - EDITOR_TAB_SCROLL_MARGIN);
+  }
+
+  const maxScrollLeft = tabBar.scrollWidth - tabBar.clientWidth;
+  tabBar.scrollLeft = clamp(nextScrollLeft, 0, maxScrollLeft);
 }
 
 function getPanelMaxSize(panel: ResizablePanel, sizes: PanelSizes) {
@@ -875,6 +1306,7 @@ export function IDEWorkspace({
   const [tabs, setTabs] = useState<FileTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [editorValue, setEditorValue] = useState('');
+  const [activeEditorSelection, setActiveEditorSelection] = useState<AgentEditorSelectionContext | null>(null);
   const [editorReady, setEditorReady] = useState(false);
   const [pendingAgentReview, setPendingAgentReview] = useState<AgentPendingReview | null>(null);
   const [resolvingAgentReview, setResolvingAgentReview] = useState(false);
@@ -944,6 +1376,8 @@ export function IDEWorkspace({
   );
   const syncedTabs = useMemo(() => tabs.map(syncFileTabDirtyState), [tabs]);
   const activeTab = syncedTabs.find((tab) => tab.id === activeTabId) ?? syncedTabs[0] ?? null;
+  const activeTabScrollId = activeTab?.id ?? null;
+  const activeTabScrollPath = activeTab?.path ?? null;
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
   const selectedProject = projectFolders.find((project) => project.id === selectedProjectId) ?? projectFolders[0] ?? null;
   const currentWorkspaceProject = useMemo(() => {
@@ -979,10 +1413,13 @@ export function IDEWorkspace({
   }, [deferredProjectQuery, projectFolders, projectSortMode]);
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
+  const editorSelectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const agentDiffDecorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
   const agentDiffViewZoneIdsRef = useRef<string[]>([]);
   const tabsRef = useRef<FileTab[]>(tabs);
   const activeTabIdRef = useRef<string | null>(activeTabId);
+  const editorTabsScrollHostRef = useRef<HTMLDivElement | null>(null);
+  const workspacePathRef = useRef<string | null>(workspacePath);
   const editorValueRef = useRef(editorValue);
   const workspaceActiveRef = useRef(active);
   const saveInProgressRef = useRef(false);
@@ -1013,6 +1450,47 @@ export function IDEWorkspace({
     () => syncedTabs.filter((tab) => !tab.path.startsWith('untitled:') && tab.isDirty).map((tab) => tab.path),
     [syncedTabs],
   );
+  const readActiveEditorSelection = useCallback((): AgentEditorSelectionContext | null => {
+    const editorInstance = editorRef.current;
+    const model = editorInstance?.getModel() ?? null;
+    const selectedRange = editorInstance?.getSelection() ?? null;
+    const currentTab =
+      (activeTabIdRef.current ? tabsRef.current.find((tab) => tab.id === activeTabIdRef.current) : null) ??
+      tabsRef.current[0] ??
+      null;
+
+    if (!editorInstance || !model || !selectedRange || !currentTab || currentTab.path.startsWith('untitled:') || currentTab.agentPreview) {
+      return null;
+    }
+
+    if (selectedRange.startLineNumber === selectedRange.endLineNumber && selectedRange.startColumn === selectedRange.endColumn) {
+      return null;
+    }
+
+    const lineStart = Math.max(1, Math.min(selectedRange.startLineNumber, selectedRange.endLineNumber));
+    const lineEnd = Math.min(model.getLineCount(), Math.max(selectedRange.startLineNumber, selectedRange.endLineNumber));
+    const content = model.getValueInRange({
+      startLineNumber: lineStart,
+      startColumn: 1,
+      endLineNumber: lineEnd,
+      endColumn: model.getLineMaxColumn(lineEnd),
+    });
+
+    if (!content.trim()) {
+      return null;
+    }
+
+    return {
+      path: currentTab.path,
+      name: currentTab.name,
+      content,
+      lineStart,
+      lineEnd,
+    };
+  }, []);
+  const refreshActiveEditorSelection = useCallback(() => {
+    setActiveEditorSelection(readActiveEditorSelection());
+  }, [readActiveEditorSelection]);
   const fileTreeTheme = useMemo<FileTreeTheme>(
     () => ({
       ...FILE_TREE_THEME,
@@ -1034,6 +1512,26 @@ export function IDEWorkspace({
 
     writeStoredAgentReview(workspacePath, pendingAgentReview);
   }, [pendingAgentReview, workspacePath]);
+
+  useEffect(() => {
+    if (!activeTabScrollId || !activeTabScrollPath || sidebar !== 'explorer' || typeof window === 'undefined') {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      scrollActiveEditorTabIntoView(editorTabsScrollHostRef.current);
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeTabScrollId, activeTabScrollPath, sidebar, syncedTabs.length]);
+
+  useEffect(() => {
+    if (!workspacePath) {
+      return;
+    }
+
+    writeStoredWorkspaceEditorTabs(workspacePath, syncedTabs, activeTabId);
+  }, [activeTabId, syncedTabs, workspacePath]);
 
   useEffect(() => {
     if (projectFolders.length === 0) {
@@ -1060,6 +1558,56 @@ export function IDEWorkspace({
     }
 
     activateTab(nextTab);
+  }
+
+  function applyEditorTabState(nextTabs: FileTab[], preferredActiveTabId: string | null) {
+    const syncedNextTabs = nextTabs.map(syncFileTabDirtyState);
+    const preferredTab = preferredActiveTabId ? syncedNextTabs.find((tab) => tab.id === preferredActiveTabId) ?? null : null;
+    const nextActiveTab = preferredTab ?? syncedNextTabs[0] ?? null;
+    const nextActiveTabId = nextActiveTab?.id ?? null;
+    const nextEditorValue = nextActiveTab?.content ?? '';
+
+    tabsRef.current = syncedNextTabs;
+    activeTabIdRef.current = nextActiveTabId;
+    editorValueRef.current = nextEditorValue;
+    setTabs(syncedNextTabs);
+    setActiveTabId(nextActiveTabId);
+    setEditorValue(nextEditorValue);
+  }
+
+  function snapshotCurrentWorkspaceEditorTabs() {
+    const currentWorkspacePath = workspacePathRef.current;
+    if (!currentWorkspacePath) {
+      return;
+    }
+
+    writeStoredWorkspaceEditorTabs(currentWorkspacePath, tabsRef.current, activeTabIdRef.current);
+  }
+
+  function getUnsavedEditorTabs() {
+    return tabsRef.current.map(syncFileTabDirtyState).filter((tab) => Boolean(tab.isDirty));
+  }
+
+  function confirmWorkspaceSwitch(targetWorkspacePath: string) {
+    const currentWorkspacePath = workspacePathRef.current;
+    if (currentWorkspacePath && areSameWorkspaceEditorStoragePath(currentWorkspacePath, targetWorkspacePath)) {
+      return true;
+    }
+
+    const unsavedTabs = getUnsavedEditorTabs();
+    if (unsavedTabs.length > 0) {
+      const tabLabel = unsavedTabs.length === 1 ? 'tab has' : 'tabs have';
+      const message = currentWorkspacePath
+        ? `Switch workspaces? ${unsavedTabs.length} unsaved ${tabLabel} changes. They will be kept with ${fileNameFromPath(currentWorkspacePath)} and restored when you reopen it.`
+        : `Open workspace? ${unsavedTabs.length} unsaved ${tabLabel} changes outside a workspace. They will be closed if you continue.`;
+
+      if (!window.confirm(message)) {
+        return false;
+      }
+    }
+
+    snapshotCurrentWorkspaceEditorTabs();
+    return true;
   }
 
   function openConsolePanel(nextView?: ConsoleView) {
@@ -1183,11 +1731,15 @@ export function IDEWorkspace({
     ]);
   }
 
-  function pushToast(message: string, tone: Toast['tone'] = 'info') {
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function pushToast(message: string, tone: Toast['tone'] = 'info', actions?: Toast['actions']) {
     const id = toastCounterRef.current++;
-    setToasts((current) => [...current, { id, tone, message }]);
+    setToasts((current) => [...current, { id, tone, message, actions }]);
     window.setTimeout(() => {
-      setToasts((current) => current.filter((toast) => toast.id !== id));
+      dismissToast(id);
     }, 4000);
   }
 
@@ -1567,28 +2119,43 @@ export function IDEWorkspace({
   }
 
   async function openWorkspace(folderPath: string) {
+    const previousWorkspacePath = workspacePathRef.current;
+    const maySwitchWorkspace = !previousWorkspacePath || !areSameWorkspaceEditorStoragePath(previousWorkspacePath, folderPath);
+    if (maySwitchWorkspace && !confirmWorkspaceSwitch(folderPath)) {
+      return false;
+    }
+
     const result = await window.tantalum.fs.setWorkspace(folderPath);
     if (!result.success) {
       pushToast(result.error, 'error');
-      return;
+      return false;
+    }
+
+    const didSwitchWorkspace = !previousWorkspacePath || !areSameWorkspaceEditorStoragePath(previousWorkspacePath, result.path);
+    const storedReview = readStoredAgentReview(result.path);
+    const validReview = storedReview ? await validateStoredAgentReview(result.path, storedReview) : null;
+    if (storedReview && !validReview) {
+      writeStoredAgentReview(result.path, null);
     }
 
     treeTrashMap.clear();
+    workspacePathRef.current = result.path;
     setWorkspacePath(result.path);
-    const storedReview = readStoredAgentReview(result.path);
-    setPendingAgentReview(storedReview);
-    if (storedReview) {
-      void validateStoredAgentReview(result.path, storedReview).then((validReview) => {
-        if (!validReview) {
-          writeStoredAgentReview(result.path, null);
-        }
-        setPendingAgentReview(validReview);
-      });
+    setPendingAgentReview(validReview);
+
+    if (didSwitchWorkspace) {
+      const storedEditorState = readStoredWorkspaceEditorTabs(result.path);
+      applyEditorTabState(
+        sanitizeRestoredEditorTabs(storedEditorState?.tabs ?? [], validReview),
+        storedEditorState?.activeTabId ?? null,
+      );
     }
+
     refreshFileTree();
     void refreshGitChangeIndicator(result.path);
     pushConsole(`Opened workspace: ${result.path}`, 'success');
     void clearInternalTrash(result.path);
+    return true;
   }
 
   async function openFolderPicker() {
@@ -1770,7 +2337,11 @@ export function IDEWorkspace({
       return;
     }
 
-    await openWorkspace(project.path);
+    const opened = await openWorkspace(project.path);
+    if (!opened) {
+      return;
+    }
+
     await refreshProjectFolders(project.id);
     setSidebar('explorer');
   }
@@ -1781,7 +2352,11 @@ export function IDEWorkspace({
       return;
     }
 
-    await openWorkspace(project.path);
+    const opened = await openWorkspace(project.path);
+    if (!opened) {
+      return;
+    }
+
     await openFile(filePath, options);
     await refreshProjectFolders(project.id);
     setSidebar('explorer');
@@ -1979,7 +2554,7 @@ export function IDEWorkspace({
 
   async function openFile(filePath: string, options?: { preview?: boolean }) {
     const shouldPreview = options?.preview ?? true;
-    const existing = tabs.find((tab) => tab.path === filePath);
+    const existing = tabsRef.current.find((tab) => isSameFileTabPath(tab.path, filePath));
     if (existing) {
       if (!shouldPreview && existing.isPreviewFile) {
         const pinnedTab: FileTab = {
@@ -2026,7 +2601,10 @@ export function IDEWorkspace({
 
   async function openFileWithWorkspace(filePath: string) {
     if (!workspacePath || !isPathInsideRoot(filePath, workspacePath)) {
-      await openWorkspace(parentPath(filePath));
+      const opened = await openWorkspace(parentPath(filePath));
+      if (!opened) {
+        return;
+      }
     }
 
     await openFile(filePath, { preview: false });
@@ -2843,6 +3421,7 @@ export function IDEWorkspace({
       content,
       savedContent: content,
       isDirty: false,
+      isDeleted: change.changeType === 'delete',
       isPreviewFile: false,
       type: 'file' as const,
       fileState: 'saved',
@@ -2871,6 +3450,52 @@ export function IDEWorkspace({
     activateTab(previewTab);
   }
 
+  function getPreferredAgentPreviewChange(reviewFiles: AgentChangePreview[], incomingFiles: AgentChangePreview[]) {
+    const incomingPaths = new Set(incomingFiles.map((file) => normalizeFileTabPath(file.path)));
+    const incomingReviewFiles = reviewFiles.filter((file) => incomingPaths.has(normalizeFileTabPath(file.path)));
+
+    return (
+      incomingReviewFiles.find((file) => file.changeType !== 'delete') ??
+      incomingReviewFiles[0] ??
+      reviewFiles.find((file) => file.changeType !== 'delete') ??
+      reviewFiles[0] ??
+      null
+    );
+  }
+
+  function openAgentReviewFilesInEditor(review: AgentPendingReview, incomingFiles: AgentChangePreview[]) {
+    const preferredChange = getPreferredAgentPreviewChange(review.files, incomingFiles);
+    if (!preferredChange) {
+      return;
+    }
+
+    const incomingPaths = new Set(incomingFiles.map((file) => normalizeFileTabPath(file.path)));
+    const changesToOpen = review.files.filter((file) => incomingPaths.has(normalizeFileTabPath(file.path)) && file.changeType !== 'delete');
+    const visibleChanges = changesToOpen.length > 0 ? changesToOpen : [preferredChange];
+    let nextTabs = tabsRef.current;
+
+    setSidebar('explorer');
+
+    for (const change of visibleChanges) {
+      const filePath = getAgentChangeAbsolutePath(change);
+      const existingTab = nextTabs.find((tab) => isSameFileTabPath(tab.path, filePath)) ?? null;
+      const previewTab = makeAgentPreviewTab(change, review.id, existingTab);
+      nextTabs = existingTab
+        ? nextTabs.map((tab) => (isSameFileTabPath(tab.path, filePath) ? previewTab : tab))
+        : openEditorTab(nextTabs, previewTab, { isPreview: false });
+    }
+
+    const preferredPath = getAgentChangeAbsolutePath(preferredChange);
+    const activePreviewTab = nextTabs.find((tab) => isSameFileTabPath(tab.path, preferredPath)) ?? null;
+
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+
+    if (activePreviewTab) {
+      activateTab(activePreviewTab);
+    }
+  }
+
   function mergeAgentReviewFiles(currentFiles: AgentChangePreview[], incomingFiles: AgentChangePreview[]) {
     const fileMap = new Map(currentFiles.map((file) => [normalizeFileTabPath(file.path), file]));
 
@@ -2896,6 +3521,7 @@ export function IDEWorkspace({
         changeType: wasCreatedInReview ? 'create' : incoming.changeType === 'delete' ? 'delete' : 'update',
         originalContent,
         nextContent,
+        workspaceOriginalContent: existing?.workspaceOriginalContent ?? incoming.workspaceOriginalContent,
       });
     });
 
@@ -2958,9 +3584,7 @@ export function IDEWorkspace({
 
     setPendingAgentReview(nextReview);
     refreshAgentPreviewTabs(nextReview);
-    const preferredChange =
-      nextReview.files.find((file) => review.files.some((incoming) => normalizeFileTabPath(incoming.path) === normalizeFileTabPath(file.path))) ?? nextReview.files[0];
-    showAgentPreviewFile(preferredChange, nextReview.id);
+    openAgentReviewFilesInEditor(nextReview, review.files);
     pushToast(`${nextReview.files.length} Tantalum AI ${nextReview.files.length === 1 ? 'change' : 'changes'} applied. Keep or revert them in the editor.`, 'info');
   }
 
@@ -3105,6 +3729,7 @@ export function IDEWorkspace({
           content,
           savedContent: content,
           isDirty: false,
+          isDeleted: false,
           agentPreview: undefined,
           fileState: 'saved' as FileTabState,
           type: 'file' as const,
@@ -3370,6 +3995,10 @@ export function IDEWorkspace({
   }, [active]);
 
   useEffect(() => {
+    workspacePathRef.current = workspacePath;
+  }, [workspacePath]);
+
+  useEffect(() => {
     tabsRef.current = syncedTabs;
   }, [syncedTabs]);
 
@@ -3380,6 +4009,15 @@ export function IDEWorkspace({
   useEffect(() => {
     editorValueRef.current = editorValue;
   }, [editorValue]);
+
+  useEffect(() => () => {
+    editorSelectionDisposableRef.current?.dispose();
+    editorSelectionDisposableRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    refreshActiveEditorSelection();
+  }, [activeTab?.agentPreview, activeTab?.path, editorReady, editorValue, refreshActiveEditorSelection]);
 
   useEffect(() => {
     if (!active || !uiPreferences.editorAutoSave) {
@@ -3641,8 +4279,13 @@ export function IDEWorkspace({
       wordWrap: uiPreferences.editorWordWrap,
     });
     updateArduinoCppDiagnostics(monaco, editorInstance.getModel(), activeEditorFilePath);
+    editorSelectionDisposableRef.current?.dispose();
+    editorSelectionDisposableRef.current = editorInstance.onDidChangeCursorSelection(() => {
+      refreshActiveEditorSelection();
+    });
     editorInstance.focus();
     setEditorReady(true);
+    window.requestAnimationFrame(refreshActiveEditorSelection);
   };
 
   function renderBoardDetails() {
@@ -4419,12 +5062,6 @@ export function IDEWorkspace({
                           disabled: !workspacePath || busyAction === 'add-current-project',
                         },
                         {
-                          id: 'open-folder',
-                          label: 'Open folder',
-                          icon: <FolderOpen aria-hidden="true" size={13} strokeWidth={1.85} />,
-                          onSelect: () => void openFolderPicker(),
-                        },
-                        {
                           id: 'refresh-explorer',
                           label: 'Refresh explorer',
                           icon: <RefreshCcw aria-hidden="true" size={13} strokeWidth={1.85} />,
@@ -4432,6 +5069,14 @@ export function IDEWorkspace({
                         },
                         ...headerProps.actions.filter((action) => action.id !== 'new-file' && action.id !== 'new-folder').map(renderFileTreeHeaderMoreAction),
                       ]),
+                      [
+                        {
+                          id: 'open-workspace',
+                          label: 'Open workspace',
+                          icon: <FolderOpen aria-hidden="true" size={14} strokeWidth={1.85} />,
+                          onSelect: () => void openFolderPicker(),
+                        },
+                      ],
                     )
                   }
                   showOpenFolderButton
@@ -4750,13 +5395,15 @@ export function IDEWorkspace({
         {sidebar === 'explorer' ? (
         <section className="editor-shell">
           {syncedTabs.length > 0 ? (
-            <EditorTabs
-              tabs={syncedTabs}
-              activeTabPath={activeTab?.path ?? null}
-              onTabClick={(path) => selectTabByPath(path)}
-              onTabClose={(path) => closeTab(path)}
-              onTabReorder={handleTabReorder}
-            />
+            <div ref={editorTabsScrollHostRef} className="editor-tabs-scroll-host" onWheelCapture={handleEditorTabsWheel}>
+              <EditorTabs
+                tabs={syncedTabs}
+                activeTabPath={activeTab?.path ?? null}
+                onTabClick={(path) => selectTabByPath(path)}
+                onTabClose={(path) => closeTab(path)}
+                onTabReorder={handleTabReorder}
+              />
+            </div>
           ) : null}
           <div className="editor-stage">
             {activeTab ? (
@@ -4910,13 +5557,13 @@ export function IDEWorkspace({
                   <strong>{pendingAgentReview.files.length} applied {pendingAgentReview.files.length === 1 ? 'change' : 'changes'}</strong>
                   {activeAgentChange ? <code>{activeAgentChange.path}</code> : null}
                 </div>
-                <div className="action-row">
-                  <button className="danger-button compact" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(false)}>
-                    Revert
-                  </button>
-                  <button className="primary-button compact" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(true)}>
+                <div className="agent-editor-review-actions">
+                  <button className="agent-editor-review-action accept" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(true)}>
                     {resolvingAgentReview ? <LoaderCircle size={14} className="spin" /> : null}
                     Keep
+                  </button>
+                  <button className="agent-editor-review-action decline" type="button" disabled={resolvingAgentReview} onClick={() => void resolvePendingAgentReview(false)}>
+                    Revert
                   </button>
                 </div>
               </div>
@@ -4950,6 +5597,8 @@ export function IDEWorkspace({
                 user={user}
                 workspacePath={workspacePath}
                 activeTab={activeTab && !activeTab.path.startsWith('untitled:') && !activeTab.agentPreview ? { path: activeTab.path, name: activeTab.name, content: editorValue, isDirty: Boolean(activeTab.isDirty) } : null}
+                activeSelection={activeEditorSelection}
+                boardContext={selectedBoard ? { name: selectedBoard.name, fqbn: selectedBoard.boardType } : null}
                 pushConsole={pushConsole}
                 pushToast={pushToast}
                 pendingReview={pendingAgentReview}
@@ -4961,6 +5610,11 @@ export function IDEWorkspace({
                   if (change && pendingAgentReview) {
                     showAgentPreviewFile(change, pendingAgentReview.id);
                   }
+                }}
+                onOpenContextFile={(filePath) => {
+                  void openFile(filePath, { preview: false }).then(() => {
+                    window.requestAnimationFrame(() => editorRef.current?.focus());
+                  });
                 }}
                 onResolveAgentChanges={resolvePendingAgentReview}
                 defaultView="chat"
@@ -5255,7 +5909,30 @@ export function IDEWorkspace({
       <div className="toast-stack">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast toast-${toast.tone}`}>
-            {toast.message}
+            <span className="toast-message">{toast.message}</span>
+            {toast.actions?.length ? (
+              <div className="toast-actions">
+                {toast.actions.map((action) => (
+                  <button
+                    key={action.label}
+                    className="toast-action-button"
+                    type="button"
+                    onClick={() => {
+                      try {
+                        action.onSelect();
+                      } finally {
+                        dismissToast(toast.id);
+                      }
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <button className="toast-close-button" type="button" onClick={() => dismissToast(toast.id)} aria-label="Close notification">
+              <X aria-hidden="true" size={20} strokeWidth={2.2} />
+            </button>
           </div>
         ))}
       </div>

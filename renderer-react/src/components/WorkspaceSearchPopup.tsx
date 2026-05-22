@@ -17,7 +17,11 @@ type WorkspaceSearchPopupProps = {
   onClose: () => void;
   onOpenResult: (result: WorkspaceSearchResult) => Promise<void> | void;
   onReplaceApplied: (changedFiles: WorkspaceReplaceChangedFile[]) => void;
-  onNotify: (message: string, level: 'success' | 'error' | 'info') => void;
+  onNotify: (
+    message: string,
+    level: 'success' | 'error' | 'info',
+    actions?: Array<{ label: string; onSelect: () => void }>,
+  ) => void;
 };
 
 type ReplacePreviewState = {

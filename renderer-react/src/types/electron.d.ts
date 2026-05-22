@@ -11,6 +11,28 @@ export type DirectoryItem = {
   extension: string | null;
 };
 
+export type FileTreeNativeContextMenuAction = {
+  key: string;
+  id: string;
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  danger?: boolean;
+};
+
+export type FileTreeNativeContextMenuRequest = {
+  position: {
+    x: number;
+    y: number;
+  };
+  groups: FileTreeNativeContextMenuAction[][];
+};
+
+export type FileTreeNativeContextMenuResponse = {
+  actionKey: string | null;
+  actionId: string | null;
+};
+
 export type WorkspaceSearchMode = 'all' | 'files' | 'folders' | 'text';
 
 export type WorkspaceSearchRequest = {
@@ -152,10 +174,11 @@ export type CloudConfig = {
   agentGatewayFunctionId: string;
 };
 
-export type AgentToolName = 'aider_apply';
-export type AgentRouteEngine = 'local' | 'direct_llm' | 'aider_ask' | 'aider_edit';
+export type AgentToolName = 'opencode_apply';
+export type AgentRouteEngine = 'local' | 'direct_llm' | 'opencode_ask' | 'opencode_edit';
 export type AgentReviewMode = 'live-applied' | 'none';
-export type AgentRunStageName = 'routing' | 'preparing_workspace' | 'running_direct_llm' | 'running_aider' | 'applying_changes';
+export type AgentPermissionMode = 'default' | 'bypass';
+export type AgentRunStageName = 'routing' | 'preparing_workspace' | 'running_direct_llm' | 'running_opencode' | 'applying_changes';
 export type PendingAgentActionStatus = 'pending' | 'approved' | 'running' | 'blocked' | 'skipped' | 'executed' | 'expired';
 export type AgentDecisionKind = 'approve_skip' | 'clarify' | 'none';
 export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'blocked' | 'skipped';
@@ -178,6 +201,13 @@ export type AgentTaskItem = {
   status: AgentTaskStatus;
   kind: string;
   targetPath?: string;
+  newPath?: string;
+  sourceExtension?: string;
+  targetExtension?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  contextItemId?: string;
+  instruction?: string;
   result?: string;
   error?: string;
 };
@@ -190,11 +220,90 @@ export type AgentTaskList = {
   updatedAt: string;
 };
 
+export type AgentCompletedTaskReferenceItem = {
+  kind: string;
+  title: string;
+  targetPath?: string;
+  newPath?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  instruction?: string;
+  result?: string;
+};
+
+export type AgentCompletedTaskReference = {
+  taskListId: string;
+  actionId: string | null;
+  completedAt: string;
+  items: AgentCompletedTaskReferenceItem[];
+};
+
+export type AgentThreadFileReference = {
+  path: string;
+  previousPath?: string;
+  name: string;
+  aliases: string[];
+  source: 'task' | 'context';
+  lastAction: 'created' | 'edited' | 'renamed' | 'deleted' | 'attached';
+  expectedExists: boolean;
+  updatedAt: string;
+};
+
+export type AgentThreadMemory = {
+  files: AgentThreadFileReference[];
+  updatedAt?: string;
+};
+
+export type AgentActivityStatus = 'running' | 'completed' | 'blocked' | 'error';
+
+export type AgentActivityEntry = {
+  id: string;
+  status: AgentActivityStatus;
+  title: string;
+  detail?: string;
+  createdAt: string;
+};
+
+export type AgentContextItemKind = 'file' | 'selection' | 'image';
+
+export type AgentContextItem = {
+  id: string;
+  kind: AgentContextItemKind;
+  path: string;
+  name: string;
+  relativePath?: string;
+  content: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  dataUrl?: string;
+  isDirty?: boolean;
+  lineStart?: number;
+  lineEnd?: number;
+  tokenEstimate?: number;
+  originalTokenEstimate?: number;
+  truncated?: boolean;
+  source?: 'active-editor' | 'workspace' | 'attachment';
+};
+
+export type AgentContextFileSuggestion = {
+  path: string;
+  relativePath: string;
+  name: string;
+  sizeBytes: number;
+};
+
+export type AgentContextAttachmentRejection = {
+  path?: string;
+  name: string;
+  reason: string;
+};
+
 export type AgentProgressEvent = {
   threadId: string;
   actionId: string | null;
   stage: 'running' | 'completed' | 'blocked' | string;
   taskList?: AgentTaskList;
+  activity?: AgentActivityEntry;
   createdAt: string;
 };
 
@@ -322,6 +431,7 @@ export type AgentChangePreview = {
   changeType: 'create' | 'update' | 'delete';
   originalContent: string;
   nextContent: string;
+  workspaceOriginalContent?: string;
   stats?: {
     changedLines: number;
     beforeLength: number;
@@ -366,13 +476,14 @@ export type AgentApprovalResolution = Result<{
 export type AgentRunPayload = {
   prompt: string;
   source: 'managed' | 'custom';
-  mode: 'fast' | 'plan';
+  mode: 'fast' | 'power';
   intent?: 'agent' | 'ask';
+  permissionMode?: AgentPermissionMode;
   threadId?: string | null;
   customCredentialId?: string | null;
   customModelName?: string | null;
   fastContextWindow?: number | null;
-  planContextWindow?: number | null;
+  powerContextWindow?: number | null;
   threadMessages?: Array<{
     role: 'user' | 'assistant' | 'status';
     content: string;
@@ -383,8 +494,15 @@ export type AgentRunPayload = {
     content: string;
     isDirty: boolean;
   } | null;
+  contextItems?: AgentContextItem[];
+  boardContext?: {
+    name: string;
+    fqbn: string;
+  } | null;
   pendingAction?: PendingAgentAction | null;
   taskList?: AgentTaskList | null;
+  completedTaskReferences?: AgentCompletedTaskReference[];
+  threadMemory?: AgentThreadMemory | null;
   approvedActionId?: string | null;
 };
 
@@ -402,7 +520,7 @@ export type DesktopApi = {
         workspaceRoot: string | null;
         setup: {
           installed: boolean;
-          aiderPath: string | null;
+          opencodePath: string | null;
           runtimeDir: string;
           message: string;
         };
@@ -465,6 +583,9 @@ export type DesktopApi = {
     openExternal: (url: string) => Promise<Result>;
     openPath: (targetPath: string) => Promise<Result>;
   };
+  fileTree: {
+    showContextMenu: (payload: FileTreeNativeContextMenuRequest) => Promise<Result<FileTreeNativeContextMenuResponse>>;
+  };
   fs: {
     openFolder: () => Promise<Result<{ path: string }>>;
     openFile: () => Promise<Result<{ path: string }>>;
@@ -484,6 +605,9 @@ export type DesktopApi = {
   };
   workspace: {
     search: (request: WorkspaceSearchRequest) => Promise<Result<{ results: WorkspaceSearchResult[]; truncated: boolean; stats: WorkspaceSearchStats }>>;
+    suggestContextFiles: (request: { query?: string; maxResults?: number }) => Promise<Result<{ files: AgentContextFileSuggestion[] }>>;
+    readContextFile: (request: { path: string; lineStart?: number | null; lineEnd?: number | null }) => Promise<Result<AgentContextItem>>;
+    pickContextAttachments: () => Promise<Result<{ items: AgentContextItem[]; rejected: AgentContextAttachmentRejection[]; canceled?: boolean }>>;
     previewReplace: (request: WorkspaceSearchRequest) => Promise<Result<{ files: WorkspaceReplacePreviewFile[]; totalMatches: number; blockedPaths: string[] }>>;
     applyReplace: (request: WorkspaceSearchRequest) => Promise<Result<{ changedFiles: WorkspaceReplaceChangedFile[]; skippedFiles: string[]; totalReplacements: number }>>;
   };

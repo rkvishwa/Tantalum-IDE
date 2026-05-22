@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld("tantalum", {
     openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
     openPath: (targetPath) => ipcRenderer.invoke("shell:open-path", targetPath)
   },
+  fileTree: {
+    showContextMenu: (payload) => ipcRenderer.invoke("file-tree:show-context-menu", payload)
+  },
   fs: {
     openFolder: () => ipcRenderer.invoke("fs:open-folder"),
     openFile: () => ipcRenderer.invoke("fs:open-file"),
@@ -82,6 +85,9 @@ contextBridge.exposeInMainWorld("tantalum", {
   },
   workspace: {
     search: (payload) => ipcRenderer.invoke("workspace:search", payload),
+    suggestContextFiles: (payload) => ipcRenderer.invoke("workspace:suggest-context-files", payload),
+    readContextFile: (payload) => ipcRenderer.invoke("workspace:read-context-file", payload),
+    pickContextAttachments: () => ipcRenderer.invoke("workspace:pick-context-attachments"),
     previewReplace: (payload) => ipcRenderer.invoke("workspace:preview-replace", payload),
     applyReplace: (payload) => ipcRenderer.invoke("workspace:apply-replace", payload)
   },

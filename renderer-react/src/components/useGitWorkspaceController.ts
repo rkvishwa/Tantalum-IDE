@@ -13,7 +13,11 @@ type GitControllerProps = {
   onRefreshWorkspace: () => void;
   onStatusChange?: (status: GitStatus) => void;
   pushConsole: (message: string, level?: 'info' | 'success' | 'error') => void;
-  pushToast: (message: string, tone?: 'info' | 'success' | 'error') => void;
+  pushToast: (
+    message: string,
+    tone?: 'info' | 'success' | 'error',
+    actions?: Array<{ label: string; onSelect: () => void }>,
+  ) => void;
 };
 
 export type GitChangeGroupId = 'conflicts' | 'staged' | 'unstaged' | 'untracked';

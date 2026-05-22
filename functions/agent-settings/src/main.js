@@ -19,15 +19,16 @@ const {
 } = process.env;
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
+const MESSAGE_METADATA_JSON_MAX = 32768;
 const DEFAULT_MANAGED_MODEL_METADATA = {
   providerLabel: 'Azure AI Foundry',
   fastModel: 'gpt-4.1',
   fastEditorModel: 'gpt-4.1',
-  planModel: 'gpt-5.5',
-  planEditorModel: 'gpt-4.1',
-  planReasoningEffort: 'medium',
+  powerModel: 'gpt-5.5',
+  powerEditorModel: 'gpt-4.1',
+  powerReasoningEffort: 'medium',
   fastContextWindow: null,
-  planContextWindow: null,
+  powerContextWindow: null,
   repoMapTokens: 2048,
 };
 
@@ -140,6 +141,7 @@ function maskCreditAccount(document) {
     usedCredits,
     remainingCredits: Math.max(0, monthlyAllowance - usedCredits),
     resetAt: document.resetAt,
+    createdAt: document.createdAt,
     updatedAt: document.updatedAt,
   };
 }
@@ -147,6 +149,10 @@ function maskCreditAccount(document) {
 function asNullablePositiveInteger(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function normalizeAgentMode(value) {
+  return value === 'power' || value === 'plan' ? 'power' : 'fast';
 }
 
 function cleanPreview(value) {
@@ -161,8 +167,29 @@ function defaultThreadTitle(value) {
   return title || 'New thread';
 }
 
+function errorMessage(error) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (error && typeof error === 'object') {
+    const values = [
+      error.message,
+      error.response?.message,
+      error.responseBody,
+      error.body,
+    ];
+    const message = values.find((value) => typeof value === 'string' && value.length > 0);
+    if (message) {
+      return message;
+    }
+  }
+
+  return String(error || '');
+}
+
 function isUnknownSelectedCustomModelError(error) {
-  const message = error instanceof Error ? error.message : String(error || '');
+  const message = errorMessage(error);
   return message.includes('Unknown attribute') && message.includes('selectedCustomModelName');
 }
 
@@ -175,11 +202,11 @@ function maskManagedModelMetadata(poolKey) {
     providerLabel: poolKey.providerLabel || DEFAULT_MANAGED_MODEL_METADATA.providerLabel,
     fastModel: poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.fastModel,
     fastEditorModel: poolKey.fastEditorModel || poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.fastEditorModel,
-    planModel: poolKey.planModel || DEFAULT_MANAGED_MODEL_METADATA.planModel,
-    planEditorModel: poolKey.planEditorModel || poolKey.fastEditorModel || poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.planEditorModel,
-    planReasoningEffort: poolKey.planReasoningEffort || DEFAULT_MANAGED_MODEL_METADATA.planReasoningEffort,
+    powerModel: poolKey.powerModel || poolKey.planModel || DEFAULT_MANAGED_MODEL_METADATA.powerModel,
+    powerEditorModel: poolKey.powerEditorModel || poolKey.planEditorModel || poolKey.fastEditorModel || poolKey.fastModel || DEFAULT_MANAGED_MODEL_METADATA.powerEditorModel,
+    powerReasoningEffort: poolKey.powerReasoningEffort || poolKey.planReasoningEffort || DEFAULT_MANAGED_MODEL_METADATA.powerReasoningEffort,
     fastContextWindow: asNullablePositiveInteger(poolKey.fastContextWindow),
-    planContextWindow: asNullablePositiveInteger(poolKey.planContextWindow),
+    powerContextWindow: asNullablePositiveInteger(poolKey.powerContextWindow ?? poolKey.planContextWindow),
     repoMapTokens: Number(poolKey.repoMapTokens || DEFAULT_MANAGED_MODEL_METADATA.repoMapTokens),
   };
 }
@@ -197,14 +224,14 @@ function managedModesFromMetadata(metadata) {
       reasoningEffort: null,
     },
     {
-      id: 'plan',
-      label: 'Plan',
+      id: 'power',
+      label: 'Power',
       creditMultiplier: 2,
-      model: metadata.planModel,
-      editorModel: metadata.planEditorModel,
-      contextWindow: metadata.planContextWindow,
+      model: metadata.powerModel,
+      editorModel: metadata.powerEditorModel,
+      contextWindow: metadata.powerContextWindow,
       repoMapTokens: metadata.repoMapTokens,
-      reasoningEffort: metadata.planReasoningEffort,
+      reasoningEffort: metadata.powerReasoningEffort,
     },
   ];
 }
@@ -241,6 +268,34 @@ function maskThreadMessage(document) {
     metadata,
     createdAt: document.createdAt,
   };
+}
+
+function serializeThreadMessageMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return '{}';
+  }
+
+  const metadataJson = JSON.stringify(metadata);
+  if (metadataJson.length <= MESSAGE_METADATA_JSON_MAX) {
+    return metadataJson;
+  }
+
+  if (!Array.isArray(metadata.activities)) {
+    return JSON.stringify({ metadataTruncated: true });
+  }
+
+  const fallback = { ...metadata, metadataTruncated: true };
+  for (let start = 0; start < metadata.activities.length; start += 1) {
+    fallback.activities = metadata.activities.slice(start);
+    const fallbackJson = JSON.stringify(fallback);
+    if (fallbackJson.length <= MESSAGE_METADATA_JSON_MAX) {
+      return fallbackJson;
+    }
+  }
+
+  delete fallback.activities;
+  const fallbackJson = JSON.stringify(fallback);
+  return fallbackJson.length <= MESSAGE_METADATA_JSON_MAX ? fallbackJson : JSON.stringify({ metadataTruncated: true });
 }
 
 function isBlockedIp(address) {
@@ -446,18 +501,33 @@ async function listCustomCredentials(databases, userId) {
 }
 
 async function listRecentUsage(databases, userId) {
-  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID, [
-    Query.equal('userId', userId),
-    Query.orderDesc('createdAt'),
-    Query.limit(20),
-  ]);
+  const documents = [];
+  let cursor = null;
 
-  return response.documents.map((entry) => ({
+  do {
+    const queries = [
+      Query.equal('userId', userId),
+      Query.orderDesc('createdAt'),
+      Query.limit(100),
+    ];
+
+    if (cursor) {
+      queries.push(Query.cursorAfter(cursor));
+    }
+
+    const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID, queries);
+    documents.push(...response.documents);
+    cursor = response.documents.length === 100 ? response.documents.at(-1)?.$id ?? null : null;
+  } while (cursor);
+
+  return documents.map((entry) => ({
     id: entry.$id,
+    requestId: entry.requestId || '',
     source: entry.source,
-    mode: entry.mode,
+    mode: normalizeAgentMode(entry.mode),
     status: entry.status,
-    modelAlias: entry.modelAlias || null,
+    providerLabel: entry.providerLabel || null,
+    modelAlias: entry.modelAlias === 'Plan' ? 'Power' : entry.modelAlias || null,
     totalTokens: Number(entry.totalTokens || 0),
     multiplier: Number(entry.multiplier || 1),
     chargedCredits: Number(entry.chargedCredits || 0),
@@ -481,17 +551,22 @@ async function getOwnedThread(databases, userId, threadId) {
 }
 
 async function listThreadDocuments(databases, userId, workspaceKey = null, limit = 50) {
+  const cleanWorkspaceKey = String(workspaceKey || '').trim();
+  if (!cleanWorkspaceKey) {
+    return [];
+  }
+
   const queries = [
     Query.equal('userId', userId),
+    Query.equal('status', 'active'),
+    Query.equal('workspaceKey', cleanWorkspaceKey),
     Query.orderDesc('lastMessageAt'),
     Query.limit(limit),
   ];
 
   try {
     const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, queries);
-    return response.documents
-      .filter((thread) => thread.status === 'active' && (!workspaceKey || thread.workspaceKey === workspaceKey))
-      .map(maskThread);
+    return response.documents.map(maskThread);
   } catch {
     return [];
   }
@@ -564,7 +639,7 @@ async function createThreadMessage(req, res) {
   }
 
   const now = new Date().toISOString();
-  const metadataJson = payload.metadata && typeof payload.metadata === 'object' ? JSON.stringify(payload.metadata).slice(0, 4096) : '{}';
+  const metadataJson = serializeThreadMessageMetadata(payload.metadata);
   const message = await databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID,
@@ -624,14 +699,16 @@ async function deleteThread(req, res) {
 
 async function bootstrap(req, res) {
   const user = await resolveUser(req);
+  const payload = readPayload(req);
   const databases = new Databases(createAdminClient(req));
+  const workspaceKey = String(payload.workspaceKey || '').trim() || null;
   const [assignment, preferences, creditAccount, customCredentials, recentUsage, recentThreads] = await Promise.all([
     ensureManagedAssignment(databases, user.$id),
     ensurePreferences(databases, user.$id),
     ensureCreditAccount(databases, user.$id),
     listCustomCredentials(databases, user.$id),
     listRecentUsage(databases, user.$id),
-    listThreadDocuments(databases, user.$id),
+    listThreadDocuments(databases, user.$id, workspaceKey),
   ]);
   const managedModelMetadata = maskManagedModelMetadata(await getManagedPoolKey(databases, assignment));
 
@@ -641,7 +718,7 @@ async function bootstrap(req, res) {
     managedModelMetadata,
     preferences: {
       selectedSource: preferences.selectedSource || 'managed',
-      defaultMode: preferences.defaultMode || 'fast',
+      defaultMode: normalizeAgentMode(preferences.defaultMode),
       selectedCustomCredentialId: preferences.selectedCustomCredentialId || null,
       selectedCustomModelName: preferences.selectedCustomModelName || null,
     },
@@ -658,20 +735,21 @@ async function savePreferences(req, res) {
   const databases = new Databases(createAdminClient(req));
   const preferences = await ensurePreferences(databases, user.$id);
   const now = new Date().toISOString();
+  const selectedCustomModelName = typeof payload.selectedCustomModelName === 'string' ? payload.selectedCustomModelName.trim() : '';
 
   const update = {
     selectedSource: payload.selectedSource === 'custom' ? 'custom' : 'managed',
-    defaultMode: payload.defaultMode === 'plan' ? 'plan' : 'fast',
+    defaultMode: normalizeAgentMode(payload.defaultMode),
     selectedCustomCredentialId: payload.selectedSource === 'custom' ? payload.selectedCustomCredentialId || null : null,
     updatedAt: now,
   };
 
   let updated;
-  if (payload.selectedSource === 'custom' && payload.selectedCustomModelName) {
+  if (payload.selectedSource === 'custom' && selectedCustomModelName) {
     try {
       updated = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID, preferences.$id, {
         ...update,
-        selectedCustomModelName: payload.selectedCustomModelName,
+        selectedCustomModelName,
       });
     } catch (error) {
       if (!isUnknownSelectedCustomModelError(error)) {
@@ -686,9 +764,9 @@ async function savePreferences(req, res) {
 
   return ok(res, {
     selectedSource: updated.selectedSource,
-    defaultMode: updated.defaultMode,
+    defaultMode: normalizeAgentMode(updated.defaultMode),
     selectedCustomCredentialId: updated.selectedCustomCredentialId || null,
-    selectedCustomModelName: updated.selectedCustomModelName || null,
+    selectedCustomModelName: update.selectedSource === 'custom' ? updated.selectedCustomModelName || selectedCustomModelName || null : null,
   });
 }
 

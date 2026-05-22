@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const fsPromises = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { TextDecoder } = require("node:util");
 
 const {
   compileArduino,
@@ -20,7 +21,7 @@ const {
   searchLibraries
 } = require("./arduinoHandler");
 const { SecurityManager } = require("./src/agent/securityManager");
-const { AgentRuntimeManager } = require("./src/agent/aiderRuntimeManager");
+const { AgentRuntimeManager } = require("./src/agent/opencodeRuntimeManager");
 const { getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
 const provisioningService = require("./src/services/provisioningService");
@@ -1330,6 +1331,13 @@ async function discardGitPaths(payload = {}) {
 const WORKSPACE_SEARCH_DEFAULT_MAX_RESULTS = 300;
 const WORKSPACE_SEARCH_MAX_RESULTS = 1000;
 const WORKSPACE_SEARCH_MAX_FILE_SIZE = "2M";
+const AGENT_CONTEXT_DEFAULT_SUGGESTION_LIMIT = 3;
+const AGENT_CONTEXT_MAX_SUGGESTION_LIMIT = 20;
+const AGENT_CONTEXT_MAX_FILE_BYTES = 1_500_000;
+const AGENT_CONTEXT_MAX_IMAGE_BYTES = 2_000_000;
+const AGENT_CONTEXT_MAX_PICKED_FILES = 10;
+const AGENT_CONTEXT_MAX_IMAGE_DATA_URL_CHARS = 6_000_000;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const WORKSPACE_SEARCH_DEFAULT_GLOBS = [
   "!**/.git/**",
   "!**/node_modules/**",
@@ -1338,6 +1346,52 @@ const WORKSPACE_SEARCH_DEFAULT_GLOBS = [
   "!**/.tantalum-file-tree-trash/**",
   "!**/.trash_*/**",
 ];
+const AGENT_CONTEXT_SENSITIVE_FILE_PATTERNS = [
+  /^\.env(?:\..*)?$/i,
+  /^id_rsa(?:\..*)?$/i,
+  /^id_ed25519(?:\..*)?$/i,
+  /\.pem$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
+  /\.key$/i,
+  /credentials/i,
+  /secret/i,
+];
+const AGENT_CONTEXT_TEXT_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cpp",
+  ".cxx",
+  ".css",
+  ".csv",
+  ".go",
+  ".h",
+  ".hh",
+  ".hpp",
+  ".html",
+  ".ini",
+  ".ino",
+  ".java",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".py",
+  ".rs",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
+const AGENT_CONTEXT_IMAGE_MIME_BY_EXTENSION = new Map([
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".png", "image/png"],
+  [".webp", "image/webp"],
+]);
 
 function clampSearchLimit(value) {
   const parsed = Number.parseInt(value, 10);
@@ -1631,6 +1685,368 @@ async function searchWorkspacePaths(request, rootPath) {
 async function searchWorkspaceText(request, rootPath, limit) {
   const { stdout } = await runRipgrep(buildRipgrepSearchArgs(request), { cwd: rootPath });
   return parseRipgrepJsonMatches(stdout, rootPath, limit);
+}
+
+function normalizeAgentContextSuggestionLimit(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return AGENT_CONTEXT_DEFAULT_SUGGESTION_LIMIT;
+  }
+
+  return Math.max(1, Math.min(AGENT_CONTEXT_MAX_SUGGESTION_LIMIT, parsed));
+}
+
+function normalizeAgentContextRelativePath(value) {
+  return String(value || "").replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function isSensitiveAgentContextRelativePath(relativePath) {
+  const normalized = normalizeAgentContextRelativePath(relativePath);
+  const parts = normalized.split("/").filter(Boolean);
+  return (
+    parts.some((part) => part === ".git" || part === "node_modules" || part === "dist" || part === "build") ||
+    AGENT_CONTEXT_SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(parts.at(-1) || normalized))
+  );
+}
+
+function validateAgentContextTextBuffer(buffer) {
+  if (buffer.length > AGENT_CONTEXT_MAX_FILE_BYTES) {
+    return { ok: false, reason: "oversized" };
+  }
+
+  if (buffer.includes(0)) {
+    return { ok: false, reason: "binary" };
+  }
+
+  try {
+    UTF8_DECODER.decode(buffer);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "non_utf8" };
+  }
+}
+
+function sanitizeAgentContextAttachmentName(value) {
+  const baseName = path.basename(String(value || "attachment")).replace(/[\u0000-\u001f\u007f<>:"/\\|?*]+/g, "_").trim();
+  return (baseName || "attachment").slice(0, 180);
+}
+
+function isSensitiveAgentContextAttachmentPath(filePath) {
+  const name = path.basename(String(filePath || ""));
+  return AGENT_CONTEXT_SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function getAgentContextImageMimeType(filePath, buffer) {
+  const extensionMime = AGENT_CONTEXT_IMAGE_MIME_BY_EXTENSION.get(path.extname(filePath).toLowerCase());
+  if (!extensionMime) {
+    return null;
+  }
+
+  if (
+    extensionMime === "image/png" &&
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return extensionMime;
+  }
+
+  if (extensionMime === "image/jpeg" && buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return extensionMime;
+  }
+
+  if (
+    extensionMime === "image/webp" &&
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return extensionMime;
+  }
+
+  return null;
+}
+
+function createAttachmentContextId(kind, filePath, buffer) {
+  const hash = crypto.createHash("sha256").update(filePath).update(buffer.subarray(0, Math.min(buffer.length, 4096))).digest("hex").slice(0, 16);
+  return `attachment:${kind}:${hash}`;
+}
+
+async function readPickedAgentContextAttachment(filePath, aggregateImageDataUrlChars) {
+  const absolutePath = path.resolve(filePath);
+  const name = sanitizeAgentContextAttachmentName(absolutePath);
+
+  if (isSensitiveAgentContextAttachmentPath(absolutePath)) {
+    return { rejected: { path: absolutePath, name, reason: "Sensitive filenames cannot be attached as agent context." } };
+  }
+
+  const stats = await fsPromises.lstat(absolutePath);
+  if (stats.isSymbolicLink()) {
+    return { rejected: { path: absolutePath, name, reason: "Symbolic links cannot be attached as agent context." } };
+  }
+
+  if (!stats.isFile()) {
+    return { rejected: { path: absolutePath, name, reason: "Only regular files can be attached as agent context." } };
+  }
+
+  const extension = path.extname(absolutePath).toLowerCase();
+  const isImageCandidate = AGENT_CONTEXT_IMAGE_MIME_BY_EXTENSION.has(extension);
+  const isTextCandidate = AGENT_CONTEXT_TEXT_EXTENSIONS.has(extension);
+  if (!isImageCandidate && !isTextCandidate) {
+    return { rejected: { path: absolutePath, name, reason: "This file type is not supported for agent context." } };
+  }
+
+  if (isImageCandidate && stats.size > AGENT_CONTEXT_MAX_IMAGE_BYTES) {
+    return { rejected: { path: absolutePath, name, reason: "This image is too large for agent context." } };
+  }
+
+  if (isTextCandidate && stats.size > AGENT_CONTEXT_MAX_FILE_BYTES) {
+    return { rejected: { path: absolutePath, name, reason: "This text file is too large for agent context." } };
+  }
+
+  const buffer = await fsPromises.readFile(absolutePath);
+  if (isImageCandidate) {
+    const mimeType = getAgentContextImageMimeType(absolutePath, buffer);
+    if (!mimeType) {
+      return { rejected: { path: absolutePath, name, reason: "Image bytes did not match a supported PNG, JPEG, or WebP file." } };
+    }
+
+    const dataUrl = `data:${mimeType};base64,${buffer.toString("base64")}`;
+    if (aggregateImageDataUrlChars + dataUrl.length > AGENT_CONTEXT_MAX_IMAGE_DATA_URL_CHARS) {
+      return { rejected: { path: absolutePath, name, reason: "Attached images exceed the safe request size limit." } };
+    }
+
+    return {
+      item: {
+        id: createAttachmentContextId("image", absolutePath, buffer),
+        kind: "image",
+        path: absolutePath,
+        name,
+        content: `[Image attachment: ${name}]`,
+        mimeType,
+        sizeBytes: stats.size,
+        dataUrl,
+        tokenEstimate: Math.max(256, Math.ceil(stats.size / 2048)),
+        originalTokenEstimate: Math.max(256, Math.ceil(stats.size / 2048)),
+        source: "attachment",
+      },
+      imageDataUrlChars: dataUrl.length,
+    };
+  }
+
+  const validation = validateAgentContextTextBuffer(buffer);
+  if (!validation.ok) {
+    return { rejected: { path: absolutePath, name, reason: `This file is ${validation.reason} and cannot be attached as agent context.` } };
+  }
+
+  const content = buffer.toString("utf8");
+  const tokenEstimate = Math.max(1, Math.ceil(content.length / 3.5));
+  return {
+    item: {
+      id: createAttachmentContextId("file", absolutePath, buffer),
+      kind: "file",
+      path: absolutePath,
+      name,
+      content,
+      sizeBytes: stats.size,
+      tokenEstimate,
+      originalTokenEstimate: tokenEstimate,
+      source: "attachment",
+    },
+  };
+}
+
+async function pickAgentContextAttachments(ownerWindow = mainWindow) {
+  const dialogOptions = {
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "Photos and text files",
+        extensions: [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          ...[...AGENT_CONTEXT_TEXT_EXTENSIONS].map((extension) => extension.replace(/^\./, "")),
+        ],
+      },
+      { name: "Photos", extensions: ["png", "jpg", "jpeg", "webp"] },
+      { name: "Text and code", extensions: [...AGENT_CONTEXT_TEXT_EXTENSIONS].map((extension) => extension.replace(/^\./, "")) },
+    ],
+  };
+  const result = ownerWindow ? await dialog.showOpenDialog(ownerWindow, dialogOptions) : await dialog.showOpenDialog(dialogOptions);
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { success: true, canceled: true, items: [], rejected: [] };
+  }
+
+  const items = [];
+  const rejected = [];
+  let aggregateImageDataUrlChars = 0;
+
+  for (const filePath of result.filePaths.slice(0, AGENT_CONTEXT_MAX_PICKED_FILES)) {
+    try {
+      const attachment = await readPickedAgentContextAttachment(filePath, aggregateImageDataUrlChars);
+      if (attachment.rejected) {
+        rejected.push(attachment.rejected);
+        continue;
+      }
+
+      if (attachment.item) {
+        items.push(attachment.item);
+        aggregateImageDataUrlChars += attachment.imageDataUrlChars || 0;
+      }
+    } catch (error) {
+      rejected.push({
+        path: filePath,
+        name: sanitizeAgentContextAttachmentName(filePath),
+        reason: error instanceof Error ? error.message : "Unable to attach this file.",
+      });
+    }
+  }
+
+  if (result.filePaths.length > AGENT_CONTEXT_MAX_PICKED_FILES) {
+    rejected.push({
+      name: "Additional selected files",
+      reason: `Only ${AGENT_CONTEXT_MAX_PICKED_FILES} files can be attached at once.`,
+    });
+  }
+
+  return { success: true, items, rejected };
+}
+
+function rankAgentContextSuggestion(candidate, query) {
+  const normalizedQuery = query.toLowerCase();
+  if (!normalizedQuery) {
+    return candidate.relativePath.split(/[\\/]/).length;
+  }
+
+  const name = candidate.name.toLowerCase();
+  const relativePath = candidate.relativePath.toLowerCase();
+  if (name === normalizedQuery) {
+    return 0;
+  }
+
+  if (name.startsWith(normalizedQuery)) {
+    return 1;
+  }
+
+  if (relativePath.startsWith(normalizedQuery)) {
+    return 2;
+  }
+
+  if (name.includes(normalizedQuery)) {
+    return 3;
+  }
+
+  return 4;
+}
+
+async function suggestAgentContextFiles(payload = {}) {
+  const rootPath = ensureActiveWorkspace();
+  const query = String(payload.query || "").trim().toLowerCase();
+  const maxResults = normalizeAgentContextSuggestionLimit(payload.maxResults);
+  const request = normalizeWorkspaceSearchRequest({ query: "", mode: "files", maxResults });
+  const args = ["--files", "--no-config"];
+  appendWorkspaceSearchGlobs(args, request);
+  const { stdout } = await runRipgrep(args, { cwd: rootPath });
+  const candidates = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const relativePath = normalizeAgentContextRelativePath(line.trim());
+    if (!relativePath || isSensitiveAgentContextRelativePath(relativePath)) {
+      continue;
+    }
+
+    const name = path.basename(relativePath);
+    const haystack = `${name} ${relativePath}`.toLowerCase();
+    if (query && !haystack.includes(query)) {
+      continue;
+    }
+
+    const absolutePath = path.resolve(rootPath, relativePath);
+    try {
+      const stats = await fsPromises.stat(absolutePath);
+      if (!stats.isFile()) {
+        continue;
+      }
+
+      candidates.push({
+        path: absolutePath,
+        relativePath,
+        name,
+        sizeBytes: stats.size,
+      });
+    } catch {
+      // Ignore files that disappear while suggestions are being collected.
+    }
+  }
+
+  candidates.sort(
+    (left, right) =>
+      rankAgentContextSuggestion(left, query) - rankAgentContextSuggestion(right, query) ||
+      left.relativePath.localeCompare(right.relativePath),
+  );
+
+  return { success: true, files: candidates.slice(0, maxResults) };
+}
+
+function sliceAgentContextLines(content, lineStart, lineEnd) {
+  const lines = String(content || "").split(/\r?\n/);
+  const start = Math.max(1, Math.min(lines.length || 1, Number.parseInt(lineStart, 10) || 1));
+  const end = Math.max(start, Math.min(lines.length || start, Number.parseInt(lineEnd, 10) || start));
+  return {
+    lineStart: start,
+    lineEnd: end,
+    content: lines.slice(start - 1, end).join("\n"),
+  };
+}
+
+async function readAgentContextFile(payload = {}) {
+  const rootPath = ensureActiveWorkspace();
+  const absolutePath = assertTrustedPath(payload.path);
+  if (!isPathInsideRoot(absolutePath, rootPath)) {
+    throw new Error("Blocked access to a path outside the active workspace.");
+  }
+
+  const relativePath = normalizeAgentContextRelativePath(path.relative(rootPath, absolutePath));
+  if (!relativePath || isSensitiveAgentContextRelativePath(relativePath)) {
+    throw new Error("This file cannot be added to agent context.");
+  }
+
+  const stats = await fsPromises.stat(absolutePath);
+  if (!stats.isFile()) {
+    throw new Error("Only files can be added to agent context.");
+  }
+
+  const buffer = await fsPromises.readFile(absolutePath);
+  const validation = validateAgentContextTextBuffer(buffer);
+  if (!validation.ok) {
+    throw new Error(`This file is ${validation.reason} and cannot be added to agent context.`);
+  }
+
+  const fullContent = buffer.toString("utf8");
+  const hasRange = Number.isFinite(Number(payload.lineStart)) && Number.isFinite(Number(payload.lineEnd));
+  const sliced = hasRange ? sliceAgentContextLines(fullContent, payload.lineStart, payload.lineEnd) : null;
+
+  return {
+    success: true,
+    id: hasRange ? `selection:${relativePath}:${sliced.lineStart}-${sliced.lineEnd}` : `file:${relativePath}`,
+    kind: hasRange ? "selection" : "file",
+    path: absolutePath,
+    relativePath,
+    name: path.basename(absolutePath),
+    content: sliced?.content ?? fullContent,
+    lineStart: sliced?.lineStart,
+    lineEnd: sliced?.lineEnd,
+    source: "workspace",
+  };
 }
 
 function ensureActiveWorkspace() {
@@ -2409,6 +2825,87 @@ function getDefaultTerminalCwd() {
   return path.parse(homePath).root || process.cwd();
 }
 
+function normalizeContextMenuCoordinate(value) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    return undefined;
+  }
+
+  return Math.max(0, Math.round(numberValue));
+}
+
+function normalizeNativeContextMenuAccelerator(shortcut) {
+  if (typeof shortcut !== "string") {
+    return undefined;
+  }
+
+  const normalized = shortcut.trim().replace(/\s+/g, "").replace(/^Ctrl\+/i, "CmdOrCtrl+").replace(/^Control\+/i, "CmdOrCtrl+");
+  return normalized || undefined;
+}
+
+function normalizeNativeContextMenuText(value, fallback = "") {
+  const text = typeof value === "string" ? value.trim() : "";
+  return (text || fallback).slice(0, 160);
+}
+
+function normalizeFileTreeContextMenuGroups(groups) {
+  if (!Array.isArray(groups)) {
+    return [];
+  }
+
+  return groups
+    .map((group) => {
+      if (!Array.isArray(group)) {
+        return [];
+      }
+
+      return group
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return null;
+          }
+
+          const id = normalizeNativeContextMenuText(item.id);
+          const key = normalizeNativeContextMenuText(item.key, id);
+          const label = normalizeNativeContextMenuText(item.label, id);
+          if (!id || !key || !label) {
+            return null;
+          }
+
+          return {
+            id,
+            key,
+            label,
+            enabled: !item.disabled,
+            accelerator: normalizeNativeContextMenuAccelerator(item.shortcut),
+          };
+        })
+        .filter(Boolean);
+    })
+    .filter((group) => group.length > 0);
+}
+
+function createFileTreeContextMenuTemplate(groups, finish, includeAccelerators = true) {
+  const template = [];
+
+  for (const group of groups) {
+    if (template.length > 0) {
+      template.push({ type: "separator" });
+    }
+
+    for (const item of group) {
+      template.push({
+        label: item.label,
+        enabled: item.enabled,
+        ...(includeAccelerators && item.accelerator ? { accelerator: item.accelerator } : {}),
+        click: () => finish({ actionKey: item.key, actionId: item.id }),
+      });
+    }
+  }
+
+  return template;
+}
+
 function resolveTerminalWorkingDirectory(targetPath) {
   const candidatePath = typeof targetPath === "string" && targetPath.trim().length > 0 ? path.resolve(targetPath) : getDefaultTerminalCwd();
 
@@ -2877,6 +3374,59 @@ ipcMain.handle("shell:open-path", async (_event, targetPath) => {
   }
 });
 
+ipcMain.handle("file-tree:show-context-menu", async (event, payload = {}) => {
+  try {
+    const targetWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!targetWindow) {
+      throw new Error("Unable to find the active window for the file tree menu.");
+    }
+
+    const x = normalizeContextMenuCoordinate(payload?.position?.x);
+    const y = normalizeContextMenuCoordinate(payload?.position?.y);
+    const groups = normalizeFileTreeContextMenuGroups(payload?.groups);
+    if (groups.length === 0) {
+      return { success: true, actionKey: null, actionId: null };
+    }
+
+    return await new Promise((resolve) => {
+      let resolved = false;
+      const finish = (selection) => {
+        if (resolved) {
+          return;
+        }
+
+        resolved = true;
+        resolve({
+          success: true,
+          actionKey: selection?.actionKey ?? null,
+          actionId: selection?.actionId ?? null,
+        });
+      };
+
+      const popupMenu = (includeAccelerators = true) => {
+        const menu = Menu.buildFromTemplate(createFileTreeContextMenuTemplate(groups, finish, includeAccelerators));
+        menu.popup({
+          window: targetWindow,
+          ...(x !== undefined && y !== undefined ? { x, y } : {}),
+          callback: () => finish(null),
+        });
+      };
+
+      try {
+        popupMenu(true);
+      } catch {
+        try {
+          popupMenu(false);
+        } catch {
+          finish(null);
+        }
+      }
+    });
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("fs:open-folder", async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -2887,8 +3437,7 @@ ipcMain.handle("fs:open-folder", async () => {
       return { success: false, canceled: true };
     }
 
-    const selectedPath = result.filePaths[0];
-    setCurrentWorkspace(selectedPath);
+    const selectedPath = path.resolve(result.filePaths[0]);
 
     return { success: true, path: selectedPath };
   } catch (error) {
@@ -3245,6 +3794,30 @@ ipcMain.handle("workspace:add-recent-file", async (_event, filePath) => {
 ipcMain.handle("workspace:search", async (_event, payload = {}) => {
   try {
     return await searchWorkspace(payload);
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("workspace:suggest-context-files", async (_event, payload = {}) => {
+  try {
+    return await suggestAgentContextFiles(payload);
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("workspace:read-context-file", async (_event, payload = {}) => {
+  try {
+    return await readAgentContextFile(payload);
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("workspace:pick-context-attachments", async (event) => {
+  try {
+    return await pickAgentContextAttachments(BrowserWindow.fromWebContents(event.sender) || mainWindow);
   } catch (error) {
     return toErrorResult(error);
   }

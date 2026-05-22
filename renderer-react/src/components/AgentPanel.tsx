@@ -1,16 +1,23 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import type { Models } from 'appwrite';
 import {
+  Box,
   ArrowLeft,
+  AtSign,
   Bot,
+  Check,
   ChevronDown,
+  ChevronRight,
+  ChevronUp,
   Code,
+  Cloud,
+  Cpu,
   FileText,
-  History,
+  Image as ImageIcon,
   KeyRound,
   LoaderCircle,
   MessageSquare,
-  MoreHorizontal,
+  Paperclip,
   PencilLine,
   Play,
   Plus,
@@ -20,12 +27,16 @@ import {
   SendHorizontal,
   Settings,
   Settings2,
-  Shield,
+  ShieldCheck,
   Sliders,
   Sparkles,
-  SquareStop,
+  CircleStop,
+  Terminal,
   Trash2,
+  TriangleAlert,
+  Wrench,
   X,
+  Zap,
 } from 'lucide-react';
 
 import {
@@ -52,17 +63,27 @@ import {
   type AgentUiMessage,
 } from '@/lib/agent';
 import { hasAgentCloudConfiguration } from '@/lib/config';
+import { getMaterialFileIconSvg } from '@/lib/materialFileIcons';
 import type {
+  AgentActivityEntry,
   AgentChangePreview,
+  AgentCompletedTaskReference,
+  AgentContextFileSuggestion,
+  AgentContextItem,
+  AgentPermissionMode,
   AgentProgressEvent,
   AgentRunPayload,
+  AgentTaskItem,
   AgentTaskList,
   AgentTaskStatus,
+  AgentThreadFileReference,
+  AgentThreadMemory,
   PendingAgentAction,
   PendingAgentActionStatus,
 } from '@/types/electron';
 
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { Modal } from './Modal';
 
 export type AgentPendingReview = {
   id: string;
@@ -82,6 +103,14 @@ export type AgentReviewResolutionNotice = {
   createdAt: string;
 };
 
+export type AgentEditorSelectionContext = {
+  path: string;
+  name: string;
+  content: string;
+  lineStart: number;
+  lineEnd: number;
+};
+
 type AgentPanelProps = {
   user: Models.User<Models.Preferences>;
   workspacePath: string | null;
@@ -91,13 +120,23 @@ type AgentPanelProps = {
     content: string;
     isDirty: boolean;
   } | null;
+  activeSelection?: AgentEditorSelectionContext | null;
+  boardContext?: {
+    name: string;
+    fqbn: string;
+  } | null;
   pushConsole: (message: string, level?: 'info' | 'success' | 'error') => void;
-  pushToast: (message: string, tone?: 'info' | 'success' | 'error') => void;
+  pushToast: (
+    message: string,
+    tone?: 'info' | 'success' | 'error',
+    actions?: Array<{ label: string; onSelect: () => void }>,
+  ) => void;
   pendingReview?: AgentPendingReview | null;
   resolvingReview?: boolean;
   reviewResolutionNotice?: AgentReviewResolutionNotice | null;
   onAgentChangesPrepared?: (review: AgentPreparedReview) => void;
   onPreviewAgentFile?: (relativePath: string) => void;
+  onOpenContextFile?: (filePath: string) => void;
   onResolveAgentChanges?: (approved: boolean) => void | Promise<void>;
   defaultView?: AgentView;
   hideChat?: boolean;
@@ -107,9 +146,13 @@ type AgentPanelProps = {
   onSignedOut?: () => void;
 };
 
-type AgentView = 'chat' | 'settings' | 'usage';
+type AgentView = 'chat' | 'settings';
 type AgentComposeTarget = 'new' | 'thread';
 type AgentIntent = 'agent' | 'ask';
+type PersistPreferencesOptions = {
+  includeCustomModelName?: boolean;
+  suppressCustomModelSchemaError?: boolean;
+};
 
 type CredentialFormState = {
   credentialId: string | null;
@@ -177,8 +220,36 @@ function formatCredits(value: number) {
   return Number.isFinite(value) ? value.toLocaleString() : '0';
 }
 
+function formatDetailedDate(value: string | null | undefined) {
+  if (!value) {
+    return 'Not set';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function formatUsagePercent(value: number) {
+  return `${Math.max(0, Math.min(100, value)).toFixed(0)}%`;
+}
+
 function firstEnabledCredential(settings: AgentSettingsState) {
   return settings.customCredentials.find((credential) => credential.enabled) ?? null;
+}
+
+function isUnknownSelectedCustomModelError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('Unknown attribute') && message.includes('selectedCustomModelName');
 }
 
 function basenameFromPath(value: string | null) {
@@ -189,9 +260,70 @@ function basenameFromPath(value: string | null) {
   return value.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) ?? value;
 }
 
+function dirnameFromPath(value: string | null) {
+  if (!value) {
+    return '';
+  }
+
+  const parts = value.replace(/\\/g, '/').split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
+}
+
+function ContextSuggestionFileIcon({ filePath, className = '' }: { filePath: string; className?: string }) {
+  const iconSvg = getMaterialFileIconSvg(filePath);
+  const iconClassName = ['context-suggestion-file-icon', className].filter(Boolean).join(' ');
+
+  if (!iconSvg) {
+    return <FileText size={12} className={iconClassName} />;
+  }
+
+  return <span className={iconClassName} aria-hidden="true" dangerouslySetInnerHTML={{ __html: iconSvg }} />;
+}
+
+function ContextItemIcon({ item }: { item: Pick<AgentContextItem, 'kind' | 'path'> }) {
+  if (item.kind === 'image') {
+    return <ImageIcon size={12} className="context-suggestion-file-icon" aria-hidden="true" />;
+  }
+
+  return <ContextSuggestionFileIcon filePath={item.path} />;
+}
+
+function threadsForWorkspace(threads: AgentThreadSummary[], workspaceKey: string | null) {
+  if (!workspaceKey) {
+    return [];
+  }
+
+  return threads.filter((thread) => thread.workspaceKey === workspaceKey);
+}
+
 function titleFromPrompt(value: string) {
   const title = value.replace(/\s+/g, ' ').trim().slice(0, 64);
-  return title || 'New thread';
+  return formatThreadTitle(title || 'New thread');
+}
+
+function formatThreadTitle(value: string) {
+  const title = value.replace(/\s+/g, ' ').trim();
+  if (!title) {
+    return 'New thread';
+  }
+
+  let offset = 0;
+  for (const character of title) {
+    if (character.toLocaleLowerCase() !== character.toLocaleUpperCase()) {
+      return `${title.slice(0, offset)}${character.toLocaleUpperCase()}${title.slice(offset + character.length)}`;
+    }
+    offset += character.length;
+  }
+
+  return title;
+}
+
+function promptReferencesCompletedTask(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return /\b(do|make|apply|repeat|use)\s+(?:it|that|this|the same|same)\s+(?:again|like|to|for|here)?\b/.test(normalized) ||
+    /\b(?:same as before|same thing|like before|like that|like this|similar to before|similar to that|previous task|last task)\b/.test(normalized) ||
+    /^(?:again|same again|repeat that|repeat it|do that again|do it again)$/.test(normalized);
 }
 
 function toThreadContext(messages: AgentThreadMessage[]) {
@@ -212,20 +344,719 @@ function clampAgentMessageContent(value: string, maxLength = 24000) {
   return `${value.slice(0, maxLength)}\n\n[Output truncated for thread history.]`;
 }
 
+const FALLBACK_FAST_CONTEXT_WINDOW = 64000;
+const FALLBACK_POWER_CONTEXT_WINDOW = 128000;
+const AGENT_CONTEXT_RESERVED_TOKENS = 12000;
+const AGENT_CONTEXT_TOKEN_CHARS = 3.5;
+const AGENT_ATTACHMENT_MAX_TEXT_BYTES = 1_500_000;
+const AGENT_ATTACHMENT_MAX_IMAGE_BYTES = 2_000_000;
+const AGENT_ATTACHMENT_MAX_DROPPED_FILES = 10;
+const AGENT_ATTACHMENT_MAX_IMAGE_DATA_URL_CHARS = 6_000_000;
+const AGENT_MESSAGE_CONTEXT_CHIP_LIMIT = 12;
+const AGENT_MESSAGE_CONTEXT_STRING_LIMIT = 180;
+const AGENT_MESSAGE_CONTEXT_PATH_LIMIT = 500;
+const THREAD_HISTORY_PREVIEW_LIMIT = 4;
+const THREAD_MEMORY_FILE_LIMIT = 50;
+const THREAD_MEMORY_ALIAS_LIMIT = 18;
+const THREAD_MEMORY_ALIAS_STRING_LIMIT = 180;
+const AGENT_ATTACHMENT_TEXT_EXTENSIONS = new Set([
+  '.c',
+  '.cc',
+  '.cpp',
+  '.cxx',
+  '.css',
+  '.csv',
+  '.go',
+  '.h',
+  '.hh',
+  '.hpp',
+  '.html',
+  '.ini',
+  '.ino',
+  '.java',
+  '.js',
+  '.json',
+  '.jsx',
+  '.md',
+  '.py',
+  '.rs',
+  '.toml',
+  '.ts',
+  '.tsx',
+  '.txt',
+  '.xml',
+  '.yaml',
+  '.yml',
+]);
+const AGENT_ATTACHMENT_IMAGE_MIME_BY_EXTENSION = new Map([
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+]);
+const AGENT_ATTACHMENT_SENSITIVE_FILE_PATTERNS = [
+  /^\.env(?:\..*)?$/i,
+  /^id_rsa(?:\..*)?$/i,
+  /^id_ed25519(?:\..*)?$/i,
+  /\.pem$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
+  /\.key$/i,
+  /credentials/i,
+  /secret/i,
+];
+
+type ContextMentionRange = {
+  start: number;
+  end: number;
+  query: string;
+};
+
+type AgentMessageContextChip = {
+  id: string;
+  kind: AgentContextItem['kind'];
+  name: string;
+  path?: string;
+  relativePath?: string;
+  source?: AgentContextItem['source'];
+  lineStart?: number;
+  lineEnd?: number;
+  mimeType?: string;
+  sizeBytes?: number;
+};
+
+type AgentImagePreview = {
+  id: string;
+  name: string;
+  dataUrl: string;
+  source: 'composer' | 'message';
+  contextItem?: AgentContextItem;
+};
+
+type ShrunkRunContext = {
+  contextItems: AgentContextItem[];
+  threadMessages: NonNullable<AgentRunPayload['threadMessages']>;
+};
+
+function estimateAgentTokens(value: string) {
+  if (!value) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(value.length / AGENT_CONTEXT_TOKEN_CHARS));
+}
+
+function estimateContextItemTokens(item: Pick<AgentContextItem, 'content' | 'tokenEstimate'>) {
+  return item.tokenEstimate ?? estimateAgentTokens(item.content || '');
+}
+
+function formatCompactTokens(value: number) {
+  if (value >= 1000) {
+    return `${Math.round(value / 1000)}k`;
+  }
+
+  return `${Math.max(0, Math.round(value))}`;
+}
+
+function normalizeContextPathKey(value: string) {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function sanitizeAttachmentName(value: string) {
+  const name = [...value]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127 || '<>:"/\\|?*'.includes(character) ? '_' : character;
+    })
+    .join('')
+    .trim();
+  return (name || 'attachment').slice(0, 180);
+}
+
+function extensionFromFileName(value: string) {
+  const cleanName = sanitizeAttachmentName(value).toLowerCase();
+  const dotIndex = cleanName.lastIndexOf('.');
+  return dotIndex >= 0 ? cleanName.slice(dotIndex) : '';
+}
+
+function isSensitiveAttachmentName(value: string) {
+  const name = sanitizeAttachmentName(value);
+  return AGENT_ATTACHMENT_SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function getImageMimeFromBytes(fileName: string, bytes: Uint8Array) {
+  const extensionMime = AGENT_ATTACHMENT_IMAGE_MIME_BY_EXTENSION.get(extensionFromFileName(fileName));
+  if (!extensionMime) {
+    return null;
+  }
+
+  if (
+    extensionMime === 'image/png' &&
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return extensionMime;
+  }
+
+  if (extensionMime === 'image/jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return extensionMime;
+  }
+
+  if (
+    extensionMime === 'image/webp' &&
+    bytes.length >= 12 &&
+    String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' &&
+    String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP'
+  ) {
+    return extensionMime;
+  }
+
+  return null;
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.slice(offset, offset + chunkSize));
+  }
+
+  return window.btoa(binary);
+}
+
+function createDroppedAttachmentPath(kind: AgentContextItem['kind'], name: string) {
+  const id = window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `attachment://${kind}/${id}/${encodeURIComponent(name)}`;
+}
+
+function hasDraggedFiles(event: ReactDragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.types).includes('Files');
+}
+
+function contextItemId(kind: AgentContextItem['kind'], path: string, lineStart?: number, lineEnd?: number) {
+  const normalizedPath = normalizeContextPathKey(path);
+  return kind === 'selection' ? `selection:${normalizedPath}:${lineStart ?? 1}-${lineEnd ?? lineStart ?? 1}` : `${kind}:${normalizedPath}`;
+}
+
+function contextItemLabel(item: Pick<AgentContextItem, 'kind' | 'name' | 'lineStart' | 'lineEnd'>) {
+  if (item.kind === 'selection' && item.lineStart && item.lineEnd) {
+    const lineRange = item.lineStart === item.lineEnd ? `${item.lineStart}` : `${item.lineStart}-${item.lineEnd}`;
+    return `${item.name}:${lineRange}`;
+  }
+
+  return item.name;
+}
+
+function clampMessageContextString(value: string, maxLength = AGENT_MESSAGE_CONTEXT_STRING_LIMIT) {
+  return [...value]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    })
+    .join('')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function positiveInteger(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function isAgentContextItemKind(value: unknown): value is AgentContextItem['kind'] {
+  return value === 'file' || value === 'selection' || value === 'image';
+}
+
+function isAgentContextItemSource(value: unknown): value is NonNullable<AgentContextItem['source']> {
+  return value === 'active-editor' || value === 'workspace' || value === 'attachment';
+}
+
+function createMessageContextChips(items: AgentContextItem[]): AgentMessageContextChip[] {
+  return items.slice(0, AGENT_MESSAGE_CONTEXT_CHIP_LIMIT).map((item) => {
+    const chip: AgentMessageContextChip = {
+      id: clampMessageContextString(item.id || contextItemId(item.kind, item.path, item.lineStart, item.lineEnd), 240),
+      kind: item.kind,
+      name: clampMessageContextString(item.name),
+      source: item.source,
+    };
+
+    if (item.source !== 'attachment') {
+      chip.path = clampMessageContextString(item.path, AGENT_MESSAGE_CONTEXT_PATH_LIMIT);
+      if (item.relativePath) {
+        chip.relativePath = clampMessageContextString(item.relativePath, AGENT_MESSAGE_CONTEXT_PATH_LIMIT);
+      }
+    }
+
+    if (item.kind === 'selection') {
+      chip.lineStart = positiveInteger(item.lineStart);
+      chip.lineEnd = positiveInteger(item.lineEnd);
+    }
+
+    if (item.kind === 'image') {
+      if (item.mimeType) {
+        chip.mimeType = clampMessageContextString(item.mimeType, 80);
+      }
+      if (typeof item.sizeBytes === 'number' && Number.isFinite(item.sizeBytes) && item.sizeBytes >= 0) {
+        chip.sizeBytes = Math.floor(item.sizeBytes);
+      }
+    }
+
+    return chip;
+  });
+}
+
+function asAgentMessageContextChip(value: unknown, index: number): AgentMessageContextChip | null {
+  if (!isRecord(value) || !isAgentContextItemKind(value.kind)) {
+    return null;
+  }
+
+  const rawName = typeof value.name === 'string' ? value.name : '';
+  const name = clampMessageContextString(rawName || 'Context');
+  if (!name) {
+    return null;
+  }
+
+  const id = typeof value.id === 'string' && value.id.trim()
+    ? clampMessageContextString(value.id, 240)
+    : `context-chip-${index}-${value.kind}-${name}`;
+  const chip: AgentMessageContextChip = {
+    id,
+    kind: value.kind,
+    name,
+  };
+
+  if (typeof value.path === 'string' && value.path.trim()) {
+    chip.path = clampMessageContextString(value.path, AGENT_MESSAGE_CONTEXT_PATH_LIMIT);
+  }
+  if (typeof value.relativePath === 'string' && value.relativePath.trim()) {
+    chip.relativePath = clampMessageContextString(value.relativePath, AGENT_MESSAGE_CONTEXT_PATH_LIMIT);
+  }
+  if (isAgentContextItemSource(value.source)) {
+    chip.source = value.source;
+  }
+
+  const lineStart = positiveInteger(value.lineStart);
+  const lineEnd = positiveInteger(value.lineEnd);
+  if (chip.kind === 'selection' && lineStart) {
+    chip.lineStart = lineStart;
+    chip.lineEnd = lineEnd ?? lineStart;
+  }
+
+  if (chip.kind === 'image') {
+    if (typeof value.mimeType === 'string' && value.mimeType.trim()) {
+      chip.mimeType = clampMessageContextString(value.mimeType, 80);
+    }
+    if (typeof value.sizeBytes === 'number' && Number.isFinite(value.sizeBytes) && value.sizeBytes >= 0) {
+      chip.sizeBytes = Math.floor(value.sizeBytes);
+    }
+  }
+
+  return chip;
+}
+
+function messageContextChipsFromMetadata(metadata: AgentThreadMessage['metadata']): AgentMessageContextChip[] {
+  const rawChips = isRecord(metadata) && Array.isArray(metadata.contextChips) ? metadata.contextChips : [];
+  return rawChips
+    .slice(0, AGENT_MESSAGE_CONTEXT_CHIP_LIMIT)
+    .map((entry, index) => asAgentMessageContextChip(entry, index))
+    .filter((entry): entry is AgentMessageContextChip => Boolean(entry));
+}
+
+function contextChipLabel(chip: Pick<AgentMessageContextChip, 'kind' | 'name' | 'lineStart' | 'lineEnd'>) {
+  if (chip.kind === 'selection' && chip.lineStart && chip.lineEnd) {
+    const lineRange = chip.lineStart === chip.lineEnd ? `${chip.lineStart}` : `${chip.lineStart}-${chip.lineEnd}`;
+    return `${chip.name}:${lineRange}`;
+  }
+
+  return chip.name;
+}
+
+function normalizeWorkspacePath(value: string) {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function hasUnsafeWindowsPathColon(value: string) {
+  const normalized = value.replace(/\\/g, '/');
+  const withoutDrive = /^[a-zA-Z]:\//.test(normalized) ? normalized.slice(2) : normalized;
+  return withoutDrive.includes(':');
+}
+
+function isWorkspaceRelativePathSafe(value: string) {
+  const normalized = value.replace(/\\/g, '/');
+  if (!normalized || normalized.startsWith('/') || /^[a-zA-Z]:\//.test(normalized) || normalized.includes('\0') || hasUnsafeWindowsPathColon(normalized)) {
+    return false;
+  }
+
+  return normalized.split('/').every((part) => part && part !== '.' && part !== '..');
+}
+
+function isPathInsideWorkspacePath(filePath: string, workspacePath: string) {
+  if (filePath.includes('\0') || hasUnsafeWindowsPathColon(filePath)) {
+    return false;
+  }
+
+  const root = normalizeWorkspacePath(workspacePath).toLowerCase();
+  const candidate = normalizeWorkspacePath(filePath).toLowerCase();
+  return candidate === root || candidate.startsWith(`${root}/`);
+}
+
+function joinWorkspaceRelativePath(workspacePath: string, relativePath: string) {
+  const separator = workspacePath.includes('\\') ? '\\' : '/';
+  return `${workspacePath.replace(/[\\/]+$/, '')}${separator}${relativePath.replace(/[\\/]+/g, separator)}`;
+}
+
+function workspacePathForContextChip(chip: AgentMessageContextChip, workspacePath: string | null) {
+  if (!workspacePath || chip.kind === 'image' || chip.source === 'attachment') {
+    return null;
+  }
+
+  if (chip.relativePath && isWorkspaceRelativePathSafe(chip.relativePath)) {
+    const candidate = joinWorkspaceRelativePath(workspacePath, chip.relativePath);
+    return isPathInsideWorkspacePath(candidate, workspacePath) ? candidate : null;
+  }
+
+  if (chip.path && !chip.path.startsWith('attachment://') && isPathInsideWorkspacePath(chip.path, workspacePath)) {
+    return chip.path;
+  }
+
+  return null;
+}
+
+function detectContextMention(value: string, cursorPosition: number): ContextMentionRange | null {
+  const safeCursor = Math.max(0, Math.min(value.length, cursorPosition));
+  const beforeCursor = value.slice(0, safeCursor);
+  const atIndex = beforeCursor.lastIndexOf('@');
+
+  if (atIndex === -1) {
+    return null;
+  }
+
+  const query = beforeCursor.slice(atIndex + 1);
+  if (/\s/.test(query)) {
+    return null;
+  }
+
+  return {
+    start: atIndex,
+    end: safeCursor,
+    query,
+  };
+}
+
+function getLineRangeContent(content: string, lineStart: number, lineEnd: number) {
+  const lines = content.split(/\r?\n/);
+  const start = Math.max(1, Math.min(lines.length || 1, lineStart));
+  const end = Math.max(start, Math.min(lines.length || start, lineEnd));
+  return {
+    lineStart: start,
+    lineEnd: end,
+    content: lines.slice(start - 1, end).join('\n'),
+  };
+}
+
+function createActiveFileContextItem(activeTab: NonNullable<AgentPanelProps['activeTab']>): AgentContextItem {
+  const tokenEstimate = estimateAgentTokens(activeTab.content);
+  return {
+    id: contextItemId('file', activeTab.path),
+    kind: 'file',
+    path: activeTab.path,
+    name: activeTab.name,
+    content: activeTab.content,
+    isDirty: activeTab.isDirty,
+    tokenEstimate,
+    originalTokenEstimate: tokenEstimate,
+    source: 'active-editor',
+  };
+}
+
+function createSelectionContextItem(selection: AgentEditorSelectionContext): AgentContextItem {
+  const tokenEstimate = estimateAgentTokens(selection.content);
+  return {
+    id: contextItemId('selection', selection.path, selection.lineStart, selection.lineEnd),
+    kind: 'selection',
+    path: selection.path,
+    name: selection.name,
+    content: selection.content,
+    isDirty: true,
+    lineStart: selection.lineStart,
+    lineEnd: selection.lineEnd,
+    tokenEstimate,
+    originalTokenEstimate: tokenEstimate,
+    source: 'active-editor',
+  };
+}
+
+function createWorkspaceSuggestionContextItem(suggestion: AgentContextFileSuggestion): AgentContextItem {
+  const tokenEstimate = Math.max(1, Math.ceil(Math.max(0, suggestion.sizeBytes) / AGENT_CONTEXT_TOKEN_CHARS));
+  return {
+    id: contextItemId('file', suggestion.path),
+    kind: 'file',
+    path: suggestion.path,
+    relativePath: suggestion.relativePath,
+    name: suggestion.name,
+    content: '',
+    tokenEstimate,
+    originalTokenEstimate: tokenEstimate,
+    source: 'workspace',
+  };
+}
+
+async function createDroppedAttachmentContextItem(file: File, aggregateImageDataUrlChars: number) {
+  const name = sanitizeAttachmentName(file.name);
+  if (isSensitiveAttachmentName(name)) {
+    return { rejected: { name, reason: 'Sensitive filenames cannot be attached as agent context.' } };
+  }
+
+  const extension = extensionFromFileName(name);
+  const isImageCandidate = AGENT_ATTACHMENT_IMAGE_MIME_BY_EXTENSION.has(extension);
+  const isTextCandidate = AGENT_ATTACHMENT_TEXT_EXTENSIONS.has(extension);
+  if (!isImageCandidate && !isTextCandidate) {
+    return { rejected: { name, reason: 'This file type is not supported for agent context.' } };
+  }
+
+  if (isImageCandidate && file.size > AGENT_ATTACHMENT_MAX_IMAGE_BYTES) {
+    return { rejected: { name, reason: 'This image is too large for agent context.' } };
+  }
+
+  if (isTextCandidate && file.size > AGENT_ATTACHMENT_MAX_TEXT_BYTES) {
+    return { rejected: { name, reason: 'This text file is too large for agent context.' } };
+  }
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (isImageCandidate) {
+    const mimeType = getImageMimeFromBytes(name, bytes);
+    if (!mimeType) {
+      return { rejected: { name, reason: 'Image bytes did not match a supported PNG, JPEG, or WebP file.' } };
+    }
+
+    const dataUrl = `data:${mimeType};base64,${bytesToBase64(bytes)}`;
+    if (aggregateImageDataUrlChars + dataUrl.length > AGENT_ATTACHMENT_MAX_IMAGE_DATA_URL_CHARS) {
+      return { rejected: { name, reason: 'Attached images exceed the safe request size limit.' } };
+    }
+
+    const tokenEstimate = Math.max(256, Math.ceil(file.size / 2048));
+    const attachmentPath = createDroppedAttachmentPath('image', name);
+    const item: AgentContextItem = {
+      id: contextItemId('image', attachmentPath),
+      kind: 'image',
+      path: attachmentPath,
+      name,
+      content: `[Image attachment: ${name}]`,
+      mimeType,
+      sizeBytes: file.size,
+      dataUrl,
+      tokenEstimate,
+      originalTokenEstimate: tokenEstimate,
+      source: 'attachment',
+    };
+    return { item, imageDataUrlChars: dataUrl.length };
+  }
+
+  if (bytes.includes(0)) {
+    return { rejected: { name, reason: 'Binary files cannot be attached as text context.' } };
+  }
+
+  let content = '';
+  try {
+    content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return { rejected: { name, reason: 'Only UTF-8 text files can be attached as context.' } };
+  }
+
+  const tokenEstimate = estimateAgentTokens(content);
+  const attachmentPath = createDroppedAttachmentPath('file', name);
+  const item: AgentContextItem = {
+    id: contextItemId('file', attachmentPath),
+    kind: 'file',
+    path: attachmentPath,
+    name,
+    content,
+    sizeBytes: file.size,
+    tokenEstimate,
+    originalTokenEstimate: tokenEstimate,
+    source: 'attachment',
+  };
+  return { item };
+}
+
+function isSameContextItem(left: Pick<AgentContextItem, 'kind' | 'path' | 'lineStart' | 'lineEnd'>, right: Pick<AgentContextItem, 'kind' | 'path' | 'lineStart' | 'lineEnd'>) {
+  return (
+    left.kind === right.kind &&
+    normalizeContextPathKey(left.path) === normalizeContextPathKey(right.path) &&
+    (left.kind !== 'selection' || (left.lineStart === right.lineStart && left.lineEnd === right.lineEnd))
+  );
+}
+
+function truncateContextFileContent(item: AgentContextItem, maxTokens: number): AgentContextItem {
+  const tokenEstimate = estimateContextItemTokens(item);
+  if (tokenEstimate <= maxTokens || item.kind === 'selection' || item.kind === 'image') {
+    return {
+      ...item,
+      tokenEstimate,
+      originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+    };
+  }
+
+  const maxChars = Math.floor(Math.max(0, maxTokens) * AGENT_CONTEXT_TOKEN_CHARS);
+  const marker = `\n\n[Context truncated to fit the ${contextItemLabel(item)} context window budget.]`;
+  const content =
+    maxChars <= marker.length + 80
+      ? `[Context for ${contextItemLabel(item)} omitted because the context window budget is full.]`
+      : `${item.content.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+  const nextTokenEstimate = estimateAgentTokens(content);
+
+  return {
+    ...item,
+    content,
+    tokenEstimate: nextTokenEstimate,
+    originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+    truncated: true,
+  };
+}
+
+function shrinkAgentRunContext({
+  prompt,
+  threadMessages,
+  contextItems,
+  contextWindow,
+}: {
+  prompt: string;
+  threadMessages: NonNullable<AgentRunPayload['threadMessages']>;
+  contextItems: AgentContextItem[];
+  contextWindow: number;
+}): ShrunkRunContext {
+  const availableTokens = Math.max(4000, contextWindow - AGENT_CONTEXT_RESERVED_TOKENS);
+  const promptTokens = estimateAgentTokens(prompt) + 1000;
+  let nextThreadMessages = threadMessages.map((message) => ({
+    ...message,
+    content: clampAgentMessageContent(message.content, 12000),
+  }));
+  const nextContextItems = contextItems.map((item) => {
+    const tokenEstimate = estimateAgentTokens(item.content || '');
+    return {
+      ...item,
+      tokenEstimate,
+      originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+    };
+  });
+
+  const estimateTotal = () =>
+    promptTokens +
+    nextThreadMessages.reduce((total, message) => total + estimateAgentTokens(message.content), 0) +
+    nextContextItems.reduce((total, item) => total + estimateContextItemTokens(item) + 80, 0);
+
+  while (nextThreadMessages.length > 0 && estimateTotal() > availableTokens) {
+    nextThreadMessages = nextThreadMessages.slice(1);
+  }
+
+  if (estimateTotal() <= availableTokens) {
+    return {
+      contextItems: nextContextItems,
+      threadMessages: nextThreadMessages,
+    };
+  }
+
+  const fixedContextItems = nextContextItems.filter((item) => item.kind !== 'file');
+  const fileItems = nextContextItems.filter((item) => item.kind === 'file');
+  const fixedTokens = promptTokens + fixedContextItems.reduce((total, item) => total + estimateContextItemTokens(item) + 80, 0);
+  let remainingFileTokens = Math.max(0, availableTokens - fixedTokens);
+  const shrunkFiles = fileItems.map((item) => {
+    const itemTokens = estimateContextItemTokens(item) + 80;
+    const allowedTokens = Math.max(0, Math.min(itemTokens, remainingFileTokens));
+    remainingFileTokens -= allowedTokens;
+    return truncateContextFileContent(item, Math.max(0, allowedTokens - 80));
+  });
+
+  return {
+    contextItems: nextContextItems.map((item) => shrunkFiles.find((file) => isSameContextItem(file, item)) ?? item),
+    threadMessages: nextThreadMessages,
+  };
+}
+
 function createLocalThreadMessage(
   role: AgentThreadMessage['role'],
   content: string,
   tone?: AgentThreadMessage['tone'],
   metadata?: Record<string, unknown>,
+  threadId = 'local',
 ): AgentThreadMessage {
   return {
     id: `local-${role}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-    threadId: 'local',
+    threadId,
     role,
     content,
     tone,
     metadata,
     createdAt: new Date().toISOString(),
+  };
+}
+
+function createLocalThreadId() {
+  return `local-thread-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function isLocalThreadId(value: string | null | undefined) {
+  return Boolean(value?.startsWith('local-thread-'));
+}
+
+function replaceOptimisticMessage(
+  current: AgentThreadMessage[],
+  optimisticMessageId: string | null,
+  persistedMessage: AgentThreadMessage,
+  fallbackPrefix: AgentThreadMessage[],
+) {
+  if (current.some((message) => message.id === persistedMessage.id)) {
+    return current;
+  }
+
+  if (!optimisticMessageId) {
+    return [...fallbackPrefix, persistedMessage];
+  }
+
+  let replaced = false;
+  const nextMessages = current.map((message) => {
+    if (message.id !== optimisticMessageId) {
+      return message;
+    }
+
+    replaced = true;
+    return persistedMessage;
+  });
+
+  return replaced ? nextMessages : [...fallbackPrefix, persistedMessage];
+}
+
+function createLocalThreadSummary({
+  id,
+  title,
+  workspaceKey,
+  workspaceName,
+  lastMessagePreview,
+}: {
+  id: string;
+  title: string;
+  workspaceKey: string | null;
+  workspaceName: string | null;
+  lastMessagePreview: string;
+}): AgentThreadSummary {
+  const now = new Date().toISOString();
+  return {
+    id,
+    title: titleFromPrompt(title),
+    workspaceKey,
+    workspaceName,
+    status: 'active',
+    messageCount: 1,
+    lastMessagePreview: lastMessagePreview.replace(/\s+/g, ' ').trim().slice(0, 180),
+    createdAt: now,
+    updatedAt: now,
+    lastMessageAt: now,
   };
 }
 
@@ -269,6 +1100,38 @@ function isAgentTaskStatus(value: unknown): value is AgentTaskStatus {
   return value === 'pending' || value === 'running' || value === 'completed' || value === 'blocked' || value === 'skipped';
 }
 
+function isAgentActivityStatus(value: unknown): value is AgentActivityEntry['status'] {
+  return value === 'running' || value === 'completed' || value === 'blocked' || value === 'error';
+}
+
+function asAgentActivityEntry(value: unknown): AgentActivityEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === 'string' ? value.id.trim() : '';
+  const title = typeof value.title === 'string' ? value.title.trim() : '';
+  if (!id || !title) {
+    return null;
+  }
+
+  return {
+    id,
+    status: isAgentActivityStatus(value.status) ? value.status : 'running',
+    title,
+    detail: typeof value.detail === 'string' && value.detail.trim() ? value.detail.trim() : undefined,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
+  };
+}
+
+function asAgentActivityEntries(value: unknown): AgentActivityEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map(asAgentActivityEntry).filter((entry): entry is AgentActivityEntry => Boolean(entry));
+}
+
 function asAgentTaskList(value: unknown): AgentTaskList | null {
   if (!isRecord(value) || !Array.isArray(value.items) || typeof value.id !== 'string') {
     return null;
@@ -280,8 +1143,15 @@ function asAgentTaskList(value: unknown): AgentTaskList | null {
       id: typeof item.id === 'string' ? item.id : `task-${index + 1}`,
       title: typeof item.title === 'string' ? item.title : 'Run workspace task',
       status: isAgentTaskStatus(item.status) ? item.status : 'pending',
-      kind: typeof item.kind === 'string' ? item.kind : 'aider_edit',
+      kind: typeof item.kind === 'string' ? item.kind : 'opencode_edit',
       targetPath: typeof item.targetPath === 'string' ? item.targetPath : undefined,
+      newPath: typeof item.newPath === 'string' ? item.newPath : undefined,
+      sourceExtension: typeof item.sourceExtension === 'string' ? item.sourceExtension : undefined,
+      targetExtension: typeof item.targetExtension === 'string' ? item.targetExtension : undefined,
+      lineStart: typeof item.lineStart === 'number' && Number.isFinite(item.lineStart) ? item.lineStart : undefined,
+      lineEnd: typeof item.lineEnd === 'number' && Number.isFinite(item.lineEnd) ? item.lineEnd : undefined,
+      contextItemId: typeof item.contextItemId === 'string' ? item.contextItemId : undefined,
+      instruction: typeof item.instruction === 'string' ? item.instruction : undefined,
       result: typeof item.result === 'string' ? item.result : undefined,
       error: typeof item.error === 'string' ? item.error : undefined,
     }));
@@ -308,6 +1178,402 @@ function taskListWithStatus(taskList: AgentTaskList, status: AgentTaskStatus): A
       status: item.status === 'completed' ? item.status : status,
     })),
   };
+}
+
+function formatTaskRange(item: Pick<AgentTaskItem, 'lineStart' | 'lineEnd'>) {
+  if (!item.lineStart || !item.lineEnd) {
+    return null;
+  }
+
+  return item.lineStart === item.lineEnd ? `line ${item.lineStart}` : `lines ${item.lineStart} to ${item.lineEnd}`;
+}
+
+function taskTargetPath(item: Pick<AgentTaskItem, 'targetPath' | 'newPath'>) {
+  return item.targetPath || item.newPath || '';
+}
+
+function normalizeThreadMemoryRelativePath(value: string | null | undefined) {
+  const normalized = String(value || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/g, '')
+    .trim();
+
+  return isWorkspaceRelativePathSafe(normalized) ? normalized : '';
+}
+
+function workspaceRelativePathFromAbsolute(filePath: string | undefined, workspacePath: string | null) {
+  if (!filePath || !workspacePath) {
+    return '';
+  }
+
+  const root = normalizeWorkspacePath(workspacePath);
+  const candidate = normalizeWorkspacePath(filePath);
+  const rootLower = root.toLowerCase();
+  const candidateLower = candidate.toLowerCase();
+  if (candidateLower === rootLower || !candidateLower.startsWith(`${rootLower}/`)) {
+    return '';
+  }
+
+  return normalizeThreadMemoryRelativePath(candidate.slice(root.length + 1));
+}
+
+function threadMemoryPathFromContextChip(chip: AgentMessageContextChip, workspacePath: string | null) {
+  if (chip.kind === 'image' || chip.source === 'attachment') {
+    return '';
+  }
+
+  if (chip.relativePath) {
+    return normalizeThreadMemoryRelativePath(chip.relativePath);
+  }
+
+  const workspaceRelativePath = workspaceRelativePathFromAbsolute(chip.path, workspacePath);
+  return workspaceRelativePath || normalizeThreadMemoryRelativePath(chip.path);
+}
+
+function cleanThreadMemoryAlias(value: string | null | undefined) {
+  return String(value || '')
+    .replace(/[\x00-\x1F\x7F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, THREAD_MEMORY_ALIAS_STRING_LIMIT);
+}
+
+function threadMemoryAliasesForPath(relativePath: string) {
+  const fileName = basenameFromPath(relativePath) || relativePath;
+  const stem = fileName.replace(/\.[^.]+$/g, '');
+  const readableStem = stem.replace(/[_-]+/g, ' ');
+  const readableName = fileName.replace(/[_-]+/g, ' ');
+  return [relativePath, fileName, stem, readableStem, readableName];
+}
+
+type ThreadMemoryFileInput = Omit<AgentThreadFileReference, 'aliases'> & {
+  aliases?: Array<string | null | undefined>;
+};
+
+function mergeThreadMemoryFile(filesByPath: Map<string, AgentThreadFileReference>, input: ThreadMemoryFileInput) {
+  const relativePath = normalizeThreadMemoryRelativePath(input.path);
+  if (!relativePath) {
+    return;
+  }
+
+  const key = normalizeContextPathKey(relativePath);
+  const existing = filesByPath.get(key);
+  const mergedAliases = [
+    ...threadMemoryAliasesForPath(relativePath),
+    ...(existing?.aliases ?? []),
+    ...(input.aliases ?? []),
+  ]
+    .map(cleanThreadMemoryAlias)
+    .filter(Boolean);
+  const aliases = [...new Set(mergedAliases)].slice(0, THREAD_MEMORY_ALIAS_LIMIT);
+  const existingTime = Date.parse(existing?.updatedAt ?? '') || 0;
+  const inputTime = Date.parse(input.updatedAt) || 0;
+  const latest = !existing || inputTime >= existingTime;
+
+  filesByPath.set(key, {
+    path: relativePath,
+    previousPath: latest ? input.previousPath : existing?.previousPath,
+    name: latest ? input.name : existing?.name ?? input.name,
+    aliases,
+    source: latest ? input.source : existing?.source ?? input.source,
+    lastAction: latest ? input.lastAction : existing?.lastAction ?? input.lastAction,
+    expectedExists: latest ? input.expectedExists : existing?.expectedExists ?? input.expectedExists,
+    updatedAt: latest ? input.updatedAt : existing?.updatedAt ?? input.updatedAt,
+  });
+}
+
+function addThreadMemoryForTask(filesByPath: Map<string, AgentThreadFileReference>, item: AgentTaskItem, updatedAt: string) {
+  if (item.status !== 'completed') {
+    return;
+  }
+
+  const kind = item.kind.toLowerCase();
+  const targetPath = normalizeThreadMemoryRelativePath(item.targetPath);
+  const newPath = normalizeThreadMemoryRelativePath(item.newPath);
+  const baseAliases = [item.title, item.instruction, item.result, targetPath, newPath];
+
+  if ((kind.includes('rename') || kind.includes('move')) && newPath) {
+    mergeThreadMemoryFile(filesByPath, {
+      path: newPath,
+      previousPath: targetPath || undefined,
+      name: basenameFromPath(newPath) || newPath,
+      aliases: baseAliases,
+      source: 'task',
+      lastAction: 'renamed',
+      expectedExists: true,
+      updatedAt,
+    });
+
+    if (targetPath && targetPath !== newPath) {
+      mergeThreadMemoryFile(filesByPath, {
+        path: targetPath,
+        name: basenameFromPath(targetPath) || targetPath,
+        aliases: baseAliases,
+        source: 'task',
+        lastAction: 'renamed',
+        expectedExists: false,
+        updatedAt,
+      });
+    }
+    return;
+  }
+
+  const currentPath = newPath || targetPath;
+  if (!currentPath) {
+    return;
+  }
+
+  const lastAction: AgentThreadFileReference['lastAction'] = kind.includes('delete')
+    ? 'deleted'
+    : kind.includes('create')
+      ? 'created'
+      : 'edited';
+
+  mergeThreadMemoryFile(filesByPath, {
+    path: currentPath,
+    name: basenameFromPath(currentPath) || currentPath,
+    aliases: baseAliases,
+    source: 'task',
+    lastAction,
+    expectedExists: lastAction !== 'deleted',
+    updatedAt,
+  });
+}
+
+function buildAgentThreadMemory(messages: AgentThreadMessage[], workspacePath: string | null): AgentThreadMemory | null {
+  const filesByPath = new Map<string, AgentThreadFileReference>();
+
+  for (const message of messages) {
+    const updatedAt = message.createdAt || new Date().toISOString();
+    for (const chip of messageContextChipsFromMetadata(message.metadata)) {
+      const relativePath = threadMemoryPathFromContextChip(chip, workspacePath);
+      if (!relativePath) {
+        continue;
+      }
+
+      mergeThreadMemoryFile(filesByPath, {
+        path: relativePath,
+        name: chip.name || basenameFromPath(relativePath) || relativePath,
+        aliases: [chip.name, chip.relativePath, chip.path],
+        source: 'context',
+        lastAction: 'attached',
+        expectedExists: true,
+        updatedAt,
+      });
+    }
+
+    const taskList = asAgentTaskList(message.metadata?.taskList);
+    if (taskList) {
+      const taskUpdatedAt = taskList.updatedAt || updatedAt;
+      for (const item of taskList.items) {
+        addThreadMemoryForTask(filesByPath, item, taskUpdatedAt);
+      }
+    }
+  }
+
+  const files = [...filesByPath.values()]
+    .sort((left, right) => (Date.parse(right.updatedAt) || 0) - (Date.parse(left.updatedAt) || 0) || left.path.localeCompare(right.path))
+    .slice(0, THREAD_MEMORY_FILE_LIMIT);
+
+  if (files.length === 0) {
+    return null;
+  }
+
+  return {
+    files,
+    updatedAt: files[0]?.updatedAt,
+  };
+}
+
+function taskActionLabel(item: Pick<AgentTaskItem, 'kind' | 'status'>) {
+  const kind = item.kind.toLowerCase();
+  if (kind.includes('delete')) {
+    return 'Deleted';
+  }
+  if (kind.includes('move')) {
+    return 'Moved';
+  }
+  if (kind.includes('rename')) {
+    return 'Renamed';
+  }
+  if (kind.includes('create')) {
+    return 'Created';
+  }
+  if (kind.includes('edit')) {
+    return 'Edited';
+  }
+
+  return item.status === 'completed' ? 'Reviewed' : item.status;
+}
+
+function pendingTaskActionLabel(item: Pick<AgentTaskItem, 'kind'>) {
+  const kind = item.kind.toLowerCase();
+  if (kind.includes('delete')) {
+    return 'Delete';
+  }
+  if (kind.includes('move')) {
+    return 'Move';
+  }
+  if (kind.includes('rename')) {
+    return 'Rename';
+  }
+  if (kind.includes('create')) {
+    return 'Create';
+  }
+  if (kind.includes('edit') || kind.includes('update')) {
+    return 'Update';
+  }
+
+  return 'Change';
+}
+
+function displayAgentWorkText(value: string) {
+  return value
+    .replace(/[A-Za-z]:[\\/][^\r\n]*?[\\/]Temp[\\/]tantalum-opencode-[^\\/\\s]+[\\/]workspace[\\/]?/gi, '')
+    .replace(/\/tmp\/tantalum-opencode-[^\s/]+\/workspace\/?/gi, '')
+    .replace(/\/var\/folders\/[^\r\n]*?\/T\/tantalum-opencode-[^\s/]+\/workspace\/?/gi, '')
+    .replace(/\btantalum-opencode-[^\s/\\]+[\\/](?:workspace[\\/]?)?/gi, '')
+    .replace(/\bopen\s*code\b/gi, 'Tantalum AI')
+    .replace(/\bopencode\b/gi, 'Tantalum AI')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+type AgentWorkIconKind = 'file' | 'tool' | 'model' | 'workspace' | 'network' | 'runtime';
+
+function AgentWorkIcon({ kind }: { kind: AgentWorkIconKind }) {
+  const className = `agent-work-row-icon agent-work-row-icon-${kind}`;
+
+  switch (kind) {
+    case 'file':
+      return <FileText size={12} className={className} />;
+    case 'tool':
+      return <Wrench size={12} className={className} />;
+    case 'model':
+      return <Cpu size={12} className={className} />;
+    case 'workspace':
+      return <Box size={12} className={className} />;
+    case 'network':
+      return <Cloud size={12} className={className} />;
+    default:
+      return <Terminal size={12} className={className} />;
+  }
+}
+
+function taskWorkIconKind(item: Pick<AgentTaskItem, 'kind' | 'targetPath' | 'newPath'>): AgentWorkIconKind {
+  const kind = item.kind.toLowerCase();
+
+  if (item.targetPath || item.newPath || /\b(create|delete|edit|file|move|read|rename|update|write)\b/.test(kind)) {
+    return 'file';
+  }
+  if (/\b(bash|call|command|shell|tool)\b/.test(kind)) {
+    return 'tool';
+  }
+  if (/\b(model|prompt|response)\b/.test(kind)) {
+    return 'model';
+  }
+  if (/\b(baseline|sandbox|snapshot|workspace)\b/.test(kind)) {
+    return 'workspace';
+  }
+
+  return 'runtime';
+}
+
+function activityWorkIconKind(activity: Pick<AgentActivityEntry, 'title' | 'detail'>): AgentWorkIconKind {
+  const title = activity.title.toLowerCase();
+  const detail = activity.detail?.toLowerCase() ?? '';
+  const text = `${title} ${detail}`;
+
+  if (/\b(file|created|deleted|edited|renamed|wrote)\b/.test(text)) {
+    return 'file';
+  }
+  if (/\b(tool|tool-calls?|function|bash|command|shell)\b/.test(text)) {
+    return 'tool';
+  }
+  if (/\b(baseline|changes|copying|copied|sandbox|snapshot|workspace)\b/.test(text)) {
+    return 'workspace';
+  }
+  if (/\b(model|prompt|response)\b/.test(text)) {
+    return 'model';
+  }
+  if (/\b(bridge|gateway|listening|server|sse|stream)\b/.test(text)) {
+    return 'network';
+  }
+
+  return 'runtime';
+}
+
+function liveWorkPhaseLabel({
+  activity,
+  taskList,
+  isPreparing,
+}: {
+  activity: AgentActivityEntry | null;
+  taskList: AgentTaskList | null;
+  isPreparing: boolean;
+}) {
+  const runningTask = taskList?.items.find((item) => item.status === 'running');
+  const runningTaskKind = runningTask?.kind.toLowerCase() ?? '';
+  const runningTaskText = `${runningTaskKind} ${runningTask?.title ?? ''}`.toLowerCase();
+
+  if (runningTask && /\b(create|delete|edit|file|rename|update|write)\b/.test(runningTaskText)) {
+    return 'Editing';
+  }
+
+  if (!activity) {
+    return isPreparing ? 'Planning' : 'Working';
+  }
+
+  const title = activity.title.toLowerCase();
+  const detail = activity.detail?.toLowerCase() ?? '';
+  const text = `${title} ${detail}`;
+
+  if (activity.status === 'blocked' || activity.status === 'error') {
+    return 'Paused';
+  }
+  if (/\b(applying changes|changes applied|live-applying|keep|revert)\b/.test(text)) {
+    return 'Applying';
+  }
+  if (/\b(collecting changes|changes collected|review|scanning)\b/.test(text)) {
+    return 'Reviewing';
+  }
+  if (/\b(tool:\s*(?:edit|patch|write)|created|deleted|edited|renamed|wrote|write file|file successfully)\b/.test(text)) {
+    return 'Editing';
+  }
+  if (/\b(tool|tool-calls?|function|bash|command|shell)\b/.test(text)) {
+    return 'Using Tools';
+  }
+  if (/\b(plan|planning|todo|task)\b/.test(text)) {
+    return 'Planning';
+  }
+  if (/\b(preparing|copying|copied|sandbox|snapshot|baseline|bridge|session|starting|started)\b/.test(text)) {
+    return 'Preparing';
+  }
+  if (/\b(cleaning|cleanup|stopping|stopped|prompt completed|finished)\b/.test(text)) {
+    return 'Finishing';
+  }
+  if (/\b(model|prompt|response|receiving|waiting|gateway|stream)\b/.test(text)) {
+    return 'Generating';
+  }
+
+  return 'Working';
+}
+
+function taskSummaryLabel(taskList: AgentTaskList | null, activities: AgentActivityEntry[]) {
+  if (taskList?.items.length) {
+    const targetPaths = [...new Set(taskList.items.map(taskTargetPath).filter(Boolean))];
+    const primaryTarget = targetPaths[0] ? basenameFromPath(targetPaths[0]) : null;
+    const sectionLabel = `${taskList.items.length} ${taskList.items.length === 1 ? 'section' : 'sections'}`;
+    return primaryTarget ? `Reviewed ${sectionLabel} of ${primaryTarget}` : `Reviewed ${sectionLabel}`;
+  }
+
+  if (activities.length > 0) {
+    return `Processed ${activities.length} ${activities.length === 1 ? 'runtime step' : 'runtime steps'}`;
+  }
+
+  return null;
 }
 
 function getPendingActionStatusUpdates(messages: AgentThreadMessage[]) {
@@ -357,6 +1623,68 @@ function findLatestTaskList(messages: AgentThreadMessage[], actionId?: string | 
   return null;
 }
 
+function taskListHasUnresolvedItems(taskList: AgentTaskList) {
+  return taskList.items.some((item) => item.status === 'blocked' || item.status === 'pending' || item.status === 'running');
+}
+
+function findLatestUnresolvedTaskList(messages: AgentThreadMessage[]) {
+  for (const message of [...messages].reverse()) {
+    const taskList = asAgentTaskList(message.metadata?.taskList);
+    if (taskList && taskListHasUnresolvedItems(taskList)) {
+      return taskList;
+    }
+  }
+
+  return null;
+}
+
+function findCompletedTaskReferences(messages: AgentThreadMessage[], prompt: string): AgentCompletedTaskReference[] {
+  if (!promptReferencesCompletedTask(prompt)) {
+    return [];
+  }
+
+  const references: AgentCompletedTaskReference[] = [];
+  const seen = new Set<string>();
+  for (const message of [...messages].reverse()) {
+    const taskList = asAgentTaskList(message.metadata?.taskList);
+    if (!taskList || seen.has(taskList.id)) {
+      continue;
+    }
+
+    if (taskList.items.some((item) => item.status !== 'completed' && item.status !== 'skipped')) {
+      continue;
+    }
+
+    const completedItems = taskList.items.filter((item) => item.status === 'completed');
+    if (completedItems.length === 0) {
+      continue;
+    }
+
+    seen.add(taskList.id);
+    references.push({
+      taskListId: taskList.id,
+      actionId: taskList.actionId,
+      completedAt: taskList.updatedAt,
+      items: completedItems.slice(0, 8).map((item) => ({
+        kind: item.kind,
+        title: item.title,
+        targetPath: item.targetPath,
+        newPath: item.newPath,
+        lineStart: item.lineStart,
+        lineEnd: item.lineEnd,
+        instruction: item.instruction,
+        result: item.result,
+      })),
+    });
+
+    if (references.length >= 3) {
+      break;
+    }
+  }
+
+  return references;
+}
+
 function findPendingActionById(messages: AgentThreadMessage[], actionId: string) {
   const statuses = getPendingActionStatusUpdates(messages);
   for (const message of [...messages].reverse()) {
@@ -378,14 +1706,19 @@ function CustomDropdown({
   onChange,
   className = '',
   placement = 'bottom',
+  triggerPrefix,
+  triggerSuffix,
 }: {
   value: string;
-  options: { label: string; value: string }[];
+  options: { label: string; value: string; icon?: ReactNode }[];
   onChange: (val: string) => void;
   className?: string;
   placement?: 'top' | 'bottom';
+  triggerPrefix?: ReactNode;
+  triggerSuffix?: ReactNode;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -401,63 +1734,76 @@ function CustomDropdown({
   }, [isOpen]);
 
   const selectedOption = options.find((o) => o.value === value) || options[0];
+  const searchable = options.length > 5;
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleOptions = normalizedQuery
+    ? options.filter((option) => option.label.toLowerCase().includes(normalizedQuery))
+    : options;
+  const hasOptionIcons = options.some((option) => option.icon);
 
   return (
     <div
       ref={containerRef}
-      className={`custom-dropdown-container ${className}`}
-      style={{ position: 'relative', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
-      onClick={() => setIsOpen(!isOpen)}
+      className={`custom-dropdown-container ${className} ${isOpen ? 'open' : ''}`}
     >
-      <div className="custom-dropdown-trigger" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-        <span style={{ fontSize: '11px', color: 'inherit' }}>{selectedOption?.label}</span>
-      </div>
+      <button
+        className="custom-dropdown-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        onClick={() => {
+          setIsOpen((current) => !current);
+          setQuery('');
+        }}
+      >
+        {triggerPrefix ? <span className="custom-dropdown-trigger-affix" aria-hidden="true">{triggerPrefix}</span> : null}
+        <span className="custom-dropdown-trigger-label">{selectedOption?.label}</span>
+        {triggerSuffix ? <span className="custom-dropdown-trigger-affix" aria-hidden="true">{triggerSuffix}</span> : null}
+      </button>
       {isOpen && (
         <div
-          className="custom-dropdown-menu"
-          style={{
-            position: 'absolute',
-            ...(placement === 'top' ? { bottom: '100%', marginBottom: '6px' } : { top: '100%', marginTop: '6px' }),
-            left: 0,
-            background: '#1e2023',
-            border: '1px solid #33363d',
-            borderRadius: '4px',
-            padding: '4px',
-            zIndex: 100,
-            minWidth: '110px',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '2px',
-          }}
+          className={`custom-dropdown-menu custom-dropdown-menu-${placement}`}
+          role="listbox"
         >
-          {options.map((opt) => (
-            <div
+          {searchable ? (
+            <div className="custom-dropdown-search">
+              <Search size={13} />
+              <input
+                value={query}
+                placeholder="Search"
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setIsOpen(false);
+                  }
+                }}
+              />
+              <Settings2 size={13} />
+            </div>
+          ) : null}
+          <div className={`custom-dropdown-list ${hasOptionIcons ? 'has-option-icons' : ''}`}>
+          {visibleOptions.map((opt) => (
+            <button
               key={opt.value}
-              className="custom-dropdown-item"
-              style={{
-                padding: '6px 8px',
-                fontSize: '11px',
-                borderRadius: '3px',
-                color: opt.value === value ? '#ffffff' : '#cccccc',
-                background: opt.value === value ? '#2d3139' : 'transparent',
-                cursor: 'pointer',
-              }}
-              onMouseEnter={(e) => {
-                if (opt.value !== value) e.currentTarget.style.background = '#25282e';
-              }}
-              onMouseLeave={(e) => {
-                if (opt.value !== value) e.currentTarget.style.background = 'transparent';
-              }}
+              className={`custom-dropdown-item ${hasOptionIcons ? 'has-option-icon' : ''} ${opt.value === value ? 'active' : ''}`}
+              type="button"
+              role="option"
+              aria-selected={opt.value === value}
               onClick={(e) => {
                 e.stopPropagation();
                 onChange(opt.value);
                 setIsOpen(false);
+                setQuery('');
               }}
             >
-              {opt.label}
-            </div>
+              {hasOptionIcons ? <span className="custom-dropdown-option-icon" aria-hidden="true">{opt.icon}</span> : null}
+              <span className="custom-dropdown-label">{opt.label}</span>
+            </button>
           ))}
+          {visibleOptions.length === 0 ? <div className="custom-dropdown-empty">No matches</div> : null}
+          </div>
         </div>
       )}
     </div>
@@ -468,6 +1814,8 @@ export function AgentPanel({
   user,
   workspacePath,
   activeTab,
+  activeSelection = null,
+  boardContext = null,
   pushConsole,
   pushToast,
   pendingReview = null,
@@ -475,6 +1823,7 @@ export function AgentPanel({
   reviewResolutionNotice = null,
   onAgentChangesPrepared,
   onPreviewAgentFile,
+  onOpenContextFile,
   onResolveAgentChanges,
   defaultView = 'chat',
   hideChat = false,
@@ -489,21 +1838,27 @@ export function AgentPanel({
   const [draftPrompt, setDraftPrompt] = useState('');
   const [settings, setSettings] = useState<AgentSettingsState>(() => createDefaultAgentSettings());
   const [isViewingHistory, setIsViewingHistory] = useState(activeThreadId === null);
-  const [hideActiveTabContext, setHideActiveTabContext] = useState(false);
   const [composeTarget, setComposeTarget] = useState<AgentComposeTarget>('new');
   const [agentIntent, setAgentIntent] = useState<AgentIntent>('agent');
+  const [agentPermissionMode, setAgentPermissionMode] = useState<AgentPermissionMode>('default');
+  const [contextItems, setContextItems] = useState<AgentContextItem[]>([]);
+  const [contextMention, setContextMention] = useState<ContextMentionRange | null>(null);
+  const [contextFileSuggestions, setContextFileSuggestions] = useState<AgentContextFileSuggestion[]>([]);
+  const [contextSuggestionsLoading, setContextSuggestionsLoading] = useState(false);
+  const [previewImageContextItem, setPreviewImageContextItem] = useState<AgentImagePreview | null>(null);
+  const [messageContextImagePreviews, setMessageContextImagePreviews] = useState<Map<string, string>>(() => new Map());
+  const [contextDropActive, setContextDropActive] = useState(false);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
-  const [newSessionMenuOpen, setNewSessionMenuOpen] = useState(false);
-  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [threadListExpanded, setThreadListExpanded] = useState(false);
+  const [renameThreadPrompt, setRenameThreadPrompt] = useState<AgentThreadSummary | null>(null);
+  const [renameThreadTitle, setRenameThreadTitle] = useState('');
+  const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
   const [agentIntentMenuOpen, setAgentIntentMenuOpen] = useState(false);
-  const [approvalMenuOpen, setApprovalMenuOpen] = useState(false);
-
-  useEffect(() => {
-    setHideActiveTabContext(false);
-  }, [activeTab?.path]);
+  const [contextAttachmentMenuOpen, setContextAttachmentMenuOpen] = useState(false);
 
   const [loadingSettings, setLoadingSettings] = useState(true);
+  const [settingsBootstrapped, setSettingsBootstrapped] = useState(false);
   const [loadingThreads, setLoadingThreads] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -512,12 +1867,28 @@ export function AgentPanel({
   const [stoppingThreadId, setStoppingThreadId] = useState<string | null>(null);
   const [unreadCompletedThreadIds, setUnreadCompletedThreadIds] = useState<Set<string>>(() => new Set());
   const [liveTaskLists, setLiveTaskLists] = useState<Map<string, AgentTaskList>>(() => new Map());
+  const [liveActivities, setLiveActivities] = useState<Map<string, AgentActivityEntry[]>>(() => new Map());
+  const [thinkingDetailsOpen, setThinkingDetailsOpen] = useState(false);
+  const [expandedWorkSummaryIds, setExpandedWorkSummaryIds] = useState<Set<string>>(() => new Set());
+  const [composerReviewOpen, setComposerReviewOpen] = useState(true);
+  const [composerTasksOpen, setComposerTasksOpen] = useState(false);
   const [credentialForm, setCredentialForm] = useState<CredentialFormState>(EMPTY_CREDENTIAL_FORM);
 
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const contextImagePreviewRef = useRef<HTMLDivElement | null>(null);
+  const contextDragDepthRef = useRef(0);
   const reviewNoticeIdRef = useRef<string | null>(null);
   const activeThreadIdRef = useRef<string | null>(activeThreadId);
   const isViewingHistoryRef = useRef(isViewingHistory);
+  const liveActivitiesRef = useRef<Map<string, AgentActivityEntry[]>>(new Map());
+  const contextMentionRef = useRef<ContextMentionRange | null>(contextMention);
+  const workspaceKey = workspacePath?.trim() || null;
+  const workspaceKeyRef = useRef<string | null>(workspaceKey);
+  const previousWorkspaceKeyRef = useRef<string | null>(workspaceKey);
+  const threadRefreshRequestRef = useRef(0);
+  const settingsRefreshRequestRef = useRef(0);
+  const messageLoadRequestRef = useRef(0);
   const deferredPrompt = useDeferredValue(draftPrompt);
 
   useEffect(() => {
@@ -529,7 +1900,70 @@ export function AgentPanel({
   }, [isViewingHistory]);
 
   useEffect(() => {
+    if (pendingReview) {
+      setComposerReviewOpen(true);
+    }
+  }, [pendingReview?.id]);
+
+  useEffect(() => {
+    contextMentionRef.current = contextMention;
+  }, [contextMention]);
+
+  useEffect(() => {
+    workspaceKeyRef.current = workspaceKey;
+    if (previousWorkspaceKeyRef.current === workspaceKey) {
+      return;
+    }
+
+    previousWorkspaceKeyRef.current = workspaceKey;
+    threadRefreshRequestRef.current += 1;
+    settingsRefreshRequestRef.current += 1;
+    messageLoadRequestRef.current += 1;
+    activeThreadIdRef.current = null;
+    setActiveThreadId(null);
+    setMessages([]);
+    setComposeTarget('new');
+    setAgentPermissionMode('default');
+    setIsViewingHistory(true);
+    setSessionSearchQuery('');
+    setThreadListExpanded(false);
+    setRenameThreadPrompt(null);
+    setRenameThreadTitle('');
+    setRenamingThreadId(null);
+    setContextItems([]);
+    setContextMention(null);
+    setContextFileSuggestions([]);
+    setContextSuggestionsLoading(false);
+    setPreviewImageContextItem(null);
+    setMessageContextImagePreviews(new Map());
+    setContextDropActive(false);
+    contextDragDepthRef.current = 0;
+    setUnreadCompletedThreadIds(new Set());
+    setLiveTaskLists(new Map());
+    liveActivitiesRef.current = new Map();
+    setLiveActivities(new Map());
+    setThinkingDetailsOpen(false);
+    setExpandedWorkSummaryIds(new Set());
+    setComposerTasksOpen(false);
+    setLoadingMessages(false);
+    setThreadSummaries([]);
+    setLoadingThreads(false);
+  }, [workspaceKey]);
+
+  useEffect(() => {
     const offProgress = window.tantalum.agent.onProgress((event: AgentProgressEvent) => {
+      const activity = asAgentActivityEntry(event.activity);
+      if (activity && event.threadId) {
+        setLiveActivities((current) => {
+          const next = new Map(current);
+          const existing = next.get(event.threadId) ?? [];
+          const withoutDuplicate = existing.filter((entry) => entry.id !== activity.id);
+          next.set(event.threadId, [...withoutDuplicate, activity]);
+          liveActivitiesRef.current = next;
+          return next;
+        });
+      }
+
       const taskList = asAgentTaskList(event.taskList);
       if (!taskList) {
         return;
@@ -565,25 +1999,59 @@ export function AgentPanel({
     preferences.selectedCustomModelName && selectedCredential?.modelNames.includes(preferences.selectedCustomModelName)
       ? preferences.selectedCustomModelName
       : selectedCredential?.modelNames[0] ?? null;
+  const isReplyingToThread = !isViewingHistory && composeTarget === 'thread' && Boolean(activeThreadId);
   const activeThread = useMemo(
     () => threadSummaries.find((thread) => thread.id === activeThreadId) ?? null,
     [activeThreadId, threadSummaries],
   );
+  const activeFileSuggestion = useMemo(() => {
+    if (!activeTab || contextItems.some((item) => isSameContextItem(item, { kind: 'file', path: activeTab.path }))) {
+      return null;
+    }
+
+    return createActiveFileContextItem(activeTab);
+  }, [activeTab, contextItems]);
+  const activeSelectionSuggestion = useMemo(() => {
+    if (!activeSelection) {
+      return null;
+    }
+
+    const suggestion = createSelectionContextItem(activeSelection);
+    if (contextItems.some((item) => isSameContextItem(item, suggestion))) {
+      return null;
+    }
+
+    return suggestion;
+  }, [activeSelection, contextItems]);
+  const contextWindow = useMemo(() => {
+    const managedWindow = preferences.defaultMode === 'power' ? metadata.powerContextWindow : metadata.fastContextWindow;
+    return managedWindow ?? (preferences.defaultMode === 'power' ? FALLBACK_POWER_CONTEXT_WINDOW : FALLBACK_FAST_CONTEXT_WINDOW);
+  }, [metadata.fastContextWindow, metadata.powerContextWindow, preferences.defaultMode]);
+  const estimatedContextTokens = useMemo(() => {
+    const threadMessages = isReplyingToThread ? toThreadContext(messages) : [];
+    return (
+      estimateAgentTokens(draftPrompt) +
+      threadMessages.reduce((total, message) => total + estimateAgentTokens(message.content), 0) +
+      contextItems.reduce((total, item) => total + estimateContextItemTokens(item) + 80, 0)
+    );
+  }, [contextItems, draftPrompt, isReplyingToThread, messages]);
+  const contextPercent = contextWindow > 0 ? Math.min(100, (estimatedContextTokens / contextWindow) * 100) : 0;
 
   const canUseManaged = settings.managedAvailable && settings.creditAccount.remainingCredits > 0;
   const canUseCustom = Boolean(selectedCredential && selectedModel);
+  const showInitialAgentLoading = loadingSettings && !settingsBootstrapped;
   const canSend =
     Boolean(workspacePath) &&
     hasCloudAgent &&
     !busy &&
     deferredPrompt.trim().length > 0 &&
     (preferences.selectedSource === 'managed' ? canUseManaged : canUseCustom);
-  const isReplyingToThread = composeTarget === 'thread' && Boolean(activeThreadId);
   const activeThreadIsRunning = Boolean(activeThreadId && runningThreadId === activeThreadId);
+  const activeThreadIsPreparing = busy && !activeThreadIsRunning && !isViewingHistory && messages.length > 0;
   const isStoppingActiveThread = Boolean(activeThreadId && stoppingThreadId === activeThreadId);
   const agentIntentLabel = agentIntent === 'ask' ? 'Ask' : 'Agent';
   const agentIntentDescription = agentIntent === 'ask' ? 'Ask mode answers without changing files.' : 'Agent mode can apply workspace edits with revert available.';
-  const threadSearchQuery = sessionSearchQuery.trim().toLowerCase();
+  const threadSearchQuery = sessionSearchOpen ? sessionSearchQuery.trim().toLowerCase() : '';
   const visibleThreadSummaries = useMemo(
     () =>
       threadSummaries.filter((thread) => {
@@ -598,15 +2066,17 @@ export function AgentPanel({
     [threadSearchQuery, threadSummaries],
   );
 
+  useEffect(() => {
+    setThreadListExpanded(false);
+  }, [threadSearchQuery, workspaceKey]);
+
   const closeAgentMenus = useCallback(() => {
-    setNewSessionMenuOpen(false);
-    setMoreMenuOpen(false);
     setAgentIntentMenuOpen(false);
-    setApprovalMenuOpen(false);
+    setContextAttachmentMenuOpen(false);
   }, []);
 
   useEffect(() => {
-    if (!newSessionMenuOpen && !moreMenuOpen && !agentIntentMenuOpen && !approvalMenuOpen) {
+    if (!agentIntentMenuOpen && !contextAttachmentMenuOpen) {
       return;
     }
 
@@ -620,53 +2090,493 @@ export function AgentPanel({
 
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [agentIntentMenuOpen, approvalMenuOpen, closeAgentMenus, moreMenuOpen, newSessionMenuOpen]);
+  }, [agentIntentMenuOpen, closeAgentMenus, contextAttachmentMenuOpen]);
+
+  useEffect(() => {
+    if (!contextMention || !workspacePath) {
+      setContextFileSuggestions([]);
+      setContextSuggestionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const handle = window.setTimeout(async () => {
+      setContextSuggestionsLoading(true);
+      const response = await window.tantalum.workspace.suggestContextFiles({
+        query: contextMention.query,
+        maxResults: 3,
+      });
+
+      if (cancelled) {
+        return;
+      }
+
+      setContextSuggestionsLoading(false);
+      if (!response.success) {
+        setContextFileSuggestions([]);
+        return;
+      }
+
+      setContextFileSuggestions(response.files);
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [contextMention, workspacePath]);
+
+  useEffect(() => {
+    if (!activeTab) {
+      return;
+    }
+
+    setContextItems((current) => {
+      let changed = false;
+      const nextItems = current.map((item) => {
+        if (normalizeContextPathKey(item.path) !== normalizeContextPathKey(activeTab.path)) {
+          return item;
+        }
+
+        const content =
+          item.kind === 'selection' && item.lineStart && item.lineEnd
+            ? getLineRangeContent(activeTab.content, item.lineStart, item.lineEnd).content
+            : activeTab.content;
+        const tokenEstimate = estimateAgentTokens(content);
+        if (item.content === content && item.isDirty === activeTab.isDirty && item.tokenEstimate === tokenEstimate && item.source === 'active-editor') {
+          return item;
+        }
+
+        changed = true;
+        return {
+          ...item,
+          content,
+          isDirty: activeTab.isDirty,
+          tokenEstimate,
+          originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+          source: 'active-editor' as const,
+        };
+      });
+
+      return changed ? nextItems : current;
+    });
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!previewImageContextItem || previewImageContextItem.source !== 'composer' || !previewImageContextItem.contextItem) {
+      return;
+    }
+
+    if (!contextItems.some((item) => isSameContextItem(item, previewImageContextItem.contextItem as AgentContextItem))) {
+      setPreviewImageContextItem(null);
+    }
+  }, [contextItems, previewImageContextItem]);
+
+  useEffect(() => {
+    if (!previewImageContextItem) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (contextImagePreviewRef.current?.contains(target)) {
+        return;
+      }
+
+      if (target instanceof Element && target.closest('.tantalum-ai-context-attached-chip.image')) {
+        return;
+      }
+
+      if (target instanceof Element && target.closest('.agent-message-context-chip.image')) {
+        return;
+      }
+
+      setPreviewImageContextItem(null);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [previewImageContextItem]);
+
+  const updateContextMentionFromTextarea = useCallback(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      setContextMention(null);
+      return;
+    }
+
+    setContextMention(detectContextMention(textarea.value, textarea.selectionStart ?? textarea.value.length));
+  }, []);
+
+  const consumeContextMention = useCallback((nextPrompt: string, range: ContextMentionRange | null) => {
+    if (!range) {
+      setDraftPrompt(nextPrompt);
+      return;
+    }
+
+    const before = nextPrompt.slice(0, range.start);
+    const after = nextPrompt.slice(range.end);
+    const separator = before && after && !/\s$/.test(before) && !/^\s/.test(after) ? ' ' : '';
+    const updatedPrompt = `${before}${separator}${after}`.replace(/[ \t]{2,}/g, ' ');
+    setDraftPrompt(updatedPrompt);
+    setContextMention(null);
+
+    window.requestAnimationFrame(() => {
+      const textarea = composerTextareaRef.current;
+      if (!textarea) {
+        return;
+      }
+
+      const cursor = Math.min(updatedPrompt.length, before.length + separator.length);
+      textarea.focus();
+      textarea.setSelectionRange(cursor, cursor);
+    });
+  }, []);
+
+  const addContextItem = useCallback((item: AgentContextItem, replaceMention = true) => {
+    const normalizedItem = {
+      ...item,
+      id: contextItemId(item.kind, item.path, item.lineStart, item.lineEnd),
+      tokenEstimate: item.tokenEstimate ?? estimateAgentTokens(item.content || ''),
+      originalTokenEstimate: item.originalTokenEstimate ?? item.tokenEstimate ?? estimateAgentTokens(item.content || ''),
+    };
+
+    setContextItems((current) => {
+      if (current.some((entry) => isSameContextItem(entry, normalizedItem))) {
+        return current;
+      }
+
+      return [...current, normalizedItem];
+    });
+
+    if (replaceMention) {
+      consumeContextMention(draftPrompt, contextMentionRef.current);
+    }
+  }, [consumeContextMention, draftPrompt]);
+
+  const removeContextItem = useCallback((item: AgentContextItem) => {
+    setContextItems((current) => current.filter((entry) => !isSameContextItem(entry, item)));
+  }, []);
+
+  const insertAtMention = useCallback(() => {
+    const textarea = composerTextareaRef.current;
+    const cursor = textarea?.selectionStart ?? draftPrompt.length;
+    const nextPrompt = `${draftPrompt.slice(0, cursor)}@${draftPrompt.slice(cursor)}`;
+    const nextCursor = cursor + 1;
+    setDraftPrompt(nextPrompt);
+
+    window.requestAnimationFrame(() => {
+      const nextTextarea = composerTextareaRef.current;
+      if (!nextTextarea) {
+        return;
+      }
+
+      nextTextarea.focus();
+      nextTextarea.setSelectionRange(nextCursor, nextCursor);
+      setContextMention(detectContextMention(nextPrompt, nextCursor));
+    });
+  }, [draftPrompt]);
+
+  const handlePickContextAttachments = useCallback(async () => {
+    if (!workspacePath || busy) {
+      return;
+    }
+
+    setContextAttachmentMenuOpen(false);
+    setContextMention(null);
+    let response: Awaited<ReturnType<typeof window.tantalum.workspace.pickContextAttachments>>;
+    try {
+      if (typeof window.tantalum.workspace.pickContextAttachments !== 'function') {
+        pushToast('Restart Tantalum IDE to enable file attachments.', 'info');
+        return;
+      }
+
+      response = await window.tantalum.workspace.pickContextAttachments();
+      if (!response.success) {
+        pushToast(response.error || 'Unable to attach files as context.', 'error');
+        return;
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to open the attachment picker.', 'error');
+      return;
+    }
+
+    for (const item of response.items) {
+      addContextItem(item, false);
+    }
+
+    if (response.items.length > 0) {
+      pushToast(`Attached ${response.items.length} context ${response.items.length === 1 ? 'item' : 'items'}.`, 'success');
+    }
+
+    const rejected = response.rejected ?? [];
+    rejected.slice(0, 3).forEach((entry) => {
+      pushToast(`${entry.name}: ${entry.reason}`, 'error');
+    });
+    if (rejected.length > 3) {
+      pushToast(`${rejected.length - 3} more selected files were rejected.`, 'error');
+    }
+  }, [addContextItem, busy, pushToast, workspacePath]);
+
+  const addDroppedContextAttachments = useCallback(async (files: File[]) => {
+    if (!workspacePath || busy || files.length === 0) {
+      return;
+    }
+
+    let aggregateImageDataUrlChars = contextItems.reduce((total, item) => total + (item.kind === 'image' && item.dataUrl ? item.dataUrl.length : 0), 0);
+    const rejected: Array<{ name: string; reason: string }> = [];
+    let attachedCount = 0;
+
+    for (const file of files.slice(0, AGENT_ATTACHMENT_MAX_DROPPED_FILES)) {
+      try {
+        const attachment = await createDroppedAttachmentContextItem(file, aggregateImageDataUrlChars);
+        if ('rejected' in attachment && attachment.rejected) {
+          rejected.push(attachment.rejected);
+          continue;
+        }
+
+        if ('item' in attachment && attachment.item) {
+          addContextItem(attachment.item, false);
+          attachedCount += 1;
+          aggregateImageDataUrlChars += attachment.imageDataUrlChars || 0;
+        }
+      } catch (error) {
+        rejected.push({
+          name: sanitizeAttachmentName(file.name),
+          reason: error instanceof Error ? error.message : 'Unable to attach this file.',
+        });
+      }
+    }
+
+    if (files.length > AGENT_ATTACHMENT_MAX_DROPPED_FILES) {
+      rejected.push({
+        name: 'Additional dropped files',
+        reason: `Only ${AGENT_ATTACHMENT_MAX_DROPPED_FILES} files can be attached at once.`,
+      });
+    }
+
+    if (attachedCount > 0) {
+      pushToast(`Attached ${attachedCount} context ${attachedCount === 1 ? 'item' : 'items'}.`, 'success');
+    }
+
+    rejected.slice(0, 3).forEach((entry) => {
+      pushToast(`${entry.name}: ${entry.reason}`, 'error');
+    });
+    if (rejected.length > 3) {
+      pushToast(`${rejected.length - 3} more dropped files were rejected.`, 'error');
+    }
+  }, [addContextItem, busy, contextItems, pushToast, workspacePath]);
+
+  const handleContextDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!workspacePath || busy || !hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    contextDragDepthRef.current += 1;
+    setContextDropActive(true);
+  }, [busy, workspacePath]);
+
+  const handleContextDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!workspacePath || busy || !hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    setContextDropActive(true);
+  }, [busy, workspacePath]);
+
+  const handleContextDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    contextDragDepthRef.current = Math.max(0, contextDragDepthRef.current - 1);
+    if (contextDragDepthRef.current === 0) {
+      setContextDropActive(false);
+    }
+  }, []);
+
+  const handleContextDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!workspacePath || busy || !hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    contextDragDepthRef.current = 0;
+    setContextDropActive(false);
+    const files = Array.from(event.dataTransfer.files);
+    void addDroppedContextAttachments(files);
+  }, [addDroppedContextAttachments, busy, workspacePath]);
+
+  const rememberMessageContextImagePreviews = useCallback((items: AgentContextItem[]) => {
+    const imageEntries = items
+      .filter((item) => item.kind === 'image' && typeof item.dataUrl === 'string' && item.dataUrl.length > 0)
+      .map((item) => [item.id || contextItemId(item.kind, item.path, item.lineStart, item.lineEnd), item.dataUrl as string] as const);
+
+    if (imageEntries.length === 0) {
+      return;
+    }
+
+    setMessageContextImagePreviews((current) => {
+      const next = new Map(current);
+      imageEntries.forEach(([id, dataUrl]) => next.set(id, dataUrl));
+      return next;
+    });
+  }, []);
+
+  const resolveContextItemsForRun = useCallback(async () => {
+    const resolvedItems: AgentContextItem[] = [];
+    const rejectedItems: AgentContextItem[] = [];
+
+    for (const item of contextItems) {
+      try {
+        if (item.source === 'attachment' || item.kind === 'image') {
+          const tokenEstimate = estimateContextItemTokens(item);
+          resolvedItems.push({
+            ...item,
+            id: contextItemId(item.kind, item.path, item.lineStart, item.lineEnd),
+            tokenEstimate,
+            originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+          });
+          continue;
+        }
+
+        if (activeTab && normalizeContextPathKey(item.path) === normalizeContextPathKey(activeTab.path)) {
+          const content =
+            item.kind === 'selection' && item.lineStart && item.lineEnd
+              ? getLineRangeContent(activeTab.content, item.lineStart, item.lineEnd).content
+              : activeTab.content;
+          const tokenEstimate = estimateAgentTokens(content);
+          resolvedItems.push({
+            ...item,
+            content,
+            isDirty: activeTab.isDirty,
+            tokenEstimate,
+            originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+            source: 'active-editor',
+          });
+          continue;
+        }
+
+        const response = await window.tantalum.workspace.readContextFile({
+          path: item.path,
+          lineStart: item.kind === 'selection' ? item.lineStart ?? null : null,
+          lineEnd: item.kind === 'selection' ? item.lineEnd ?? null : null,
+        });
+        if (!response.success) {
+          pushToast(`${contextItemLabel(item)} was not added to context: ${response.error}`, 'error');
+          rejectedItems.push(item);
+          continue;
+        }
+
+        const tokenEstimate = estimateAgentTokens(response.content);
+        resolvedItems.push({
+          ...response,
+          id: contextItemId(response.kind, response.path, response.lineStart, response.lineEnd),
+          tokenEstimate,
+          originalTokenEstimate: item.originalTokenEstimate ?? tokenEstimate,
+        });
+      } catch (error) {
+        pushToast(`${contextItemLabel(item)} was not added to context: ${error instanceof Error ? error.message : 'Unable to read file.'}`, 'error');
+        rejectedItems.push(item);
+      }
+    }
+
+    if (rejectedItems.length > 0) {
+      setContextItems((current) => current.filter((entry) => !rejectedItems.some((rejected) => isSameContextItem(entry, rejected))));
+    }
+
+    return resolvedItems;
+  }, [activeTab, contextItems, pushToast]);
 
   const refreshThreads = useCallback(async () => {
-    if (!hasCloudAgent) {
+    const targetWorkspaceKey = workspaceKey;
+    const requestId = ++threadRefreshRequestRef.current;
+
+    if (!hasCloudAgent || !targetWorkspaceKey) {
       setThreadSummaries([]);
+      setLoadingThreads(false);
       return;
     }
 
     setLoadingThreads(true);
     try {
-      setThreadSummaries(await listAgentThreads(null));
+      const nextThreads = await listAgentThreads(targetWorkspaceKey);
+      if (threadRefreshRequestRef.current !== requestId || workspaceKeyRef.current !== targetWorkspaceKey) {
+        return;
+      }
+      const scopedThreads = threadsForWorkspace(nextThreads, targetWorkspaceKey);
+      setThreadSummaries((current) => [
+        ...current.filter((thread) => isLocalThreadId(thread.id) && !scopedThreads.some((entry) => entry.id === thread.id)),
+        ...scopedThreads,
+      ]);
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : 'Unable to load Tantalum AI threads.', 'error');
+      if (threadRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
+        pushToast(error instanceof Error ? error.message : 'Unable to load Tantalum AI threads.', 'error');
+      }
     } finally {
-      setLoadingThreads(false);
+      if (threadRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
+        setLoadingThreads(false);
+      }
     }
-  }, [hasCloudAgent, pushToast]);
+  }, [hasCloudAgent, pushToast, workspaceKey]);
 
   const refreshAgentSettings = useCallback(async (showErrors = true) => {
+    const targetWorkspaceKey = workspaceKey;
+    const requestId = ++settingsRefreshRequestRef.current;
+
     if (!hasCloudAgent) {
       setSettings(createDefaultAgentSettings());
       setThreadSummaries([]);
       setLoadingSettings(false);
+      setSettingsBootstrapped(true);
       return;
     }
 
     setLoadingSettings(true);
     try {
-      const nextSettings = await loadAgentSettings();
+      const nextSettings = await loadAgentSettings(targetWorkspaceKey);
+      if (settingsRefreshRequestRef.current !== requestId || workspaceKeyRef.current !== targetWorkspaceKey) {
+        return;
+      }
       setSettings(nextSettings);
-      setThreadSummaries(nextSettings.recentThreads);
-      if (activeThreadId && !nextSettings.recentThreads.some((thread) => thread.id === activeThreadId)) {
+      const scopedThreads = threadsForWorkspace(nextSettings.recentThreads, targetWorkspaceKey);
+      setThreadSummaries((current) => [
+        ...current.filter((thread) => isLocalThreadId(thread.id) && !scopedThreads.some((entry) => entry.id === thread.id)),
+        ...scopedThreads,
+      ]);
+      const currentActiveThreadId = activeThreadIdRef.current;
+      if (currentActiveThreadId && !isLocalThreadId(currentActiveThreadId) && !scopedThreads.some((thread) => thread.id === currentActiveThreadId)) {
         setActiveThreadId(null);
         setMessages([]);
         setComposeTarget('new');
         setIsViewingHistory(true);
       }
     } catch (error) {
-      if (showErrors) {
+      if (showErrors && settingsRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
         pushToast(error instanceof Error ? error.message : 'Unable to load agent settings.', 'error');
       }
     } finally {
-      setLoadingSettings(false);
+      if (settingsRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
+        setLoadingSettings(false);
+        setSettingsBootstrapped(true);
+      }
     }
-  }, [activeThreadId, hasCloudAgent, pushToast]);
+  }, [hasCloudAgent, pushToast, workspaceKey]);
 
-  async function persistPreferences(nextPreferences: AgentPreferences) {
+  async function persistPreferences(nextPreferences: AgentPreferences, options: PersistPreferencesOptions = {}) {
     const sanitizedPreferences: AgentPreferences =
       nextPreferences.selectedSource === 'custom'
         ? nextPreferences
@@ -683,9 +2593,15 @@ export function AgentPanel({
     }
 
     try {
-      const saved = await saveAgentPreferences(sanitizedPreferences);
+      const saved = await saveAgentPreferences(sanitizedPreferences, {
+        includeCustomModelName: options.includeCustomModelName,
+      });
       setSettings((current) => ({ ...current, preferences: saved }));
     } catch (error) {
+      if (options.suppressCustomModelSchemaError && isUnknownSelectedCustomModelError(error)) {
+        return;
+      }
+
       pushToast(error instanceof Error ? error.message : 'Unable to save agent preferences.', 'error');
     }
   }
@@ -703,23 +2619,37 @@ export function AgentPanel({
   function selectAgentIntent(nextIntent: AgentIntent) {
     setAgentIntent(nextIntent);
     setAgentIntentMenuOpen(false);
-    setApprovalMenuOpen(false);
   }
 
-  function handleAddContextClick() {
-    if (!activeTab) {
-      pushToast('Open a file to add it as agent context.', 'info');
-      return;
-    }
+  function resetComposerContext() {
+    setContextItems([]);
+    setContextMention(null);
+    setContextFileSuggestions([]);
+    setContextSuggestionsLoading(false);
+  }
 
-    setHideActiveTabContext(false);
-    pushToast(`Included ${activeTab.name} as agent context.`, 'success');
+  function showThreadHistory() {
+    messageLoadRequestRef.current += 1;
+    activeThreadIdRef.current = null;
+    setActiveThreadId(null);
+    setComposeTarget('new');
+    setMessages([]);
+    setLoadingMessages(false);
+    resetComposerContext();
+    setIsViewingHistory(true);
+    setView('chat');
+    setThinkingDetailsOpen(false);
+    setComposerTasksOpen(false);
+    closeAgentMenus();
   }
 
   async function openThread(threadId: string) {
+    const requestId = ++messageLoadRequestRef.current;
+    activeThreadIdRef.current = threadId;
     setActiveThreadId(threadId);
     setComposeTarget('thread');
     setIsViewingHistory(false);
+    setMessages([]);
     setUnreadCompletedThreadIds((current) => {
       if (!current.has(threadId)) {
         return current;
@@ -733,22 +2663,36 @@ export function AgentPanel({
     setLoadingMessages(true);
 
     try {
-      setMessages(await loadAgentThreadMessages(threadId));
+      const nextMessages = await loadAgentThreadMessages(threadId);
+      if (messageLoadRequestRef.current !== requestId || activeThreadIdRef.current !== threadId) {
+        return;
+      }
+      setMessages(nextMessages);
     } catch (error) {
+      if (messageLoadRequestRef.current !== requestId || activeThreadIdRef.current !== threadId) {
+        return;
+      }
       pushToast(error instanceof Error ? error.message : 'Unable to load this thread.', 'error');
+      activeThreadIdRef.current = null;
       setActiveThreadId(null);
       setComposeTarget('new');
       setMessages([]);
       setIsViewingHistory(true);
     } finally {
-      setLoadingMessages(false);
+      if (messageLoadRequestRef.current === requestId && activeThreadIdRef.current === threadId) {
+        setLoadingMessages(false);
+      }
     }
   }
 
   function startBlankThread() {
+    messageLoadRequestRef.current += 1;
+    activeThreadIdRef.current = null;
     setActiveThreadId(null);
     setComposeTarget('new');
     setMessages([]);
+    setLoadingMessages(false);
+    resetComposerContext();
     setIsViewingHistory(false);
     setView('chat');
     closeAgentMenus();
@@ -780,17 +2724,23 @@ export function AgentPanel({
   async function executeAgentRun({
     threadId,
     prompt,
-    priorMessages,
     activeTabContext,
+    contextItems,
+    threadMessages,
     approvedAction = null,
     taskList = null,
+    completedTaskReferences = [],
+    threadMemory = null,
   }: {
     threadId: string;
     prompt: string;
-    priorMessages: AgentThreadMessage[];
     activeTabContext: AgentRunPayload['activeTab'];
+    contextItems: AgentContextItem[];
+    threadMessages: NonNullable<AgentRunPayload['threadMessages']>;
     approvedAction?: PendingAgentAction | null;
     taskList?: AgentTaskList | null;
+    completedTaskReferences?: AgentCompletedTaskReference[];
+    threadMemory?: AgentThreadMemory | null;
   }) {
     let wasStopped = false;
 
@@ -798,6 +2748,14 @@ export function AgentPanel({
     setView('chat');
     setRunningThreadId(threadId);
     setStoppingThreadId(null);
+    setThinkingDetailsOpen(false);
+    setComposerTasksOpen(false);
+    setLiveActivities((current) => {
+      const next = new Map(current);
+      next.delete(threadId);
+      liveActivitiesRef.current = next;
+      return next;
+    });
     setUnreadCompletedThreadIds((current) => {
       if (!current.has(threadId)) {
         return current;
@@ -824,15 +2782,20 @@ export function AgentPanel({
         source: preferences.selectedSource,
         mode: preferences.defaultMode,
         intent: agentIntent,
+        permissionMode: agentPermissionMode,
         threadId,
         customCredentialId: preferences.selectedSource === 'custom' ? selectedCredential?.id : null,
         customModelName: preferences.selectedSource === 'custom' ? selectedModel : null,
         fastContextWindow: metadata.fastContextWindow,
-        planContextWindow: metadata.planContextWindow,
-        threadMessages: toThreadContext(priorMessages),
+        powerContextWindow: metadata.powerContextWindow,
+        threadMessages,
         activeTab: activeTabContext,
+        contextItems,
+        boardContext,
         pendingAction: approvedAction,
         taskList,
+        completedTaskReferences,
+        threadMemory,
         approvedActionId: approvedAction?.id ?? null,
       });
 
@@ -853,24 +2816,30 @@ export function AgentPanel({
         });
       }
       const actionStatus = result.actionStatus ?? (approvedAction ? (Array.isArray(result.diff) && result.diff.length > 0 ? 'executed' : 'blocked') : undefined);
+      const runActivities = liveActivitiesRef.current.get(threadId) ?? [];
+      const assistantMetadata = approvedAction
+        ? {
+            pendingActionStatus: {
+              actionId: approvedAction.id,
+              status: actionStatus,
+            },
+            ...(resultTaskList ? { taskList: resultTaskList } : {}),
+            ...(runActivities.length > 0 ? { activities: runActivities } : {}),
+          }
+        : resultTaskList || runActivities.length > 0
+          ? {
+              ...(resultTaskList ? { taskList: resultTaskList } : {}),
+              ...(runActivities.length > 0 ? { activities: runActivities } : {}),
+            }
+          : undefined;
 
       const assistantMessage = await createAgentThreadMessage({
         threadId,
         role: 'assistant',
         content: clampAgentMessageContent(result.output),
-        metadata: approvedAction
-          ? {
-              pendingActionStatus: {
-                actionId: approvedAction.id,
-                status: actionStatus,
-              },
-              ...(resultTaskList ? { taskList: resultTaskList } : {}),
-            }
-          : resultTaskList
-            ? { taskList: resultTaskList }
-          : undefined,
+        metadata: assistantMetadata,
       });
-      setMessages((current) => [...current, assistantMessage]);
+      setMessages((current) => [...current, assistantMetadata ? { ...assistantMessage, metadata: assistantMetadata } : assistantMessage]);
 
       const skippedFiles = Array.isArray(result.skippedFiles) ? result.skippedFiles : [];
       if (skippedFiles.length > 0) {
@@ -897,7 +2866,7 @@ export function AgentPanel({
           `Applied ${reviewFiles.length} workspace ${reviewFiles.length === 1 ? 'change' : 'changes'}. Keep or revert them from the editor review bar.`,
           'warning',
           {
-            action: 'aider_live_applied',
+            action: 'opencode_live_applied',
             fileCount: reviewFiles.length,
             ...(resultTaskList ? { taskList: resultTaskList } : {}),
           },
@@ -957,32 +2926,99 @@ export function AgentPanel({
     }
 
     let threadId = isReplyingToThread ? activeThreadId : null;
+    const optimisticThreadId = threadId ? null : createLocalThreadId();
+    const displayThreadId = threadId ?? optimisticThreadId;
     const priorMessages = isReplyingToThread ? messages : [];
     const latestPendingAction = findLatestPendingAction(priorMessages);
     const latestTaskList = latestPendingAction
       ? liveTaskLists.get(`action:${latestPendingAction.id}`) ?? findLatestTaskList(priorMessages, latestPendingAction.id)
-      : findLatestTaskList(priorMessages);
-    const activeTabContext = hideActiveTabContext ? null : activeTab;
-    const baseRunPayload: AgentRunPayload = {
-      prompt,
-      source: preferences.selectedSource,
-      mode: preferences.defaultMode,
-      intent: agentIntent,
-      threadId,
-      customCredentialId: preferences.selectedSource === 'custom' ? selectedCredential?.id : null,
-      customModelName: preferences.selectedSource === 'custom' ? selectedModel : null,
-      fastContextWindow: metadata.fastContextWindow,
-      planContextWindow: metadata.planContextWindow,
-      threadMessages: toThreadContext(priorMessages),
-      activeTab: activeTabContext,
-      pendingAction: latestPendingAction,
-      taskList: latestTaskList,
-    };
+      : findLatestUnresolvedTaskList(priorMessages);
+    const completedTaskReferences = latestPendingAction ? [] : findCompletedTaskReferences(priorMessages, prompt);
+    const threadMemory = buildAgentThreadMemory(priorMessages, workspacePath);
+    const activeTabContext = activeTab;
+    const messageContextChips = createMessageContextChips(contextItems);
+    const userMessageMetadata = messageContextChips.length > 0 ? { contextChips: messageContextChips } : undefined;
+    const localUserMessage = displayThreadId ? createLocalThreadMessage('user', prompt, undefined, userMessageMetadata, displayThreadId) : null;
+    rememberMessageContextImagePreviews(contextItems);
 
+    messageLoadRequestRef.current += 1;
+    setLoadingMessages(false);
     setDraftPrompt('');
+    setContextItems([]);
+    setContextMention(null);
+    setPreviewImageContextItem(null);
     setBusy(true);
+    setView('chat');
+    setThinkingDetailsOpen(false);
+    setComposerTasksOpen(false);
+    if (displayThreadId) {
+      setLiveActivities((current) => {
+        if (!current.has(displayThreadId)) {
+          liveActivitiesRef.current = current;
+          return current;
+        }
+
+        const next = new Map(current);
+        next.delete(displayThreadId);
+        liveActivitiesRef.current = next;
+        return next;
+      });
+    }
+    closeAgentMenus();
+
+    if (localUserMessage) {
+      setMessages((current) => (isReplyingToThread ? [...current, localUserMessage] : [localUserMessage]));
+    }
+
+    if (optimisticThreadId) {
+      activeThreadIdRef.current = optimisticThreadId;
+      isViewingHistoryRef.current = false;
+      setActiveThreadId(optimisticThreadId);
+      setComposeTarget('thread');
+      setIsViewingHistory(false);
+      setThinkingDetailsOpen(false);
+      setComposerTasksOpen(false);
+      setThreadSummaries((current) => [
+        createLocalThreadSummary({
+          id: optimisticThreadId,
+          title: titleFromPrompt(prompt),
+          workspaceKey: workspacePath,
+          workspaceName: basenameFromPath(workspacePath),
+          lastMessagePreview: prompt,
+        }),
+        ...current.filter((thread) => thread.id !== optimisticThreadId),
+      ]);
+    }
 
     try {
+      const resolvedContextItems = await resolveContextItemsForRun();
+      const initialRunContext = shrinkAgentRunContext({
+        prompt,
+        threadMessages: toThreadContext(priorMessages),
+        contextItems: resolvedContextItems,
+        contextWindow,
+      });
+      const baseRunPayload: AgentRunPayload = {
+        prompt,
+        source: preferences.selectedSource,
+        mode: preferences.defaultMode,
+        intent: agentIntent,
+        permissionMode: agentPermissionMode,
+        threadId,
+        customCredentialId: preferences.selectedSource === 'custom' ? selectedCredential?.id : null,
+        customModelName: preferences.selectedSource === 'custom' ? selectedModel : null,
+        fastContextWindow: metadata.fastContextWindow,
+        powerContextWindow: metadata.powerContextWindow,
+        threadMessages: initialRunContext.threadMessages,
+        activeTab: activeTabContext,
+        contextItems: initialRunContext.contextItems,
+        boardContext,
+        pendingAction: latestPendingAction,
+        taskList: latestTaskList,
+        completedTaskReferences,
+        threadMemory,
+      };
+
       const routed = await window.tantalum.agent.route(baseRunPayload);
       if (!routed.success) {
         throw new Error(routed.error);
@@ -990,21 +3026,29 @@ export function AgentPanel({
 
       if (!routed.persistThread) {
         if (threadId) {
-          const userMessage = await createAgentThreadMessage({ threadId, role: 'user', content: prompt });
+          const userMessage = await createAgentThreadMessage({ threadId, role: 'user', content: prompt, metadata: userMessageMetadata });
           const assistantMessage = await createAgentThreadMessage({
             threadId,
             role: 'assistant',
             content: routed.userMessage || 'Tell me what you want to inspect, explain, or change.',
           });
-          setMessages([...priorMessages, userMessage, assistantMessage]);
+          setMessages((current) => [
+            ...replaceOptimisticMessage(current, localUserMessage?.id ?? null, userMessage, priorMessages),
+            assistantMessage,
+          ]);
           setView('chat');
           await refreshThreads();
         } else {
+          if (optimisticThreadId) {
+            setThreadSummaries((current) => current.filter((thread) => thread.id !== optimisticThreadId));
+          }
+          activeThreadIdRef.current = null;
+          isViewingHistoryRef.current = false;
           setActiveThreadId(null);
           setComposeTarget('new');
           setIsViewingHistory(false);
           setMessages([
-            createLocalThreadMessage('user', prompt),
+            createLocalThreadMessage('user', prompt, undefined, userMessageMetadata),
             createLocalThreadMessage('assistant', routed.userMessage || 'Tell me what you want to inspect, explain, or change.'),
           ]);
         }
@@ -1013,15 +3057,22 @@ export function AgentPanel({
 
       if (!threadId) {
         const createdThread = await createAgentThread({
-          title: routed.titleSuggestion || titleFromPrompt(prompt),
+          title: formatThreadTitle(routed.titleSuggestion || titleFromPrompt(prompt)),
           workspaceKey: workspacePath,
           workspaceName: basenameFromPath(workspacePath),
         });
         threadId = createdThread.id;
+        activeThreadIdRef.current = threadId;
+        isViewingHistoryRef.current = false;
         setActiveThreadId(threadId);
         setComposeTarget('thread');
-        setThreadSummaries((current) => [createdThread, ...current.filter((thread) => thread.id !== createdThread.id)]);
-        setMessages([]);
+        setThreadSummaries((current) => [
+          createdThread,
+          ...current.filter((thread) => thread.id !== createdThread.id && thread.id !== optimisticThreadId),
+        ]);
+        setMessages((current) =>
+          current.map((message) => (message.threadId === optimisticThreadId ? { ...message, threadId: createdThread.id } : message)),
+        );
         setIsViewingHistory(false);
       }
 
@@ -1030,8 +3081,8 @@ export function AgentPanel({
         throw new Error('Unable to attach this agent run to a thread.');
       }
 
-      const userMessage = await createAgentThreadMessage({ threadId: runThreadId, role: 'user', content: prompt });
-      setMessages([...priorMessages, userMessage]);
+      const userMessage = await createAgentThreadMessage({ threadId: runThreadId, role: 'user', content: prompt, metadata: userMessageMetadata });
+      setMessages((current) => replaceOptimisticMessage(current, localUserMessage?.id ?? null, userMessage, priorMessages));
       setView('chat');
       const routedTaskList = asAgentTaskList(routed.taskList);
 
@@ -1094,10 +3145,17 @@ export function AgentPanel({
       await executeAgentRun({
         threadId: runThreadId,
         prompt: approvedAction?.originalPrompt ?? prompt,
-        priorMessages: runPriorMessages,
         activeTabContext,
+        ...shrinkAgentRunContext({
+          prompt: approvedAction?.originalPrompt ?? prompt,
+          threadMessages: toThreadContext(runPriorMessages),
+          contextItems: resolvedContextItems,
+          contextWindow,
+        }),
         approvedAction,
         taskList: runTaskList,
+        completedTaskReferences: approvedAction ? [] : completedTaskReferences,
+        threadMemory,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The agent run failed.';
@@ -1113,6 +3171,13 @@ export function AgentPanel({
         } catch {
           pushToast(message, 'error');
         }
+      } else if (optimisticThreadId) {
+        activeThreadIdRef.current = null;
+        setActiveThreadId(null);
+        setComposeTarget('new');
+        setThreadSummaries((current) => current.filter((thread) => thread.id !== optimisticThreadId));
+        setMessages((current) => [...current, createLocalThreadMessage('status', message, 'error')]);
+        pushToast(message, 'error');
       } else {
         pushToast(message, 'error');
       }
@@ -1176,13 +3241,21 @@ export function AgentPanel({
     }
 
     const taskList = liveTaskLists.get(`action:${action.id}`) ?? findLatestTaskList(messages, action.id);
+    const resolvedContextItems = await resolveContextItemsForRun();
+    const threadMemory = buildAgentThreadMemory(messages, workspacePath);
     await executeAgentRun({
       threadId,
       prompt: action.originalPrompt,
-      priorMessages: messages,
-      activeTabContext: hideActiveTabContext ? null : activeTab,
+      activeTabContext: activeTab,
+      ...shrinkAgentRunContext({
+        prompt: action.originalPrompt,
+        threadMessages: toThreadContext(messages),
+        contextItems: resolvedContextItems,
+        contextWindow,
+      }),
       approvedAction: action,
       taskList,
+      threadMemory,
     });
   }
 
@@ -1214,17 +3287,39 @@ export function AgentPanel({
     await refreshThreads();
   }
 
-  async function handleRenameThread(thread: AgentThreadSummary) {
-    const title = window.prompt('Thread title', thread.title)?.trim();
-    if (!title || title === thread.title) {
+  function handleRenameThread(thread: AgentThreadSummary) {
+    setRenameThreadPrompt(thread);
+    setRenameThreadTitle(thread.title);
+  }
+
+  async function submitThreadRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!renameThreadPrompt) {
       return;
     }
 
+    const title = formatThreadTitle(renameThreadTitle);
+    if (!title) {
+      pushToast('Thread title is required.', 'info');
+      return;
+    }
+
+    if (title === renameThreadPrompt.title) {
+      setRenameThreadPrompt(null);
+      setRenameThreadTitle('');
+      return;
+    }
+
+    setRenamingThreadId(renameThreadPrompt.id);
     try {
-      const updated = await renameAgentThread(thread.id, title);
+      const updated = await renameAgentThread(renameThreadPrompt.id, title);
       setThreadSummaries((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
+      setRenameThreadPrompt(null);
+      setRenameThreadTitle('');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to rename thread.', 'error');
+    } finally {
+      setRenamingThreadId(null);
     }
   }
 
@@ -1398,93 +3493,20 @@ export function AgentPanel({
 
   function renderHeader() {
     return (
-      <div className="copilot-header">
-        <div className="copilot-header-title">
-          {!isViewingHistory && activeThreadId && (
-            <button
-              className="ghost-button compact icon-only copilot-back-btn"
-              type="button"
-              title="View Sessions"
-              onClick={() => setIsViewingHistory(true)}
-            >
-              <ArrowLeft size={16} />
-            </button>
-          )}
-          <span className="copilot-tab-title">CHAT</span>
+      <div className="tantalum-ai-header">
+        <div className="tantalum-ai-header-title">
+          <button className="tantalum-ai-tab-title" type="button" title="View Threads" onClick={showThreadHistory}>
+            Ask Tantalum AI
+          </button>
         </div>
-        <div className="copilot-header-actions">
-          <div className="agent-menu-root">
-            <button
-              className="ghost-button compact icon-only copilot-plus-dropdown-btn"
-              type="button"
-              title="New Session"
-              aria-haspopup="menu"
-              aria-expanded={newSessionMenuOpen}
-              onClick={() => setNewSessionMenuOpen((current) => !current)}
-            >
-              <Plus size={16} />
-              <ChevronDown size={10} style={{ marginLeft: '1px' }} />
-            </button>
-            {newSessionMenuOpen ? (
-              <div className="agent-popup-menu agent-popup-menu-right" role="menu">
-                <button type="button" role="menuitem" onClick={startBlankThread}>
-                  <Plus size={13} />
-                  <span>New session</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setIsViewingHistory(true);
-                    setView('chat');
-                    setNewSessionMenuOpen(false);
-                  }}
-                >
-                  <History size={13} />
-                  <span>Sessions</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
+        <div className="tantalum-ai-header-actions">
+          <button className="ghost-button compact icon-only" type="button" title="New Thread" onClick={startBlankThread}>
+            <Plus size={16} />
+          </button>
           <button className="ghost-button compact icon-only" type="button" title="Agent Settings" onClick={openAgentSettingsView}>
             <Settings size={16} />
           </button>
-          <div className="agent-menu-root">
-            <button
-              className="ghost-button compact icon-only"
-              type="button"
-              title="More Actions"
-              aria-haspopup="menu"
-              aria-expanded={moreMenuOpen}
-              onClick={() => setMoreMenuOpen((current) => !current)}
-            >
-              <MoreHorizontal size={16} />
-            </button>
-            {moreMenuOpen ? (
-              <div className="agent-popup-menu agent-popup-menu-right" role="menu">
-                <button type="button" role="menuitem" onClick={() => void refreshThreads()}>
-                  <RefreshCw size={13} />
-                  <span>Refresh sessions</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setView('usage');
-                    closeAgentMenus();
-                  }}
-                >
-                  <Bot size={13} />
-                  <span>Usage</span>
-                </button>
-                <button type="button" role="menuitem" onClick={openAgentSettingsView}>
-                  <Settings2 size={13} />
-                  <span>Agent settings</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <span className="copilot-header-divider"></span>
+          <span className="tantalum-ai-header-divider"></span>
           {onClosePanel ? (
             <button className="ghost-button compact icon-only" type="button" title="Close Panel" onClick={onClosePanel}>
               <X size={16} />
@@ -1501,9 +3523,9 @@ export function AgentPanel({
     }
 
     return (
-      <div className="agent-tabs copilot-tabs">
+      <div className="agent-tabs tantalum-ai-tabs">
         {!hideChat ? (
-          <button className={view === 'chat' ? 'active' : ''} type="button" onClick={() => setView('chat')}>
+          <button className={view === 'chat' ? 'active' : ''} type="button" onClick={showThreadHistory}>
             <MessageSquare size={14} />
             Chat
           </button>
@@ -1511,10 +3533,6 @@ export function AgentPanel({
         <button className={view === 'settings' ? 'active' : ''} type="button" onClick={() => setView('settings')}>
           <Settings2 size={14} />
           Settings
-        </button>
-        <button className={view === 'usage' ? 'active' : ''} type="button" onClick={() => setView('usage')}>
-          <Bot size={14} />
-          Usage
         </button>
       </div>
     );
@@ -1530,60 +3548,44 @@ export function AgentPanel({
     const strokeDashoffset = circ - (creditPercent / 100) * circ;
 
     return (
-      <div className="copilot-bottom-status-bar">
+      <div className="tantalum-ai-bottom-status-bar">
         <div className="status-bar-left">
-          <div className="status-item-dropdown copilot-status-mode-wrapper" title="Agent Mode">
-            <Sparkles size={12} />
+          <div
+            className="status-item-dropdown tantalum-ai-status-permission-wrapper"
+            title={
+              agentPermissionMode === 'bypass'
+                ? 'Bypass intermediate approval prompts; final Keep/Revert review still applies.'
+                : 'Ask for approval before high-risk workspace actions.'
+            }
+          >
+            <KeyRound size={12} />
             <CustomDropdown
-              className="status-mode-dropdown"
-              value={preferences.defaultMode}
+              className="status-permission-dropdown"
+              value={agentPermissionMode}
               options={[
-                { label: 'Fast', value: 'fast' },
-                { label: 'Plan', value: 'plan' }
+                { label: 'Default Approval', value: 'default', icon: <ShieldCheck size={13} /> },
+                { label: 'Bypass Approval', value: 'bypass', icon: <TriangleAlert size={13} /> },
               ]}
               placement="top"
-              onChange={(val) => {
-                void persistPreferences({
-                  ...preferences,
-                  defaultMode: val as 'fast' | 'plan'
-                });
-              }}
+              onChange={(val) => setAgentPermissionMode(val as AgentPermissionMode)}
             />
-            <ChevronDown size={8} style={{ marginLeft: '-4px' }} />
-          </div>
-          <div className="agent-menu-root">
-            <button
-              className="status-item-dropdown agent-status-menu-button"
-              type="button"
-              title="Agent behavior"
-              aria-haspopup="menu"
-              aria-expanded={approvalMenuOpen}
-              onClick={() => setApprovalMenuOpen((current) => !current)}
-            >
-              <Shield size={12} />
-              <span>{agentIntent === 'ask' ? 'Ask Only' : 'Live Changes'}</span>
-              <ChevronDown size={8} />
-            </button>
-            {approvalMenuOpen ? (
-              <div className="agent-popup-menu agent-popup-menu-left agent-popup-menu-up" role="menu">
-                <button className={agentIntent === 'agent' ? 'active' : ''} type="button" role="menuitem" onClick={() => selectAgentIntent('agent')}>
-                  <Code size={13} />
-                  <span>Agent mode</span>
-                </button>
-                <button className={agentIntent === 'ask' ? 'active' : ''} type="button" role="menuitem" onClick={() => selectAgentIntent('ask')}>
-                  <MessageSquare size={13} />
-                  <span>Ask mode</span>
-                </button>
-              </div>
-            ) : null}
+            <ChevronDown size={11} className="status-permission-chevron" />
           </div>
         </div>
         <div className="status-bar-right">
           <div
-            className="copilot-credit-badge"
+            className={`tantalum-ai-context-badge ${contextPercent >= 90 ? 'warning' : ''}`}
+            title={`Estimated context: ${formatCompactTokens(estimatedContextTokens)} / ${formatCompactTokens(contextWindow)} tokens`}
+          >
+            <AtSign size={10} className="tantalum-ai-context-badge-icon" aria-hidden="true" />
+            <strong>{formatCompactTokens(estimatedContextTokens)}</strong>
+            <em>{formatCompactTokens(contextWindow)}</em>
+          </div>
+          <div
+            className="tantalum-ai-credit-badge"
             title={`Remaining credits: ${formatCredits(remainingCredits)} / ${formatCredits(monthlyAllowance)} (${creditPercent.toFixed(0)}% left)`}
           >
-            <svg className="copilot-svg-loader" width="14" height="14" viewBox="0 0 14 14">
+            <svg className="tantalum-ai-svg-loader" width="14" height="14" viewBox="0 0 14 14">
               <circle
                 className="bg-ring"
                 cx="7"
@@ -1598,7 +3600,7 @@ export function AgentPanel({
                 cx="7"
                 cy="7"
                 r={radius}
-                stroke={creditPercent > 20 ? "var(--accent)" : "var(--error, #e51c23)"}
+                stroke={creditPercent > 20 ? "var(--text-muted)" : "var(--error, #e51c23)"}
                 strokeWidth={strokeWidth}
                 fill="none"
                 strokeDasharray={circ}
@@ -1614,55 +3616,336 @@ export function AgentPanel({
     );
   }
 
-  function renderComposer() {
+  function renderComposerReviewPanel() {
+    if (!pendingReview) {
+      return null;
+    }
+
     return (
-      <div className="copilot-composer-container">
-        {activeTab && !hideActiveTabContext && (
-          <div className="copilot-composer-chip">
-            <span className="chip-plus-accent">+</span>
-            <FileText size={12} className="chip-icon text-green" />
-            <span className="chip-filename">{activeTab.name}</span>
+      <section className={`agent-composer-review-panel ${composerReviewOpen ? 'open' : ''}`} aria-label="Files awaiting review">
+        <div className="agent-composer-review-head">
+          <button
+            className="agent-composer-review-toggle"
+            type="button"
+            aria-expanded={composerReviewOpen}
+            onClick={() => setComposerReviewOpen((current) => !current)}
+            title={composerReviewOpen ? 'Hide files awaiting review' : 'Show files awaiting review'}
+          >
+            {composerReviewOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span>
+              {pendingReview.files.length} {pendingReview.files.length === 1 ? 'file' : 'files'} awaiting review
+            </span>
+          </button>
+          <div className="agent-composer-review-actions">
             <button
-              className="chip-close-btn"
+              className="agent-composer-review-action accept"
               type="button"
-              onClick={() => setHideActiveTabContext(true)}
-              title="Exclude file context"
+              disabled={resolvingReview}
+              onClick={() => void resolveAgentReviewFromChat(true)}
             >
-              <X size={10} />
+              {resolvingReview ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}
+              <span>Keep</span>
+            </button>
+            <button
+              className="agent-composer-review-action decline"
+              type="button"
+              disabled={resolvingReview}
+              onClick={() => void resolveAgentReviewFromChat(false)}
+            >
+              <X size={13} />
+              <span>Revert</span>
             </button>
           </div>
-        )}
+        </div>
+        {composerReviewOpen ? (
+          <div className="agent-composer-review-file-list">
+            {pendingReview.files.map((file) => {
+              const fileName = basenameFromPath(file.path) ?? file.path;
+              const directoryName = dirnameFromPath(file.path);
+
+              return (
+                <button
+                  key={file.path}
+                  className={`agent-composer-review-file agent-composer-review-file-${file.changeType}`}
+                  type="button"
+                  onClick={() => onPreviewAgentFile?.(file.path)}
+                  title={`Preview ${file.path}`}
+                >
+                  <ContextSuggestionFileIcon filePath={file.path} />
+                  <span className="agent-composer-review-file-name">{fileName}</span>
+                  {directoryName ? <span className="agent-composer-review-file-dir">{directoryName}</span> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderComposer() {
+    const composerTaskList = isViewingHistory ? null : getLatestVisibleTaskList();
+    const taskTotal = composerTaskList?.items.length ?? 0;
+    const taskCompleted = composerTaskList?.items.filter((item) => item.status === 'completed' || item.status === 'skipped').length ?? 0;
+    const taskRunning = composerTaskList?.items.find((item) => item.status === 'running');
+    const mentionSuggestionItems = contextFileSuggestions
+      .map(createWorkspaceSuggestionContextItem)
+      .filter((item) => !contextItems.some((entry) => isSameContextItem(entry, item)))
+      .filter((item) => !activeFileSuggestion || !isSameContextItem(item, activeFileSuggestion))
+      .slice(0, 3);
+    const firstMentionSuggestion = mentionSuggestionItems[0] ?? activeSelectionSuggestion ?? activeFileSuggestion ?? null;
+    const hasContextRow = contextItems.length > 0 || Boolean(activeSelectionSuggestion) || Boolean(activeFileSuggestion);
+    const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (contextMention) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setContextMention(null);
+          return;
+        }
+
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          if (firstMentionSuggestion) {
+            addContextItem(firstMentionSuggestion);
+          }
+          return;
+        }
+      }
+
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        if (canSend) {
+          void handleSendPrompt();
+        }
+      }
+    };
+
+    return (
+      <div className="tantalum-ai-composer-container">
+        {renderComposerReviewPanel()}
+
+        {composerTaskList ? (
+          <div className={`agent-composer-tasks ${composerTasksOpen ? 'open' : ''}`}>
+            <button
+              className="agent-composer-tasks-toggle"
+              type="button"
+              aria-expanded={composerTasksOpen}
+              onClick={() => setComposerTasksOpen((current) => !current)}
+              title={composerTasksOpen ? 'Hide todo list' : 'Show todo list'}
+            >
+              {composerTasksOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <span>Todos</span>
+              <strong>({taskCompleted}/{taskTotal})</strong>
+              {taskRunning ? <em>{taskRunning.title}</em> : null}
+            </button>
+            {composerTasksOpen ? (
+              <div className="agent-composer-task-list">
+                {composerTaskList.items.map((item) => (
+                  <div key={item.id} className={`agent-composer-task agent-composer-task-${item.status}`}>
+                    <span className="agent-composer-task-check" aria-hidden="true">
+                      {item.status === 'completed' || item.status === 'skipped' ? <Check size={15} /> : null}
+                    </span>
+                    <div>
+                      <strong>{item.title}</strong>
+                      {item.result || item.error ? <p>{item.result || item.error}</p> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="tantalum-ai-composer-input-shell">
+          {hasContextRow ? (
+            <div className="tantalum-ai-context-chip-row">
+              {contextItems.map((item) => (
+                <span
+                  key={item.id}
+                  className={`tantalum-ai-context-chip tantalum-ai-context-attached-chip ${item.kind === 'selection' ? 'selection' : ''} ${item.kind === 'image' ? 'image previewable' : ''}`}
+                  role={item.kind === 'image' ? 'button' : undefined}
+                  tabIndex={item.kind === 'image' ? 0 : undefined}
+                  title={item.kind === 'image' ? `Preview ${contextItemLabel(item)}` : undefined}
+                  onClick={() => {
+                    if (item.kind === 'image') {
+                      setPreviewImageContextItem((current) =>
+                        current?.source === 'composer' && current.contextItem && isSameContextItem(current.contextItem, item)
+                          ? null
+                          : {
+                              id: item.id,
+                              name: contextItemLabel(item),
+                              dataUrl: item.dataUrl || '',
+                              source: 'composer',
+                              contextItem: item,
+                            },
+                      );
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (item.kind !== 'image' || (event.key !== 'Enter' && event.key !== ' ')) {
+                      return;
+                    }
+
+                    event.preventDefault();
+                    setPreviewImageContextItem((current) =>
+                      current?.source === 'composer' && current.contextItem && isSameContextItem(current.contextItem, item)
+                        ? null
+                        : {
+                            id: item.id,
+                            name: contextItemLabel(item),
+                            dataUrl: item.dataUrl || '',
+                            source: 'composer',
+                            contextItem: item,
+                          },
+                    );
+                  }}
+                >
+                  <button
+                    className="chip-close-btn"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      removeContextItem(item);
+                    }}
+                    title={`Remove ${contextItemLabel(item)} from context`}
+                  >
+                    <X size={10} />
+                  </button>
+                  <ContextItemIcon item={item} />
+                  <span className="chip-filename">{contextItemLabel(item)}</span>
+                </span>
+              ))}
+              {activeSelectionSuggestion ? (
+                <button
+                  className="tantalum-ai-context-chip tantalum-ai-context-suggestion-chip selection"
+                  type="button"
+                  title={`Add ${contextItemLabel(activeSelectionSuggestion)} to context`}
+                  onClick={() => addContextItem(activeSelectionSuggestion, false)}
+                >
+                  <span className="chip-plus-accent">+</span>
+                  <ContextSuggestionFileIcon filePath={activeSelectionSuggestion.path} />
+                  <span className="chip-filename">{contextItemLabel(activeSelectionSuggestion)}</span>
+                </button>
+              ) : null}
+              {activeFileSuggestion ? (
+                <button
+                  className="tantalum-ai-context-chip tantalum-ai-context-suggestion-chip"
+                  type="button"
+                  title={`Add ${activeFileSuggestion.name} to context`}
+                  onClick={() => addContextItem(activeFileSuggestion, false)}
+                >
+                  <span className="chip-plus-accent">+</span>
+                  <ContextSuggestionFileIcon filePath={activeFileSuggestion.path} />
+                  <span className="chip-filename">{activeFileSuggestion.name}</span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
+        {previewImageContextItem?.dataUrl ? (
+          <div ref={contextImagePreviewRef} className="context-image-preview-popover" role="dialog" aria-label={`Preview ${previewImageContextItem.name}`}>
+            <div className="context-image-preview-header">
+              <span>{previewImageContextItem.name}</span>
+              <button type="button" onClick={() => setPreviewImageContextItem(null)} title="Close preview">
+                <X size={12} />
+              </button>
+            </div>
+            <img src={previewImageContextItem.dataUrl} alt={previewImageContextItem.name} />
+          </div>
+        ) : null}
+
+        {contextMention ? (
+          <div className="context-mention-menu" role="listbox" aria-label="Context file suggestions">
+            {contextSuggestionsLoading ? <div className="context-mention-empty">Searching...</div> : null}
+            {!contextSuggestionsLoading && mentionSuggestionItems.length === 0 ? <div className="context-mention-empty">No matching files</div> : null}
+            {!contextSuggestionsLoading
+              ? mentionSuggestionItems.map((item, index) => (
+                  <button
+                    key={item.id}
+                    className={`context-mention-item ${index === 0 ? 'active' : ''}`}
+                    type="button"
+                    role="option"
+                    aria-selected={index === 0}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => addContextItem(item)}
+                  >
+                    <FileText size={13} />
+                    <span>{item.relativePath || item.name}</span>
+                  </button>
+                ))
+              : null}
+          </div>
+        ) : null}
 
         <textarea
-          className="copilot-composer-textarea"
+          ref={composerTextareaRef}
+          className="tantalum-ai-composer-textarea"
           value={draftPrompt}
           disabled={!workspacePath || busy}
-          onChange={(event) => setDraftPrompt(event.target.value)}
+          onChange={(event) => {
+            const value = event.currentTarget.value;
+            setDraftPrompt(value);
+            setContextMention(detectContextMention(value, event.currentTarget.selectionStart ?? value.length));
+          }}
+          onClick={updateContextMentionFromTextarea}
+          onKeyUp={updateContextMentionFromTextarea}
+          onSelect={updateContextMentionFromTextarea}
           placeholder={
             workspacePath
               ? isReplyingToThread && activeThread
-                ? `Reply to ${activeThread.title}`
+                ? 'Ask for follow-up changes'
                 : agentIntent === 'ask'
                   ? 'Ask about this workspace'
-                  : 'Start a new agent session'
+                  : 'Start a new agent thread'
               : 'Open a workspace to start coding'
           }
           rows={2}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              if (canSend) {
-                void handleSendPrompt();
-              }
-            }
-          }}
+          onKeyDown={handleComposerKeyDown}
         />
 
-        <div className="copilot-composer-bottom">
+        <div className="tantalum-ai-composer-bottom">
           <div className="bottom-left-actions">
-            <button className="composer-action-btn" type="button" title="Add Context" onClick={handleAddContextClick}>
-              <Plus size={12} />
-            </button>
+            <div className="agent-menu-root composer-attachment-menu">
+              <button
+                className="composer-action-btn composer-attach-btn"
+                type="button"
+                title="Add context"
+                disabled={!workspacePath || busy}
+                aria-haspopup="menu"
+                aria-expanded={contextAttachmentMenuOpen}
+                onClick={() => {
+                  setContextMention(null);
+                  setContextAttachmentMenuOpen((current) => !current);
+                }}
+              >
+                <Plus size={14} />
+              </button>
+              {contextAttachmentMenuOpen ? (
+                <div className="agent-popup-menu agent-popup-menu-left agent-popup-menu-up composer-attachment-popup" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setContextAttachmentMenuOpen(false);
+                      insertAtMention();
+                    }}
+                  >
+                    <AtSign size={13} />
+                    <span>Mentions</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => void handlePickContextAttachments()}
+                  >
+                    <Paperclip size={13} />
+                    <span>Photos & files</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <span className="composer-action-divider">|</span>
             <div className="agent-menu-root composer-participant-menu">
               <button
                 className={`composer-participant-pill composer-participant-button ${agentIntent === 'ask' ? 'active' : ''}`}
@@ -1672,32 +3955,56 @@ export function AgentPanel({
                 aria-expanded={agentIntentMenuOpen}
                 onClick={() => setAgentIntentMenuOpen((current) => !current)}
               >
-                {agentIntent === 'ask' ? <MessageSquare size={10} /> : <Code size={10} />}
+                {agentIntent === 'ask' ? (
+                  <MessageSquare size={11} className="composer-participant-icon" />
+                ) : (
+                  <Code size={11} className="composer-participant-icon composer-participant-agent-icon" />
+                )}
                 <span>{agentIntentLabel}</span>
-                <ChevronDown size={9} />
               </button>
               {agentIntentMenuOpen ? (
                 <div className="agent-popup-menu agent-popup-menu-left agent-popup-menu-up" role="menu">
                   <button className={agentIntent === 'agent' ? 'active' : ''} type="button" role="menuitem" onClick={() => selectAgentIntent('agent')}>
-                    <Code size={13} />
+                    <Code size={13} className="composer-participant-menu-icon composer-participant-menu-agent-icon" />
                     <span>Agent mode</span>
                   </button>
                   <button className={agentIntent === 'ask' ? 'active' : ''} type="button" role="menuitem" onClick={() => selectAgentIntent('ask')}>
-                    <MessageSquare size={13} />
+                    <MessageSquare size={13} className="composer-participant-menu-icon" />
                     <span>Ask mode</span>
                   </button>
                 </div>
               ) : null}
             </div>
             <span className="composer-action-divider">|</span>
-            <button className="composer-action-btn" type="button" title="Model configuration details" onClick={openAgentSettingsView}>
-              <Sliders size={12} />
-            </button>
+            <div className="composer-mode-picker" title="Run mode">
+              <CustomDropdown
+                className="composer-mode-dropdown"
+                value={preferences.defaultMode}
+                triggerPrefix={preferences.defaultMode === 'power' ? <Sparkles size={11} /> : <Zap size={11} />}
+                options={[
+                  { label: 'Fast', value: 'fast', icon: <Zap size={13} /> },
+                  { label: 'Power', value: 'power', icon: <Sparkles size={13} /> },
+                ]}
+                placement="top"
+                onChange={(val) => {
+                  void persistPreferences(
+                    {
+                      ...preferences,
+                      defaultMode: val as 'fast' | 'power',
+                    },
+                    {
+                      includeCustomModelName: false,
+                      suppressCustomModelSchemaError: true,
+                    },
+                  );
+                }}
+              />
+            </div>
           </div>
 
           <div className="bottom-right-actions">
             <button
-              className={`copilot-send-btn ${activeThreadIsRunning ? 'copilot-stop-btn' : ''}`}
+              className={`tantalum-ai-send-btn ${activeThreadIsRunning ? 'tantalum-ai-stop-btn' : ''}`}
               type="button"
               title={activeThreadIsRunning ? 'Stop agent run' : 'Send message'}
               disabled={activeThreadIsRunning ? isStoppingActiveThread : !canSend}
@@ -1711,7 +4018,7 @@ export function AgentPanel({
               }}
             >
               {activeThreadIsRunning ? (
-                isStoppingActiveThread ? <LoaderCircle size={12} className="spin" /> : <SquareStop size={14} />
+                isStoppingActiveThread ? <LoaderCircle size={12} className="spin" /> : <CircleStop size={14} />
               ) : busy ? (
                 <LoaderCircle size={12} className="spin" />
               ) : (
@@ -1720,38 +4027,98 @@ export function AgentPanel({
             </button>
           </div>
         </div>
+        </div>
       </div>
     );
   }
 
   function renderThreadList() {
-    return (
-      <div className="copilot-sessions-view">
-        <div className="copilot-sessions-toolbar">
-          <span className="sessions-title">SESSIONS</span>
-          <div className="sessions-toolbar-buttons">
-            <button className="ghost-button compact icon-only" type="button" title="Refresh" onClick={() => void refreshThreads()}>
-              <RefreshCw size={14} />
+    const showFullThreadList = sessionSearchOpen;
+    const hasThreadOverflow = !showFullThreadList && visibleThreadSummaries.length > THREAD_HISTORY_PREVIEW_LIMIT;
+    const previewThreadSummaries = showFullThreadList ? visibleThreadSummaries : visibleThreadSummaries.slice(0, THREAD_HISTORY_PREVIEW_LIMIT);
+    const overflowThreadSummaries = showFullThreadList ? [] : visibleThreadSummaries.slice(THREAD_HISTORY_PREVIEW_LIMIT);
+    const hiddenThreadCount = Math.max(0, visibleThreadSummaries.length - THREAD_HISTORY_PREVIEW_LIMIT);
+    const renderThreadItem = (thread: AgentThreadSummary) => {
+      const isRunning = thread.id === runningThreadId;
+      const hasUnreadCompletion = unreadCompletedThreadIds.has(thread.id);
+      const threadTitle = formatThreadTitle(thread.title);
+
+      return (
+        <article
+          key={thread.id}
+          className={`tantalum-ai-thread-item ${isRunning ? 'running' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
+        >
+          <span className="tantalum-ai-thread-leading" aria-hidden="true">
+            {isRunning ? (
+              <span className="tantalum-ai-thread-activity">
+                <span />
+                <span />
+                <span />
+              </span>
+            ) : hasUnreadCompletion ? (
+              <span className="tantalum-ai-thread-complete-dot" />
+            ) : (
+              <span className="tantalum-ai-thread-bullet" />
+            )}
+          </span>
+          <button type="button" className="tantalum-ai-thread-main-btn" onClick={() => void openThread(thread.id)}>
+            <span className="tantalum-ai-thread-title-text">{threadTitle}</span>
+            <span className="tantalum-ai-thread-time-sub">
+              {formatRelativeTime(thread.lastMessageAt)}
+            </span>
+          </button>
+          <div className="tantalum-ai-thread-item-actions">
+            <button type="button" title="Rename" onClick={() => void handleRenameThread(thread)}>
+              <PencilLine size={14} />
             </button>
+            <button type="button" title="Delete" onClick={() => void handleDeleteThread(thread)}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </article>
+      );
+    };
+
+    return (
+      <div className="tantalum-ai-sessions-view">
+        <div className="tantalum-ai-sessions-toolbar">
+          <span className="sessions-title">THREADS</span>
+          <div className="sessions-toolbar-buttons">
             <button
               className={`ghost-button compact icon-only ${sessionSearchOpen ? 'active' : ''}`}
               type="button"
-              title="Search Sessions"
+              title="Search Threads"
               aria-pressed={sessionSearchOpen}
-              onClick={() => setSessionSearchOpen((current) => !current)}
+              onClick={() => {
+                if (sessionSearchOpen) {
+                  setSessionSearchQuery('');
+                }
+                setSessionSearchOpen((current) => !current);
+                setThreadListExpanded(false);
+              }}
             >
-              <Search size={14} />
+              <Search size={15} />
+            </button>
+            <button className="ghost-button compact icon-only" type="button" title="Refresh" onClick={() => void refreshThreads()}>
+              <RefreshCw size={15} />
             </button>
           </div>
         </div>
 
         {sessionSearchOpen ? (
-          <div className="copilot-session-search">
+          <div className="tantalum-ai-session-search">
             <Search size={13} />
             <input
               value={sessionSearchQuery}
               onChange={(event) => setSessionSearchQuery(event.target.value)}
-              placeholder="Search sessions"
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setSessionSearchOpen(false);
+                  setSessionSearchQuery('');
+                }
+              }}
+              placeholder="Search threads"
               autoFocus
             />
             {sessionSearchQuery ? (
@@ -1762,64 +4129,41 @@ export function AgentPanel({
           </div>
         ) : null}
 
-        <div className="copilot-threads-container">
+        <div className="tantalum-ai-threads-container">
           {loadingThreads ? (
             <div className="agent-empty-state">
               <LoaderCircle size={16} className="spin" />
-              <span>Loading sessions...</span>
+              <span>Loading threads...</span>
             </div>
           ) : null}
 
           {!loadingThreads && threadSummaries.length === 0 ? (
-            <div className="agent-empty-state tantalum-empty-state">
+            <div className="agent-empty-state tantalum-empty-state sessions-empty-state">
               <MessageSquare size={16} />
-              <span>No active sessions.</span>
+              <span>No active threads.</span>
             </div>
           ) : null}
 
           {!loadingThreads && threadSummaries.length > 0 && visibleThreadSummaries.length === 0 ? (
             <div className="agent-empty-state tantalum-empty-state">
               <Search size={16} />
-              <span>No matching sessions.</span>
+              <span>No matching threads.</span>
             </div>
           ) : null}
 
-          {visibleThreadSummaries.map((thread) => {
-            const isRunning = thread.id === runningThreadId;
-            const hasUnreadCompletion = unreadCompletedThreadIds.has(thread.id);
-            return (
-              <article
-                key={thread.id}
-                className={`copilot-thread-item ${isRunning ? 'running' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
-              >
-                <button type="button" className="copilot-thread-main-btn" onClick={() => void openThread(thread.id)}>
-                  <div className="copilot-thread-bullet-row">
-                    {isRunning ? (
-                      <span className="copilot-thread-activity" title="Agent is running" aria-label="Agent is running">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                    ) : hasUnreadCompletion ? (
-                      <span className="copilot-thread-complete-dot" title="New agent response" aria-label="New agent response" />
-                    ) : null}
-                    <span className="copilot-thread-title-text">{thread.title}</span>
-                  </div>
-                  <span className="copilot-thread-time-sub">
-                    {formatRelativeTime(thread.lastMessageAt)}
-                  </span>
-                </button>
-                <div className="copilot-thread-item-actions">
-                  <button type="button" title="Rename" onClick={() => void handleRenameThread(thread)}>
-                    <PencilLine size={14} />
-                  </button>
-                  <button type="button" title="Delete" onClick={() => void handleDeleteThread(thread)}>
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+          {previewThreadSummaries.map(renderThreadItem)}
+          {hasThreadOverflow ? (
+            <button
+              className="tantalum-ai-thread-show-more"
+              type="button"
+              onClick={() => setThreadListExpanded((current) => !current)}
+            >
+              {threadListExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              <span>{threadListExpanded ? 'SHOW LESS' : 'SHOW MORE'}</span>
+              <strong className="tantalum-ai-thread-show-count">{threadListExpanded ? overflowThreadSummaries.length : hiddenThreadCount}</strong>
+            </button>
+          ) : null}
+          {threadListExpanded ? overflowThreadSummaries.map(renderThreadItem) : null}
         </div>
       </div>
     );
@@ -1836,194 +4180,385 @@ export function AgentPanel({
     const effectiveStatus: PendingAgentActionStatus =
       actionStatus === 'pending' && latestPendingAction && latestPendingAction.id !== action.id ? 'expired' : actionStatus;
     const taskList = liveTaskLists.get(`action:${action.id}`) ?? asAgentTaskList(message.metadata?.taskList) ?? findLatestTaskList(messages, action.id);
+    const pendingFileChanges =
+      taskList?.items.reduce<Array<{ key: string; action: string; filePath: string; label: string }>>((changes, item) => {
+        const filePath = taskTargetPath(item);
+        if (!filePath) {
+          return changes;
+        }
+
+        const actionLabel = pendingTaskActionLabel(item);
+        const isMoveTask = item.kind.toLowerCase().includes('move');
+        const label =
+          item.targetPath && item.newPath && item.targetPath !== item.newPath
+            ? isMoveTask
+              ? `${item.targetPath} -> ${item.newPath}`
+              : `${basenameFromPath(item.targetPath) ?? item.targetPath} -> ${basenameFromPath(item.newPath) ?? item.newPath}`
+            : (basenameFromPath(filePath) ?? filePath);
+        const key = `${actionLabel}:${item.targetPath || ''}:${item.newPath || ''}`;
+        if (changes.some((change) => change.key === key)) {
+          return changes;
+        }
+
+        return [...changes, { key, action: actionLabel, filePath, label }];
+      }, []) ?? [];
     const isWaiting = effectiveStatus === 'pending' || effectiveStatus === 'blocked';
-    const statusLabel =
-      effectiveStatus === 'pending'
-        ? 'Waiting for approval'
-        : effectiveStatus === 'running' || effectiveStatus === 'approved'
-          ? 'Running'
-          : effectiveStatus === 'blocked'
-            ? 'Blocked'
-          : effectiveStatus === 'executed'
-            ? 'Applied changes'
-            : effectiveStatus === 'skipped'
-              ? 'Skipped'
-              : 'Unavailable';
+    const isApprovedState = effectiveStatus === 'approved' || effectiveStatus === 'running' || effectiveStatus === 'executed';
+    const isSkippedState = effectiveStatus === 'skipped';
     const buttonsDisabled = !isWaiting || busy || activeThreadIsRunning;
+    const approvalStateLabel = isSkippedState ? 'skipped' : isApprovedState ? 'approved' : effectiveStatus === 'expired' ? 'unavailable' : 'pending approval';
+    const plannedChangeLabel = pendingFileChanges.length
+      ? `${pendingFileChanges.length} ${pendingFileChanges.length === 1 ? 'file' : 'files'} ${approvalStateLabel}`
+      : taskList?.items.length
+        ? `${taskList.items.length} planned ${taskList.items.length === 1 ? 'update' : 'updates'} ${approvalStateLabel}`
+      : `${action.riskLevel || 'workspace'} risk workspace change`;
+    const permissionCopy =
+      effectiveStatus === 'executed'
+        ? 'This workspace change was approved and applied.'
+        : effectiveStatus === 'skipped'
+          ? 'This workspace change was skipped.'
+          : effectiveStatus === 'expired'
+            ? 'A newer permission request replaced this one.'
+            : effectiveStatus === 'blocked'
+              ? 'Tantalum AI needs approval again before it can continue.'
+              : 'Tantalum AI needs permission before it can make changes in this workspace.';
 
     return (
       <div className={`pending-agent-action-card pending-agent-action-card-${effectiveStatus}`}>
-        <div className="pending-agent-action-head">
-          <div>
-            <p className="eyebrow">{statusLabel}</p>
-            <h4>{action.riskLevel === 'high' ? 'Workspace change needs approval' : 'Confirm workspace change'}</h4>
+        <div className="pending-agent-action-main">
+          <h4>Permission Request</h4>
+          <p>{permissionCopy}</p>
+          {pendingFileChanges.length ? (
+            <div className="pending-agent-file-list" aria-label="Files pending approval">
+              <span className="pending-agent-file-list-title">Files to change</span>
+              {pendingFileChanges.map((change) => (
+                <div key={change.key} className="pending-agent-file-row">
+                  <ContextSuggestionFileIcon filePath={change.filePath} />
+                  <span className="pending-agent-file-action">{change.action}</span>
+                  <span className="pending-agent-file-name" title={change.filePath}>
+                    {change.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="action-row pending-agent-action-buttons">
+            {!isSkippedState ? (
+              <button
+                className="primary-button compact"
+                type="button"
+                disabled={buttonsDisabled || isApprovedState}
+                onClick={() => void approvePendingAgentAction(action.id)}
+              >
+                {isApprovedState ? 'Approved' : effectiveStatus === 'blocked' ? 'Retry' : 'Approve'}
+              </button>
+            ) : null}
+            {!isApprovedState ? (
+              <button
+                className="danger-button compact"
+                type="button"
+                disabled={buttonsDisabled || isSkippedState}
+                onClick={() => void skipPendingAgentAction(action.id)}
+              >
+                {isSkippedState ? 'Skipped' : 'Skip'}
+              </button>
+            ) : null}
           </div>
-          <Shield size={15} />
         </div>
-        <pre>{action.originalPrompt}</pre>
-        {taskList ? (
-          <div className="pending-agent-task-list" aria-label="Agent todo list">
-            {taskList.items.map((item) => (
-              <div key={item.id} className={`pending-agent-task pending-agent-task-${item.status}`}>
-                <span className="pending-agent-task-status">{item.status}</span>
-                <span className="pending-agent-task-title">{item.title}</span>
-              </div>
-            ))}
+        <div className="pending-agent-action-meta-row">
+          <FileText size={13} />
+          <span>{plannedChangeLabel}</span>
+        </div>
+      </div>
+    );
+  }
+
+  function getLatestVisibleTaskList() {
+    const latestPendingAction = findLatestPendingAction(messages);
+    const baseTaskList = latestPendingAction ? findLatestTaskList(messages, latestPendingAction.id) : findLatestTaskList(messages);
+    return (
+      (baseTaskList
+        ? liveTaskLists.get(baseTaskList.id) ?? (baseTaskList.actionId ? liveTaskLists.get(`action:${baseTaskList.actionId}`) : null)
+        : null) ??
+      (latestPendingAction ? liveTaskLists.get(`action:${latestPendingAction.id}`) : null) ??
+      baseTaskList
+    );
+  }
+
+  function renderWorkDetails(taskList: AgentTaskList | null, activities: AgentActivityEntry[]) {
+    const visibleActivities = [...activities].reverse();
+
+    return (
+      <div className="agent-work-details">
+        {taskList?.items.length ? (
+          <div className="agent-work-detail-list">
+            {taskList.items.map((item) => {
+              const target = taskTargetPath(item);
+              const range = formatTaskRange(item);
+              const note = item.result || item.error ? displayAgentWorkText(item.result || item.error || '') : '';
+              return (
+                <div key={item.id} className={`agent-work-row agent-work-row-${item.status}`}>
+                  <AgentWorkIcon kind={taskWorkIconKind(item)} />
+                  <span className="agent-work-action">{taskActionLabel(item)}</span>
+                  {target ? (
+                    <span className="agent-work-file-pill" title={target}>
+                      <ContextSuggestionFileIcon filePath={target} />
+                      <span>{basenameFromPath(target) ?? target}</span>
+                    </span>
+                  ) : (
+                    <span className="agent-work-title">{displayAgentWorkText(item.title) || item.title}</span>
+                  )}
+                  {range ? <span className="agent-work-muted">, {range}</span> : null}
+                  {note ? <span className="agent-work-muted">{note}</span> : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
-        <div className="action-row">
-          <button
-            className="danger-button compact"
-            type="button"
-            disabled={buttonsDisabled}
-            onClick={() => void skipPendingAgentAction(action.id)}
-          >
-            <X size={14} />
-            Skip
-          </button>
-          <button
-            className="primary-button compact"
-            type="button"
-            disabled={buttonsDisabled}
-            onClick={() => void approvePendingAgentAction(action.id)}
-          >
-            <Play size={14} />
-            {effectiveStatus === 'blocked' ? 'Retry' : 'Approve'}
-          </button>
-        </div>
+        {visibleActivities.length > 0 ? (
+          <div className="agent-work-detail-list">
+            {visibleActivities.map((activity) => {
+              const title = displayAgentWorkText(activity.title) || activity.title;
+              const detail = activity.detail ? displayAgentWorkText(activity.detail) : '';
+              const iconKind = activityWorkIconKind(activity);
+              return (
+                <div key={activity.id} className={`agent-work-row agent-work-runtime-row agent-work-row-${activity.status}`}>
+                  <AgentWorkIcon kind={iconKind} />
+                  <span className="agent-work-action">{activity.status}</span>
+                  <span className="agent-work-title">{title}</span>
+                  {detail ? <span className="agent-work-muted">{detail}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
     );
   }
 
-  function renderTaskListCard(message: AgentThreadMessage) {
+  function renderAssistantWorkSummary(message: AgentThreadMessage) {
     const baseTaskList = asAgentTaskList(message.metadata?.taskList);
-    if (!baseTaskList || message.metadata?.pendingAction) {
+    const taskList = baseTaskList
+      ? liveTaskLists.get(baseTaskList.id) ?? (baseTaskList.actionId ? liveTaskLists.get(`action:${baseTaskList.actionId}`) : null) ?? baseTaskList
+      : null;
+    const activities = asAgentActivityEntries(message.metadata?.activities);
+    const summary = taskSummaryLabel(taskList, activities);
+    if (!summary) {
       return null;
     }
 
-    const taskList = liveTaskLists.get(baseTaskList.id) ?? (baseTaskList.actionId ? liveTaskLists.get(`action:${baseTaskList.actionId}`) : null) ?? baseTaskList;
+    const expanded = expandedWorkSummaryIds.has(message.id);
 
     return (
-      <div className="pending-agent-action-card pending-agent-action-card-tasks">
-        <div className="pending-agent-action-head">
-          <div>
-            <p className="eyebrow">Todo list</p>
-            <h4>Workspace tasks</h4>
-          </div>
-          <FileText size={15} />
-        </div>
-        <div className="pending-agent-task-list" aria-label="Agent todo list">
-          {taskList.items.map((item) => (
-            <div key={item.id} className={`pending-agent-task pending-agent-task-${item.status}`}>
-              <span className="pending-agent-task-status">{item.status}</span>
-              <span className="pending-agent-task-title">{item.title}</span>
-            </div>
-          ))}
-        </div>
+      <div className={`agent-work-summary ${expanded ? 'open' : ''}`}>
+        <button
+          className="agent-work-summary-toggle"
+          type="button"
+          aria-expanded={expanded}
+          title={expanded ? 'Hide thinking details' : 'Show thinking details'}
+          onClick={() => {
+            setExpandedWorkSummaryIds((current) => {
+              const next = new Set(current);
+              if (next.has(message.id)) {
+                next.delete(message.id);
+              } else {
+                next.add(message.id);
+              }
+              return next;
+            });
+          }}
+        >
+          <span>{summary}</span>
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </button>
+        {expanded ? renderWorkDetails(taskList, activities) : null}
       </div>
-    );
-  }
-
-  function renderPendingReviewCard() {
-    if (!pendingReview) {
-      return null;
-    }
-
-    return (
-      <article className="agent-approval-card tantalum-approval-card copilot-approval-card">
-        <div className="agent-approval-head">
-          <div>
-            <p className="eyebrow">Live changes</p>
-            <h3>{pendingReview.files.length} applied workspace {pendingReview.files.length === 1 ? 'change' : 'changes'}</h3>
-          </div>
-          {resolvingReview ? <LoaderCircle size={16} className="spin" /> : null}
-        </div>
-        <div className="agent-change-list">
-          {pendingReview.files.map((file) => (
-            <button key={file.path} type="button" onClick={() => onPreviewAgentFile?.(file.path)}>
-              <span>{file.changeType}</span>
-              <code>{file.path}</code>
-            </button>
-          ))}
-        </div>
-        <div className="action-row">
-          <button className="danger-button compact" type="button" disabled={resolvingReview} onClick={() => void resolveAgentReviewFromChat(false)}>
-            <X size={14} />
-            Revert
-          </button>
-          <button className="primary-button compact" type="button" disabled={resolvingReview} onClick={() => void resolveAgentReviewFromChat(true)}>
-            <Save size={14} />
-            Keep
-          </button>
-        </div>
-      </article>
     );
   }
 
   function renderThinkingIndicator() {
-    if (!activeThreadIsRunning) {
+    if (!activeThreadIsRunning && !activeThreadIsPreparing) {
       return null;
     }
 
+    const activities = activeThreadId ? liveActivities.get(activeThreadId) ?? [] : [];
+    const latestActivity = activities.at(-1) ?? null;
+    const taskList = getLatestVisibleTaskList();
+    const phaseLabel = liveWorkPhaseLabel({
+      activity: latestActivity,
+      taskList,
+      isPreparing: activeThreadIsPreparing,
+    });
     return (
-      <article className="agent-message agent-message-assistant copilot-chat-bubble copilot-thinking-message">
-        <div className="agent-message-meta copilot-bubble-meta">
+      <article className="agent-message agent-message-assistant tantalum-ai-chat-bubble tantalum-ai-thinking-message">
+        <div className="agent-message-meta tantalum-ai-bubble-meta">
           <span className="author-tag">
             <Sparkles size={11} className="sparkle-icon" />
             Tantalum AI
           </span>
         </div>
-        <div className="agent-message-body copilot-bubble-content agent-thinking-body" aria-live="polite">
-          <span>Thinking</span>
-          <span className="agent-thinking-dots" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </span>
+        <div className="agent-message-body tantalum-ai-bubble-content agent-thinking-body" aria-live="polite">
+          <div className="agent-thinking-row">
+            <span className="agent-thinking-label">{phaseLabel}</span>
+            {latestActivity ? (
+              <>
+                <span className="agent-thinking-separator" aria-hidden="true">
+                  ·
+                </span>
+                <span className="agent-thinking-current">{displayAgentWorkText(latestActivity.title) || latestActivity.title}</span>
+              </>
+            ) : null}
+            <span className="agent-thinking-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            <button
+              className="agent-thinking-toggle"
+              type="button"
+              title={thinkingDetailsOpen ? 'Hide runtime details' : 'Show runtime details'}
+              aria-expanded={thinkingDetailsOpen}
+              onClick={() => setThinkingDetailsOpen((current) => !current)}
+            >
+              {thinkingDetailsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            </button>
+          </div>
+          {thinkingDetailsOpen ? renderWorkDetails(taskList, activities) : null}
         </div>
       </article>
     );
   }
 
+  function renderConversationHeader() {
+    return (
+      <div className="tantalum-ai-conversation-header">
+        <button className="conversation-back-btn" type="button" title="View Threads" onClick={showThreadHistory}>
+          <ArrowLeft size={15} />
+        </button>
+        <h3>{formatThreadTitle(activeThread?.title ?? 'Untitled')}</h3>
+      </div>
+    );
+  }
+
+  function renderMessageLoadingSkeleton() {
+    return (
+      <div className="agent-message-skeleton-list" role="status" aria-live="polite">
+        <div className="agent-message-skeleton-status">
+          <LoaderCircle size={16} className="spin" />
+          <span>Loading chat...</span>
+        </div>
+        {[0, 1, 2].map((index) => (
+          <div key={index} className={`agent-message-skeleton ${index === 1 ? 'agent-message-skeleton-user' : ''}`}>
+            <span className="agent-message-skeleton-meta" />
+            <span className="agent-message-skeleton-line agent-message-skeleton-line-wide" />
+            <span className="agent-message-skeleton-line" />
+            <span className="agent-message-skeleton-line agent-message-skeleton-line-short" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function renderUserMessageContextChips(message: AgentThreadMessage) {
+    const chips = messageContextChipsFromMetadata(message.metadata);
+    if (chips.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="agent-message-context-chip-row" aria-label="Message context">
+        {chips.map((chip) => {
+          const label = contextChipLabel(chip);
+          const imageDataUrl = chip.kind === 'image' ? messageContextImagePreviews.get(chip.id) : undefined;
+          const filePath = workspacePathForContextChip(chip, workspacePath);
+          const chipClassName = `agent-message-context-chip ${chip.kind} ${imageDataUrl || filePath ? 'clickable' : ''}`;
+          const icon = <ContextItemIcon item={{ kind: chip.kind, path: chip.path || chip.relativePath || chip.name }} />;
+          const content = (
+            <>
+              {icon}
+              <span className="chip-filename">{label}</span>
+            </>
+          );
+
+          if (imageDataUrl) {
+            return (
+              <button
+                key={chip.id}
+                className={chipClassName}
+                type="button"
+                title={`Preview ${label}`}
+                onClick={() =>
+                  setPreviewImageContextItem((current) =>
+                    current?.source === 'message' && current.id === chip.id
+                      ? null
+                      : {
+                          id: chip.id,
+                          name: label,
+                          dataUrl: imageDataUrl,
+                          source: 'message',
+                        },
+                  )
+                }
+              >
+                {content}
+              </button>
+            );
+          }
+
+          if (filePath && onOpenContextFile) {
+            return (
+              <button
+                key={chip.id}
+                className={chipClassName}
+                type="button"
+                title={`Open ${label}`}
+                onClick={() => onOpenContextFile(filePath)}
+              >
+                {content}
+              </button>
+            );
+          }
+
+          return (
+            <span key={chip.id} className={chipClassName} title={chip.kind === 'image' ? 'Image preview is only available in the current session.' : label}>
+              {content}
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
+
   function renderConversation() {
+    const loadingExistingThread = loadingMessages && composeTarget === 'thread' && Boolean(activeThreadId) && messages.length === 0;
+
+    if (loadingExistingThread) {
+      return (
+        <div className="tantalum-ai-conversation-container">
+          {renderConversationHeader()}
+          <div ref={messageListRef} className="agent-message-list tantalum-message-list tantalum-ai-message-list">
+            {renderMessageLoadingSkeleton()}
+          </div>
+        </div>
+      );
+    }
+
     if (messages.length === 0) {
       return (
-        <div className="copilot-welcome-screen">
-          <div className="copilot-welcome-logo">
-            <Sparkles size={32} className="text-accent" />
-          </div>
-          <h3>Tantalum AI</h3>
-          <p className="welcome-desc">
-            Your AI-powered coding assistant, connected to your workspace files and runtime.
-          </p>
-          <div className="welcome-shortcuts">
-            <div className="shortcut-card" onClick={startBlankThread}>
-              <Plus size={14} />
-              <span>Start a blank session</span>
-            </div>
-            <div className="shortcut-card" onClick={openAgentSettingsView}>
-              <Settings2 size={14} />
-              <span>Configure custom APIs</span>
-            </div>
+        <div className="tantalum-ai-conversation-container">
+          {renderConversationHeader()}
+          <div className="tantalum-ai-empty-thread">
+            <p>Tell me what you want me to work on.</p>
           </div>
         </div>
       );
     }
 
     return (
-      <div className="copilot-conversation-container">
-        <div className="copilot-conversation-header">
-          <div className="header-meta">
-            <span className="session-indicator-pill">ACTIVE SESSION</span>
-            <h3>{activeThread?.title ?? 'Active thread'}</h3>
-          </div>
-          <button className="ghost-button compact" type="button" onClick={() => setIsViewingHistory(true)}>
-            <History size={13} style={{ marginRight: '4px' }} />
-            History
-          </button>
-        </div>
+      <div className="tantalum-ai-conversation-container">
+        {renderConversationHeader()}
 
-        <div ref={messageListRef} className="agent-message-list tantalum-message-list copilot-message-list">
+        <div ref={messageListRef} className="agent-message-list tantalum-message-list tantalum-ai-message-list">
           {loadingMessages ? (
             <div className="agent-empty-state">
               <LoaderCircle size={18} className="spin" />
@@ -2032,8 +4567,8 @@ export function AgentPanel({
           ) : null}
 
           {messages.map((message) => (
-            <article key={message.id} className={`agent-message agent-message-${message.role} ${message.tone ? `agent-message-${message.tone}` : ''} copilot-chat-bubble`}>
-              <div className="agent-message-meta copilot-bubble-meta">
+            <article key={message.id} className={`agent-message agent-message-${message.role} ${message.tone ? `agent-message-${message.tone}` : ''} tantalum-ai-chat-bubble`}>
+              <div className="agent-message-meta tantalum-ai-bubble-meta">
                 <span className="author-tag">
                   {message.role === 'assistant' ? (
                     <>
@@ -2048,23 +4583,28 @@ export function AgentPanel({
                 </span>
                 {message.createdAt ? <span className="time-tag">{formatDate(message.createdAt)}</span> : null}
               </div>
-              <div className="agent-message-body copilot-bubble-content">
+              <div className="agent-message-body tantalum-ai-bubble-content">
                 {message.role === 'assistant' ? (
                   <>
+                    {renderAssistantWorkSummary(message)}
                     <MarkdownRenderer content={message.content} />
                     {renderPendingActionCard(message)}
-                    {renderTaskListCard(message)}
                   </>
                 ) : message.role === 'user' ? (
-                  <pre>{message.content}</pre>
+                  <>
+                    <pre>{message.content}</pre>
+                    {renderUserMessageContextChips(message)}
+                  </>
                 ) : (
-                  <div className="status-alert-body">{message.content}</div>
+                  <>
+                    {renderAssistantWorkSummary(message)}
+                    <div className="status-alert-body">{message.content}</div>
+                  </>
                 )}
               </div>
             </article>
           ))}
           {renderThinkingIndicator()}
-          {renderPendingReviewCard()}
         </div>
       </div>
     );
@@ -2076,24 +4616,35 @@ export function AgentPanel({
     }
 
     return (
-      <div className="copilot-chat-layout">
-        {!hasCloudAgent ? (
+      <div
+        className={`tantalum-ai-chat-layout ${contextDropActive ? 'context-drop-active' : ''}`}
+        onDragEnter={handleContextDragEnter}
+        onDragOver={handleContextDragOver}
+        onDragLeave={handleContextDragLeave}
+        onDrop={handleContextDrop}
+      >
+        {!showInitialAgentLoading && !hasCloudAgent ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
             Push the Tantalum AI Appwrite tables and functions before using managed models, custom credentials, or synced threads.
           </div>
         ) : null}
 
-        {preferences.selectedSource === 'managed' && !canUseManaged ? (
+        {!showInitialAgentLoading && preferences.selectedSource === 'managed' && !canUseManaged ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
             Managed agent access is unavailable until a pool key is assigned and credits remain.
           </div>
         ) : null}
 
-        <div className="copilot-chat-content">
-          {isViewingHistory ? renderThreadList() : renderConversation()}
+        <div className="tantalum-ai-chat-content">
+          {showInitialAgentLoading ? (
+            <div className="agent-loading-state" role="status" aria-live="polite">
+              <LoaderCircle size={22} className="spin" />
+              <span>Loading agent...</span>
+            </div>
+          ) : isViewingHistory ? renderThreadList() : renderConversation()}
         </div>
 
-        {renderComposer()}
+        {isViewingHistory && sessionSearchOpen ? null : renderComposer()}
         {renderBottomStatusBar()}
       </div>
     );
@@ -2101,9 +4652,9 @@ export function AgentPanel({
 
   function renderSettingsView() {
     return (
-      <div className="agent-settings-view copilot-settings-layout">
+      <div className="agent-settings-view tantalum-ai-settings-layout">
         {/* Relocated Core Configuration Card */}
-        <div className="copilot-settings-card core-config-card">
+        <div className="tantalum-ai-settings-card core-config-card">
           <div className="card-header">
             <Sliders size={14} className="text-accent" />
             <h3>Agent Configuration</h3>
@@ -2147,7 +4698,7 @@ export function AgentPanel({
                   <div className="settings-field">
                     <label className="field-label">Active Provider Key</label>
                     <CustomDropdown
-                      className="copilot-settings-select"
+                      className="tantalum-ai-settings-select"
                       value={selectedCredential?.id ?? ''}
                       options={enabledCustomCredentials.length === 0
                         ? [{ label: 'No custom keys enabled', value: '' }]
@@ -2167,7 +4718,7 @@ export function AgentPanel({
                   <div className="settings-field">
                     <label className="field-label">Active Custom Model</label>
                     <CustomDropdown
-                      className="copilot-settings-select"
+                      className="tantalum-ai-settings-select"
                       value={selectedModel ?? ''}
                       options={selectedCredential
                         ? selectedCredential.modelNames.map(m => ({ label: m, value: m }))
@@ -2181,6 +4732,8 @@ export function AgentPanel({
             )}
           </div>
         </div>
+
+        {renderAgentUsageSection()}
 
         {/* Existing credential creation/edit form */}
         <form className="agent-settings-card" onSubmit={(event) => void handleCredentialSubmit(event)}>
@@ -2220,7 +4773,7 @@ export function AgentPanel({
             <label>
               Enabled
               <CustomDropdown
-                className="copilot-settings-select"
+                className="tantalum-ai-settings-select"
                 value={credentialForm.enabled ? 'yes' : 'no'}
                 options={[
                   { label: 'Enabled', value: 'yes' },
@@ -2297,29 +4850,109 @@ export function AgentPanel({
     );
   }
 
-  function renderUsageView() {
+  function renderAgentUsageSection() {
+    const creditAccount = settings.creditAccount;
+    const monthlyAllowance = creditAccount.monthlyAllowance;
+    const usedCredits = creditAccount.usedCredits;
+    const remainingCredits = creditAccount.remainingCredits;
+    const usedPercent = monthlyAllowance > 0 ? (usedCredits / monthlyAllowance) * 100 : 0;
+    const recentUsage = settings.recentUsage;
+    const recentTotalTokens = recentUsage.reduce((total, event) => total + event.totalTokens, 0);
+    const recentChargedCredits = recentUsage.reduce((total, event) => total + event.chargedCredits, 0);
+    const managedEvents = recentUsage.filter((event) => event.source === 'managed').length;
+    const customEvents = recentUsage.filter((event) => event.source === 'custom').length;
+    const blockedOrFailedEvents = recentUsage.filter((event) => event.status === 'blocked' || event.status === 'failed').length;
+
     return (
-      <div className="agent-usage-view">
+      <section className="tantalum-ai-settings-card agent-usage-settings-card">
+        <div className="card-header agent-usage-card-header">
+          <Bot size={14} className="text-accent" />
+          <div>
+            <h3>Agent Usage</h3>
+            <span>Credit account and usage ledger</span>
+          </div>
+        </div>
+
         <div className="agent-usage-summary">
-          <div>
+          <div className="agent-usage-summary-card">
             <span>Allowance</span>
-            <strong>{formatCredits(settings.creditAccount.monthlyAllowance)}</strong>
+            <strong>{formatCredits(monthlyAllowance)}</strong>
           </div>
-          <div>
+          <div className="agent-usage-summary-card">
             <span>Used</span>
-            <strong>{formatCredits(settings.creditAccount.usedCredits)}</strong>
+            <strong>{formatCredits(usedCredits)}</strong>
           </div>
-          <div>
+          <div className="agent-usage-summary-card">
             <span>Remaining</span>
-            <strong>{formatCredits(settings.creditAccount.remainingCredits)}</strong>
+            <strong>{formatCredits(remainingCredits)}</strong>
+          </div>
+          <div className="agent-usage-summary-card">
+            <span>Used Share</span>
+            <strong>{formatUsagePercent(usedPercent)}</strong>
+          </div>
+        </div>
+
+        <div className="agent-usage-meter" title={`${formatCredits(usedCredits)} of ${formatCredits(monthlyAllowance)} credits used`}>
+          <span style={{ width: `${Math.max(0, Math.min(100, usedPercent))}%` }} />
+        </div>
+
+        <div className="agent-usage-detail-grid">
+          <div>
+            <span>Account ID</span>
+            <code>{creditAccount.id || 'Not assigned'}</code>
           </div>
           <div>
-            <span>Resets</span>
-            <strong>{formatDate(settings.creditAccount.resetAt)}</strong>
+            <span>Period Key</span>
+            <strong>{creditAccount.periodKey || 'Not set'}</strong>
+          </div>
+          <div>
+            <span>Reset At</span>
+            <strong>{formatDetailedDate(creditAccount.resetAt)}</strong>
+          </div>
+          <div>
+            <span>Created At</span>
+            <strong>{formatDetailedDate(creditAccount.createdAt)}</strong>
+          </div>
+          <div>
+            <span>Updated At</span>
+            <strong>{formatDetailedDate(creditAccount.updatedAt)}</strong>
+          </div>
+        </div>
+
+        <div className="agent-usage-subsection">
+          <div className="agent-usage-subsection-title">
+            <h4>Ledger Totals</h4>
+            <span>{recentUsage.length.toLocaleString()} entries</span>
+          </div>
+          <div className="agent-usage-summary agent-usage-ledger-summary">
+            <div className="agent-usage-summary-card">
+              <span>Charged Credits</span>
+              <strong>{formatCredits(recentChargedCredits)}</strong>
+            </div>
+            <div className="agent-usage-summary-card">
+              <span>Total Tokens</span>
+              <strong>{recentTotalTokens.toLocaleString()}</strong>
+            </div>
+            <div className="agent-usage-summary-card">
+              <span>Managed Runs</span>
+              <strong>{managedEvents.toLocaleString()}</strong>
+            </div>
+            <div className="agent-usage-summary-card">
+              <span>Custom Runs</span>
+              <strong>{customEvents.toLocaleString()}</strong>
+            </div>
+            <div className="agent-usage-summary-card">
+              <span>Blocked / Failed</span>
+              <strong>{blockedOrFailedEvents.toLocaleString()}</strong>
+            </div>
           </div>
         </div>
 
         <div className="agent-usage-list">
+          <div className="agent-usage-subsection-title">
+            <h4>Usage Ledger</h4>
+            <span>Newest first</span>
+          </div>
           {settings.recentUsage.length === 0 ? (
             <div className="agent-empty-state">
               <Bot size={18} />
@@ -2328,21 +4961,62 @@ export function AgentPanel({
           ) : null}
           {settings.recentUsage.map((event) => (
             <article key={event.id} className="agent-usage-row">
-              <div>
-                <strong>{event.source === 'managed' ? (event.mode === 'plan' ? 'Plan' : 'Fast') : event.modelAlias || 'Custom'}</strong>
-                <span>
-                  {event.status} / {formatDate(event.createdAt)}
-                </span>
-                {event.errorMessage ? <code>{event.errorMessage}</code> : null}
+              <div className="agent-usage-row-head">
+                <div>
+                  <strong>{event.source === 'managed' ? (event.mode === 'power' ? 'Power' : 'Fast') : event.modelAlias || 'Custom'}</strong>
+                  <span>{formatDetailedDate(event.createdAt)}</span>
+                </div>
+                <div className="agent-usage-row-credit">
+                  <strong>{event.chargedCredits.toLocaleString()} credits</strong>
+                  <span>{event.totalTokens.toLocaleString()} tokens</span>
+                </div>
               </div>
-              <div>
-                <span>{event.totalTokens.toLocaleString()} tokens</span>
-                <strong>{event.chargedCredits.toLocaleString()} credits</strong>
+
+              <div className="agent-usage-event-grid">
+                <div>
+                  <span>Status</span>
+                  <strong>{event.status || 'unknown'}</strong>
+                </div>
+                <div>
+                  <span>Source</span>
+                  <strong>{event.source}</strong>
+                </div>
+                <div>
+                  <span>Mode</span>
+                  <strong>{event.mode}</strong>
+                </div>
+                <div>
+                  <span>Provider</span>
+                  <strong>{event.providerLabel || 'Not recorded'}</strong>
+                </div>
+                <div>
+                  <span>Model</span>
+                  <strong>{event.modelAlias || 'Not recorded'}</strong>
+                </div>
+                <div>
+                  <span>Multiplier</span>
+                  <strong>{event.multiplier.toLocaleString()}x</strong>
+                </div>
+                <div>
+                  <span>Request ID</span>
+                  <code>{event.requestId || 'Not recorded'}</code>
+                </div>
+                <div>
+                  <span>Ledger ID</span>
+                  <code>{event.id}</code>
+                </div>
               </div>
+
+              {event.errorMessage ? (
+                <div className="agent-usage-error">
+                  <span>Error</span>
+                  <code>{event.errorMessage}</code>
+                </div>
+              ) : null}
             </article>
           ))}
         </div>
-      </div>
+      </section>
     );
   }
 
@@ -2354,8 +5028,51 @@ export function AgentPanel({
 
         {view === 'chat' ? renderChatView() : null}
         {view === 'settings' ? renderSettingsView() : null}
-        {view === 'usage' ? renderUsageView() : null}
       </section>
+      <Modal
+        open={Boolean(renameThreadPrompt)}
+        title="Rename thread"
+        size="sm"
+        onClose={() => {
+          if (renamingThreadId) {
+            return;
+          }
+
+          setRenameThreadPrompt(null);
+          setRenameThreadTitle('');
+        }}
+      >
+        {renameThreadPrompt ? (
+          <form className="modal-form" onSubmit={(event) => void submitThreadRename(event)}>
+            <label>
+              Thread title
+              <input
+                autoFocus
+                value={renameThreadTitle}
+                onChange={(event) => setRenameThreadTitle(event.target.value)}
+                placeholder={renameThreadPrompt.title}
+                disabled={renamingThreadId === renameThreadPrompt.id}
+              />
+            </label>
+            <div className="form-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={renamingThreadId === renameThreadPrompt.id}
+                onClick={() => {
+                  setRenameThreadPrompt(null);
+                  setRenameThreadTitle('');
+                }}
+              >
+                Cancel
+              </button>
+              <button className="primary-button" type="submit" disabled={renamingThreadId === renameThreadPrompt.id}>
+                {renamingThreadId === renameThreadPrompt.id ? 'Renaming...' : 'Rename'}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
     </>
   );
 }

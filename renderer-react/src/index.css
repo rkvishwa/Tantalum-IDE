@@ -23,6 +23,7 @@
   --bg-alt: #252526;
   --bg-panel: #252526;
   --bg-panel-alt: #2d2d30;
+  --bg-secondary: #2d2d2d;
   --bg-editor: #171717;
   --bg-elevated: #2d2d30;
   --bg-hover: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -1477,7 +1478,7 @@ body.panel-resizing-row * {
   cursor: pointer;
   font-family: var(--app-font-family);
   font-size: 0.85rem;
-  font-weight: 400;
+  font-weight: 300;
 }
 
 .git-source-commit-box .git-commit-button:hover:not(:disabled) {
@@ -1976,9 +1977,14 @@ body.panel-resizing-row * {
   overflow: hidden;
 }
 
+.editor-tabs-scroll-host {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 .editor-shell .jet-editor-tabs-bar {
   padding-left: var(--workspace-panel-tab-inset);
-  background: var(--bg-editor);
+  background: var(--color-bg-elevated, var(--bg-panel-alt));
 }
 
 .editor-shell .jet-editor-tab:first-child {
@@ -2012,6 +2018,9 @@ body.panel-resizing-row * {
   background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
   backdrop-filter: blur(12px);
+  color: #c7d0dc;
+  font-family: var(--system-font-family);
+  font-size: 12px;
 }
 
 .agent-editor-review-bar > div:first-child {
@@ -2021,18 +2030,98 @@ body.panel-resizing-row * {
   min-width: 0;
 }
 
+.agent-editor-review-bar .release-badge {
+  height: 22px;
+  padding: 0 7px;
+  border-color: rgba(126, 146, 166, 0.24);
+  background: rgba(255, 255, 255, 0.04);
+  color: #c7d0dc;
+  font-family: var(--system-font-family);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+}
+
 .agent-editor-review-bar strong {
-  color: var(--text);
-  font-size: 0.85rem;
+  color: #d8dde5;
+  font-family: var(--system-font-family);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
   white-space: nowrap;
 }
 
 .agent-editor-review-bar code {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-muted);
+  color: #98a4b3;
+  font-family: var(--system-font-family);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-editor-review-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.agent-editor-review-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(226, 232, 240, 0.72);
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+  font-family: var(--system-font-family);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.agent-editor-review-action:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(226, 232, 240, 0.08);
+  color: #f2f5f8;
+}
+
+.agent-editor-review-action.accept {
+  border-color: rgba(226, 232, 240, 0.86);
+  background: rgba(226, 232, 240, 0.88);
+  color: var(--bg-panel, #111318);
+}
+
+.agent-editor-review-action.accept:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.94);
+  background: rgba(226, 232, 240, 0.94);
+  color: var(--bg-panel, #111318);
+}
+
+.agent-editor-review-action.decline {
+  border-color: rgba(226, 232, 240, 0.72);
+  background: transparent;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.agent-editor-review-action.decline:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(226, 232, 240, 0.08);
+  color: #f2f5f8;
+}
+
+.agent-editor-review-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .agent-diff-added-line {
@@ -2627,6 +2716,135 @@ body.panel-resizing-row * {
   letter-spacing: 0.08em;
 }
 
+.agent-usage-settings-card {
+  gap: 14px;
+}
+
+.agent-usage-card-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-usage-card-header span,
+.agent-usage-subsection-title span {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.agent-usage-meter {
+  height: 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.agent-usage-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.agent-usage-detail-grid,
+.agent-usage-event-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 8px;
+}
+
+.agent-usage-detail-grid > div,
+.agent-usage-event-grid > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.agent-usage-detail-grid span,
+.agent-usage-event-grid span,
+.agent-usage-error span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.agent-usage-detail-grid strong,
+.agent-usage-event-grid strong,
+.agent-usage-row-head strong,
+.agent-usage-detail-grid code,
+.agent-usage-event-grid code,
+.agent-usage-error code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-usage-subsection,
+.agent-usage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-usage-subsection-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-usage-subsection-title h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.agent-usage-ledger-summary .agent-usage-summary-card {
+  min-width: 130px;
+}
+
+.agent-usage-row {
+  display: grid;
+  gap: 9px;
+  border-radius: 8px;
+}
+
+.agent-usage-row > .agent-usage-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-usage-row-head > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.agent-usage-row-credit {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.agent-usage-row > .agent-usage-event-grid {
+  display: grid;
+}
+
+.agent-usage-error {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(229, 28, 35, 0.28);
+  border-radius: 7px;
+  background: rgba(229, 28, 35, 0.06);
+}
+
 .agent-message-list {
   display: flex;
   flex-direction: column;
@@ -2635,6 +2853,71 @@ body.panel-resizing-row * {
   min-height: 0;
   overflow-y: auto;
   padding-right: 0.2rem;
+}
+
+.agent-message-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.agent-message-skeleton-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.agent-message-skeleton {
+  display: grid;
+  gap: 9px;
+  width: min(100%, 560px);
+  padding: 4px 0;
+}
+
+.agent-message-skeleton-user {
+  align-self: flex-end;
+  width: min(82%, 360px);
+}
+
+.agent-message-skeleton-meta,
+.agent-message-skeleton-line {
+  display: block;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
+  background-size: 220% 100%;
+  animation: agentSkeletonPulse 1.35s ease-in-out infinite;
+}
+
+.agent-message-skeleton-meta {
+  width: 92px;
+  height: 10px;
+}
+
+.agent-message-skeleton-line {
+  width: 72%;
+  height: 14px;
+}
+
+.agent-message-skeleton-line-wide {
+  width: 100%;
+}
+
+.agent-message-skeleton-line-short {
+  width: 44%;
+}
+
+@keyframes agentSkeletonPulse {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
 }
 
 .agent-message,
@@ -2890,7 +3173,7 @@ body.panel-resizing-row * {
   border-radius: 8px;
   border-color: rgba(255, 255, 255, 0.42);
   color: rgba(255, 255, 255, 0.88);
-  font-weight: 400;
+  font-weight: 300;
 }
 
 .primary-button:hover {
@@ -3499,28 +3782,84 @@ body.panel-resizing-row * {
 
 .toast-stack {
   position: fixed;
-  right: 1.2rem;
-  bottom: 1.2rem;
+  right: 1rem;
+  bottom: 1rem;
   display: grid;
-  gap: 0.7rem;
+  justify-items: end;
+  gap: 0.65rem;
   z-index: 50;
+  pointer-events: none;
 }
 
 .toast {
-  min-width: 280px;
-  max-width: 360px;
-  padding: 0.9rem 1rem;
-  border-radius: 4px;
-  border: 1px solid var(--line);
-  background: var(--bg-elevated);
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  width: min(440px, calc(100vw - 2rem));
+  min-height: 64px;
+  gap: 1.1rem;
+  padding: 0.65rem 0.85rem 0.65rem 1.35rem;
+  border: 0;
+  border-radius: 10px;
+  background: #1b1d22;
+  color: #eef2f7;
+  font-family: var(--system-font-family);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-transform: capitalize;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
 }
 
-.toast-success {
-  border-color: rgba(123, 216, 143, 0.28);
+.toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.toast-error {
-  border-color: rgba(255, 123, 114, 0.28);
+.toast-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.toast-action-button,
+.toast-close-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.toast-action-button {
+  padding: 0;
+  color: var(--accent-strong);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.toast-action-button:hover,
+.toast-action-button:focus-visible {
+  color: var(--accent);
+}
+
+.toast-close-button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-right: -0.35rem;
+  border-radius: 999px;
+  color: var(--text);
+}
+
+.toast-close-button:hover,
+.toast-close-button:focus-visible {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .danger-icon-button {
@@ -4830,17 +5169,18 @@ body.panel-resizing-row * {
   gap: 8px;
 }
 
-.tantalum-approval-card {
-  border-radius: 8px;
-}
-
 .tantalum-empty-state {
   justify-content: center;
   min-height: 112px;
   border-radius: 8px;
 }
 
-/* --- VS Code Copilot Redesign of Agent Panel --- */
+.sessions-empty-state {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* --- Tantalum AI Agent Panel --- */
 
 .agent-panel.tantalum-ai-panel {
   display: flex;
@@ -4852,7 +5192,7 @@ body.panel-resizing-row * {
   color: #cccccc;
 }
 
-.copilot-header {
+.tantalum-ai-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4863,14 +5203,19 @@ body.panel-resizing-row * {
   min-height: 35px;
 }
 
-.copilot-header-title {
+.tantalum-ai-header-title {
   display: flex;
   align-items: center;
   gap: 6px;
   height: 100%;
 }
 
-.copilot-tab-title {
+.tantalum-ai-tab-title {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid #e05a47; /* Peach/salmon active line */
   font-size: 11px;
   font-weight: 600;
   color: #ffffff;
@@ -4880,31 +5225,20 @@ body.panel-resizing-row * {
   height: 100%;
   display: inline-flex;
   align-items: center;
-  border-bottom: 2px solid #e05a47; /* Peach/salmon active line */
   box-sizing: border-box;
 }
 
-.copilot-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px !important;
-  color: #858585;
-  border-radius: 4px;
-}
-
-.copilot-back-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+.tantalum-ai-tab-title:hover {
   color: #ffffff;
 }
 
-.copilot-header-actions {
+.tantalum-ai-header-actions {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-.copilot-header-actions button {
+.tantalum-ai-header-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4917,20 +5251,14 @@ body.panel-resizing-row * {
   cursor: pointer;
 }
 
-.copilot-header-actions button:hover {
+.tantalum-ai-header-actions button:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
 
-.copilot-header-actions button.active {
+.tantalum-ai-header-actions button.active {
   background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
-}
-
-.copilot-plus-dropdown-btn {
-  width: auto !important;
-  padding: 0 4px !important;
-  gap: 1px;
 }
 
 .agent-menu-root {
@@ -4941,16 +5269,16 @@ body.panel-resizing-row * {
 
 .agent-popup-menu {
   position: absolute;
-  min-width: 156px;
+  min-width: 164px;
   z-index: 80;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   padding: 5px;
-  background: #1a1c20;
-  border: 1px solid #30343b;
-  border-radius: 6px;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38);
+  background: #0b0d10;
+  border: 1px solid #303846;
+  border-radius: 7px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.46);
 }
 
 .agent-popup-menu-right {
@@ -4970,25 +5298,34 @@ body.panel-resizing-row * {
 
 .agent-popup-menu button {
   width: 100%;
-  min-height: 26px;
+  min-height: 25px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 5px 9px;
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #d6d6d7;
+  color: #cbd3dd;
   font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
 
+.agent-popup-menu button svg {
+  color: #8a96a8;
+}
+
 .agent-popup-menu button:hover:not(:disabled),
 .agent-popup-menu button.active {
-  background: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f1f5f9;
+}
+
+.agent-popup-menu button:hover:not(:disabled) svg,
+.agent-popup-menu button.active svg {
+  color: #dce7f3;
 }
 
 .agent-popup-menu button:disabled {
@@ -4996,7 +5333,152 @@ body.panel-resizing-row * {
   cursor: not-allowed;
 }
 
-.copilot-header-divider {
+.custom-dropdown-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  color: inherit;
+}
+
+.custom-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+}
+
+.custom-dropdown-trigger-affix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.custom-dropdown-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.custom-dropdown-menu {
+  position: absolute;
+  left: 0;
+  z-index: 100;
+  display: grid;
+  gap: 4px;
+  width: max-content;
+  min-width: 176px;
+  max-width: min(300px, calc(100vw - 24px));
+  max-height: 280px;
+  padding: 5px;
+  overflow: hidden;
+  border: 1px solid #303846;
+  border-radius: 7px;
+  background: #0b0d10;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.46);
+}
+
+.custom-dropdown-menu-bottom {
+  top: calc(100% + 6px);
+}
+
+.custom-dropdown-menu-top {
+  bottom: calc(100% + 6px);
+}
+
+.custom-dropdown-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 8px;
+  color: #7f8a9a;
+}
+
+.custom-dropdown-search input {
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #dce3ea;
+  font-size: 12px;
+}
+
+.custom-dropdown-search input::placeholder {
+  color: #7f8a9a;
+}
+
+.custom-dropdown-list {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.custom-dropdown-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 24px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #cbd3dd;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.custom-dropdown-item.has-option-icon {
+  grid-template-columns: 14px minmax(0, 1fr);
+}
+
+.custom-dropdown-item:hover,
+.custom-dropdown-item.active {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f1f5f9;
+}
+
+.custom-dropdown-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  color: #8d98a7;
+}
+
+.custom-dropdown-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-dropdown-empty {
+  padding: 6px 8px 7px 29px;
+  color: #7f8a9a;
+  font-size: 12px;
+}
+
+.tantalum-ai-header-divider {
   width: 1px;
   height: 12px;
   background: #2d3139;
@@ -5004,14 +5486,14 @@ body.panel-resizing-row * {
   display: inline-block;
 }
 
-.copilot-tabs {
+.tantalum-ai-tabs {
   margin-top: 0;
   background: transparent !important;
   border-bottom: 1px solid #1e2023;
   border-radius: 0 !important;
 }
 
-.copilot-tabs button {
+.tantalum-ai-tabs button {
   font-size: 11px;
   padding: 6px 12px;
   border-radius: 0 !important;
@@ -5019,17 +5501,17 @@ body.panel-resizing-row * {
   color: #858585;
 }
 
-.copilot-tabs button:hover {
+.tantalum-ai-tabs button:hover {
   color: #ffffff;
 }
 
-.copilot-tabs button.active {
+.tantalum-ai-tabs button.active {
   border-bottom: 2px solid var(--accent, #007acc) !important;
   background: transparent !important;
   color: #ffffff !important;
 }
 
-.copilot-chat-layout {
+.tantalum-ai-chat-layout {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -5040,7 +5522,7 @@ body.panel-resizing-row * {
   background: #0b0d10;
 }
 
-.copilot-chat-content {
+.tantalum-ai-chat-content {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
@@ -5049,15 +5531,26 @@ body.panel-resizing-row * {
   padding: 4px 0;
 }
 
+.agent-loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  flex: 1 1 auto;
+  min-height: 180px;
+  color: var(--agent-muted, #858585);
+  font-size: 13px;
+}
+
 /* SESSIONS view */
-.copilot-sessions-view {
+.tantalum-ai-sessions-view {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.copilot-sessions-toolbar {
+.tantalum-ai-sessions-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5067,24 +5560,25 @@ body.panel-resizing-row * {
 }
 
 .sessions-title {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   color: #858585;
   letter-spacing: 0.8px;
+  line-height: 1.2;
 }
 
 .sessions-toolbar-buttons {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 7px;
 }
 
 .sessions-toolbar-buttons button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   border: none;
   background: transparent;
   color: #858585;
@@ -5093,28 +5587,33 @@ body.panel-resizing-row * {
 }
 
 .sessions-toolbar-buttons button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: transparent;
   color: #ffffff;
 }
 
 .sessions-toolbar-buttons button.active {
-  background: rgba(255, 255, 255, 0.08);
+  background: transparent;
   color: #ffffff;
 }
 
-.copilot-session-search {
+.tantalum-ai-session-search {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin: 4px 12px 6px;
-  padding: 4px 6px;
+  padding: 5px 7px;
   background: #15171a;
   border: 1px solid #252a31;
   border-radius: 5px;
   color: #858585;
 }
 
-.copilot-session-search input {
+.tantalum-ai-session-search > svg {
+  flex: 0 0 auto;
+  margin-left: 1px;
+}
+
+.tantalum-ai-session-search input {
   min-width: 0;
   flex: 1 1 auto;
   border: none;
@@ -5124,7 +5623,7 @@ body.panel-resizing-row * {
   font-size: 12px;
 }
 
-.copilot-session-search button {
+.tantalum-ai-session-search button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5137,25 +5636,27 @@ body.panel-resizing-row * {
   cursor: pointer;
 }
 
-.copilot-session-search button:hover {
+.tantalum-ai-session-search button:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #ffffff;
 }
 
-.copilot-threads-container {
+.tantalum-ai-threads-container {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 0;
+  gap: 1px;
+  padding: 6px 0 10px;
   overflow-y: auto;
   flex: 1 1 auto;
 }
 
-.copilot-thread-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 12px 6px;
+.tantalum-ai-thread-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 7px;
+  min-height: 48px;
+  padding: 6px 10px 7px 8px;
   background: transparent;
   border: none !important;
   border-radius: 0;
@@ -5163,16 +5664,25 @@ body.panel-resizing-row * {
   position: relative;
 }
 
-.copilot-thread-item:hover {
+.tantalum-ai-thread-item:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.copilot-thread-item.running,
-.copilot-thread-item.unread-complete {
+.tantalum-ai-thread-item.running,
+.tantalum-ai-thread-item.unread-complete {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.copilot-thread-main-btn {
+.tantalum-ai-thread-leading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  min-height: 18px;
+  padding-top: 6px;
+}
+
+.tantalum-ai-thread-main-btn {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -5181,40 +5691,41 @@ body.panel-resizing-row * {
   border: none;
   padding: 0;
   margin: 0;
-  width: calc(100% - 24px);
+  min-width: 0;
+  width: 100%;
   cursor: pointer;
   color: inherit;
 }
 
-.copilot-thread-bullet-row {
+.tantalum-ai-thread-bullet-row {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
 }
 
-.copilot-thread-bullet {
-  width: 4px;
-  height: 4px;
+.tantalum-ai-thread-bullet {
+  width: 3px;
+  height: 3px;
   border-radius: 50%;
-  background: #007acc; /* Sleek active bullet dot */
+  background: #59616f;
   flex-shrink: 0;
   display: inline-block;
 }
 
-.copilot-thread-item:not(.active) .copilot-thread-bullet {
+.tantalum-ai-thread-item:not(.active) .tantalum-ai-thread-bullet {
   background: #4f5666;
 }
 
-.copilot-thread-activity {
+.tantalum-ai-thread-activity {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  width: 14px;
+  width: 13px;
   flex-shrink: 0;
 }
 
-.copilot-thread-activity span,
+.tantalum-ai-thread-activity span,
 .agent-thinking-dots span {
   width: 3px;
   height: 3px;
@@ -5223,17 +5734,17 @@ body.panel-resizing-row * {
   animation: agent-thinking-dot 1.15s ease-in-out infinite;
 }
 
-.copilot-thread-activity span:nth-child(2),
+.tantalum-ai-thread-activity span:nth-child(2),
 .agent-thinking-dots span:nth-child(2) {
   animation-delay: 0.15s;
 }
 
-.copilot-thread-activity span:nth-child(3),
+.tantalum-ai-thread-activity span:nth-child(3),
 .agent-thinking-dots span:nth-child(3) {
   animation-delay: 0.3s;
 }
 
-.copilot-thread-complete-dot {
+.tantalum-ai-thread-complete-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -5242,11 +5753,12 @@ body.panel-resizing-row * {
   flex-shrink: 0;
 }
 
-.copilot-thread-title-text {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+.tantalum-ai-thread-title-text {
+  font-family: var(--system-font-family);
   font-size: 13px;
   font-weight: 400;
-  letter-spacing: -0.05px;
+  line-height: 1.35;
+  letter-spacing: 0;
   color: #e2e2e3;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5254,33 +5766,34 @@ body.panel-resizing-row * {
   width: 100%;
 }
 
-.copilot-thread-time-sub {
+.tantalum-ai-thread-time-sub {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
   font-size: 11px;
   color: #737373;
-  margin-top: 2px;
-  margin-left: 10px;
+  margin-top: 3px;
+  line-height: 1.25;
 }
 
-.copilot-thread-item-actions {
+.tantalum-ai-thread-item-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 7px;
   opacity: 0;
   transition: opacity 0.1s ease;
-  margin-left: auto;
+  margin-top: 4px;
+  margin-left: 8px;
 }
 
-.copilot-thread-item:hover .copilot-thread-item-actions {
+.tantalum-ai-thread-item:hover .tantalum-ai-thread-item-actions {
   opacity: 1;
 }
 
-.copilot-thread-item-actions button {
+.tantalum-ai-thread-item-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 3px;
   color: #858585;
   background: transparent;
@@ -5288,13 +5801,83 @@ body.panel-resizing-row * {
   cursor: pointer;
 }
 
-.copilot-thread-item-actions button:hover {
+.tantalum-ai-thread-item-actions button:hover {
   background: rgba(255, 255, 255, 0.12);
   color: #ffffff;
 }
 
+.tantalum-ai-thread-show-more {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: calc(100% - 8px);
+  min-height: 32px;
+  margin: 7px 4px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: #8ea2bd;
+  cursor: pointer;
+  text-align: left;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-transform: uppercase;
+}
+
+.tantalum-ai-thread-show-more svg {
+  color: #6f839d;
+  width: 15px;
+  height: 15px;
+}
+
+.tantalum-ai-thread-show-more span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+}
+
+.tantalum-ai-thread-show-count {
+  min-width: 22px;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: right;
+  color: #6e7685;
+}
+
+.tantalum-ai-thread-show-more:hover {
+  border-color: rgba(77, 163, 255, 0.42);
+  background: rgba(77, 163, 255, 0.12);
+  color: #dcecff;
+}
+
+.tantalum-ai-thread-show-more:hover svg,
+.tantalum-ai-thread-show-more:hover .tantalum-ai-thread-show-count {
+  color: #dcecff;
+}
+
 /* Welcome screen */
-.copilot-welcome-screen {
+.tantalum-ai-empty-thread {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px 20px;
+  flex: 1 1 auto;
+  color: var(--agent-muted, #858585);
+}
+
+.tantalum-ai-empty-thread p {
+  margin: 0;
+  max-width: 260px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tantalum-ai-welcome-screen {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -5305,7 +5888,7 @@ body.panel-resizing-row * {
   color: #ffffff;
 }
 
-.copilot-welcome-logo {
+.tantalum-ai-welcome-logo {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5318,7 +5901,7 @@ body.panel-resizing-row * {
   border: 1px solid rgba(0, 122, 204, 0.25);
 }
 
-.copilot-welcome-screen h3 {
+.tantalum-ai-welcome-screen h3 {
   font-size: 18px;
   font-weight: 600;
   margin: 0 0 8px;
@@ -5364,73 +5947,126 @@ body.panel-resizing-row * {
 }
 
 /* Active Conversation view */
-.copilot-conversation-container {
+.tantalum-ai-conversation-container {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.copilot-conversation-header {
+.tantalum-ai-conversation-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 8px;
+  min-width: 0;
   padding: 6px 12px;
   background: #0b0d10;
   border-bottom: 1px solid #1e2023;
 }
 
-.copilot-conversation-header h3 {
+.tantalum-ai-conversation-header h3 {
   font-size: 13px;
-  margin: 2px 0 0;
+  margin: 0;
   font-weight: 600;
   color: #e0e0e0;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
 }
 
-.header-meta {
+.conversation-back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #858585;
+  cursor: pointer;
+}
+
+.conversation-back-btn:hover,
+.conversation-back-btn:focus-visible {
+  background: transparent;
+  color: #ffffff;
+}
+
+.conversation-back-btn:focus-visible {
+  outline: 1px solid #007acc;
+  outline-offset: 2px;
+}
+
+.tantalum-ai-message-list {
   display: flex;
   flex-direction: column;
-}
-
-.session-indicator-pill {
-  font-size: 9px;
-  font-weight: 700;
-  color: #007acc;
-  letter-spacing: 0.8px;
-}
-
-.copilot-message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   padding: 12px;
   overflow-y: auto;
   flex: 1 1 auto;
+  min-width: 0;
 }
 
-.copilot-chat-bubble {
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: #161719;
-  border: 1px solid #1e2023;
+.tantalum-ai-chat-bubble {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
   max-width: 100% !important;
+  min-width: 0;
 }
 
-.copilot-chat-bubble.agent-message-user {
-  background: rgba(0, 122, 204, 0.06);
-  border-color: rgba(0, 122, 204, 0.2);
+.tantalum-ai-chat-bubble.agent-message-user {
+  align-self: flex-end;
+  width: auto;
+  max-width: min(82%, 360px) !important;
 }
 
-.copilot-bubble-meta {
+.tantalum-ai-chat-bubble.agent-message-user .tantalum-ai-bubble-content {
+  padding: 9px 13px;
+  border: 1px solid rgba(77, 163, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(26, 52, 74, 0.68);
+  color: #f8fbff;
+}
+
+.tantalum-ai-chat-bubble.agent-message-assistant {
+  width: 100%;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tantalum-ai-chat-bubble.agent-message-assistant .tantalum-ai-bubble-content {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: #f8fbff;
+}
+
+.tantalum-ai-chat-bubble.agent-message-status {
+  color: #9aa6b2;
+}
+
+.tantalum-ai-bubble-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 6px;
   font-size: 11px;
+}
+
+.tantalum-ai-chat-bubble.agent-message-user .tantalum-ai-bubble-meta,
+.tantalum-ai-chat-bubble.agent-message-assistant .tantalum-ai-bubble-meta {
+  display: none;
 }
 
 .author-tag {
@@ -5447,32 +6083,497 @@ body.panel-resizing-row * {
   color: #858585;
 }
 
-.copilot-bubble-content {
+.tantalum-ai-bubble-content {
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.48;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tantalum-ai-bubble-content .markdown-renderer,
+.tantalum-ai-bubble-content p,
+.tantalum-ai-bubble-content li,
+.tantalum-ai-bubble-content a,
+.tantalum-ai-bubble-content code {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tantalum-ai-bubble-content pre,
+.tantalum-ai-bubble-content .markdown-code-block {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tantalum-ai-bubble-content .markdown-code-block code {
+  display: block;
+  white-space: inherit;
+}
+
+.tantalum-ai-chat-bubble.agent-message-user pre {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tantalum-ai-bubble-content .markdown-command-block,
+.markdown-command-block {
+  --markdown-command-surface: color-mix(in srgb, var(--agent-bg, var(--bg-editor)) 94%, var(--agent-text, var(--text)) 6%);
+  display: grid;
+  gap: 0;
+  margin: 0.15rem 0 0.2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: var(--markdown-command-surface);
+  box-shadow: none;
+  color: #dce8f4;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.markdown-command-block .markdown-code-language {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--markdown-command-surface) 88%, #000000 12%);
+  color: #aeb9c7;
+  font-family: var(--system-font-family);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: none;
+}
+
+.markdown-command-icon {
+  flex: 0 0 auto;
+  color: inherit;
+}
+
+.tantalum-ai-bubble-content .markdown-command-block code,
+.markdown-command-block code {
+  position: relative;
+  display: block;
+  margin: 0;
+  padding: 10px 12px 11px 30px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #dce8f4;
+  font-family: "Cascadia Mono Light", "Cascadia Code Light", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 300 !important;
+  font-variation-settings: "wght" 300;
+  font-synthesis-weight: none;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.markdown-command-block code::before {
+  content: ">";
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  color: #aeb9c7;
+  font-weight: 300 !important;
+  font-variation-settings: "wght" 300;
+  font-synthesis-weight: none;
+}
+
+.agent-message-context-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 8px;
+}
+
+.agent-message-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 2px 6px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 4px;
+  background: rgba(8, 13, 19, 0.28);
+  color: rgba(248, 251, 255, 0.88);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+}
+
+button.agent-message-context-chip {
+  cursor: pointer;
+}
+
+.agent-message-context-chip.clickable:hover,
+.agent-message-context-chip.clickable:focus-visible {
+  border-color: rgba(119, 177, 255, 0.58);
+  background: rgba(77, 163, 255, 0.13);
+  color: #ffffff;
+  outline: none;
+}
+
+.agent-message-context-chip.image {
+  border-color: rgba(77, 163, 255, 0.34);
+}
+
+.agent-message-context-chip svg,
+.agent-message-context-chip .context-suggestion-file-icon {
+  flex: 0 0 auto;
+}
+
+.agent-message-context-chip .chip-filename {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-work-summary {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 15px;
+  color: #8f9baa;
+  font-size: 12px;
+}
+
+.agent-work-summary-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #8f9baa;
+  font: inherit;
+  cursor: pointer;
+}
+
+.agent-work-summary-toggle:hover {
+  color: #c5d0dc;
+}
+
+.agent-work-summary-toggle svg {
+  flex: 0 0 auto;
+}
+
+.agent-work-details {
+  display: grid;
+  gap: 8px;
+  padding-left: 13px;
+  border-left: 1px solid rgba(126, 146, 166, 0.18);
+}
+
+.agent-work-detail-list {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-work-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  color: #8fa1b2;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.agent-work-row-icon {
+  flex: 0 0 auto;
+  color: #6ea8d7;
+}
+
+.agent-work-row-icon-file {
+  color: #6ea8d7;
+}
+
+.agent-work-row-icon-tool {
+  color: #d8b56a;
+}
+
+.agent-work-row-icon-model {
+  color: #b8a4ff;
+}
+
+.agent-work-row-icon-workspace {
+  color: #7fcf91;
+}
+
+.agent-work-row-icon-network {
+  color: #7ab8d9;
+}
+
+.agent-work-row-icon-runtime {
+  color: #9aa8b6;
+}
+
+.agent-work-action {
+  color: #9fb0c1;
+}
+
+.agent-work-file-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 180px;
+  padding: 1px 5px;
+  border: 1px solid rgba(126, 146, 166, 0.2);
+  border-radius: 4px;
+  color: #c7d8eb;
+}
+
+.agent-work-file-pill .context-suggestion-file-icon {
+  transform: translateY(1.5px);
+}
+
+.agent-work-file-pill span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-work-title {
+  min-width: 0;
+  color: #c7d8eb;
+  overflow-wrap: anywhere;
+}
+
+.agent-work-muted {
+  color: #7d8996;
 }
 
 .status-alert-body {
   font-size: 12px;
-  color: #858585;
-  font-family: monospace;
+  color: #8f9baa;
+  font-family: var(--system-font-family);
+  line-height: 1.35;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
-.copilot-thinking-message {
+.tantalum-ai-thinking-message {
   border-color: rgba(0, 122, 204, 0.18);
 }
 
 .agent-thinking-body {
-  display: inline-flex;
+  display: grid;
+  gap: 8px;
+  color: #b8c7d9;
+}
+
+.agent-thinking-row {
+  display: flex;
   align-items: center;
   gap: 6px;
-  color: #b8c7d9;
+  min-height: 22px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.agent-thinking-label {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 20px;
+  line-height: 20px;
+}
+
+.agent-thinking-separator {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  color: var(--text-muted);
+  line-height: 20px;
+}
+
+.agent-thinking-current {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 220px;
+  min-height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  line-height: 20px;
 }
 
 .agent-thinking-dots {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  height: 20px;
+  line-height: 0;
+  transform: translateY(1.25px);
+}
+
+.agent-thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  height: auto;
+  margin-left: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  line-height: 0;
+  transform: translateY(1.25px);
+}
+
+.agent-thinking-toggle svg {
+  display: block;
+}
+
+.agent-thinking-toggle:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.agent-thinking-details {
+  display: grid;
+  gap: 9px;
+  width: min(100%, 420px);
+  padding: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 6px;
+  background: rgba(8, 13, 20, 0.55);
+}
+
+.agent-thinking-section {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-thinking-section-title {
+  color: var(--text-muted);
+  font-size: 0.67rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-thinking-task-list,
+.agent-thinking-activity-list {
+  display: grid;
+  gap: 5px;
+}
+
+.agent-thinking-task {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 6px 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.agent-thinking-task span,
+.agent-thinking-activity-head span {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-thinking-task p,
+.agent-thinking-activity p {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.agent-thinking-task-running span,
+.agent-thinking-activity-running .agent-thinking-activity-head span {
+  color: #80bfff;
+}
+
+.agent-thinking-task-completed span,
+.agent-thinking-activity-completed .agent-thinking-activity-head span {
+  color: #7bd88f;
+}
+
+.agent-thinking-task-blocked span,
+.agent-thinking-activity-blocked .agent-thinking-activity-head span,
+.agent-thinking-activity-error .agent-thinking-activity-head span {
+  color: #ffbf69;
+}
+
+.agent-thinking-activity {
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.agent-thinking-activity-head {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-thinking-activity-head strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-thinking-activity-head time {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+
+.agent-thinking-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
 }
 
 @keyframes agent-thinking-dot {
@@ -5489,119 +6590,562 @@ body.panel-resizing-row * {
   }
 }
 
-.copilot-approval-card {
+.tantalum-ai-approval-card {
   background: rgba(240, 173, 78, 0.08) !important;
   border: 1px solid rgba(240, 173, 78, 0.25) !important;
 }
 
 .pending-agent-action-card {
+  --pending-agent-action-surface: var(--bg-secondary, #2d2d2d);
   display: grid;
-  gap: 8px;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+  justify-self: stretch;
+  align-self: stretch;
   margin-top: 10px;
-  padding: 10px;
-  border: 1px solid rgba(240, 173, 78, 0.3);
-  border-radius: 8px;
-  background: rgba(240, 173, 78, 0.08);
+  overflow: hidden;
+  border: 1px solid var(--agent-border, var(--line-strong));
+  border-radius: 4px;
+  background: var(--pending-agent-action-surface);
+  box-shadow: none;
+  font-family: var(--system-font-family);
+  font-size: 13px;
+}
+
+.pending-agent-action-card *,
+.pending-agent-action-card pre,
+.pending-agent-action-card button {
+  font-family: var(--system-font-family);
 }
 
 .pending-agent-action-card-executed {
-  border-color: rgba(76, 175, 80, 0.32);
-  background: rgba(76, 175, 80, 0.08);
+  border-color: color-mix(in srgb, var(--success) 38%, var(--agent-border, var(--line)) 62%);
 }
 
 .pending-agent-action-card-skipped,
 .pending-agent-action-card-blocked,
 .pending-agent-action-card-expired {
-  border-color: rgba(148, 163, 184, 0.22);
-  background: rgba(148, 163, 184, 0.06);
+  border-color: var(--agent-border, var(--line-strong));
 }
 
-.pending-agent-action-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+.pending-agent-action-main {
+  display: grid;
+  gap: 11px;
+  padding: 12px 12px 13px;
 }
 
-.pending-agent-action-head h4 {
-  margin: 2px 0 0;
-  font-size: 0.82rem;
+.pending-agent-action-main h4 {
+  margin: 0;
+  color: var(--agent-text, var(--text));
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.32;
+}
+
+.pending-agent-action-main p {
+  margin: 0;
+  color: var(--agent-text, var(--text));
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.pending-agent-file-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pending-agent-file-list-title {
+  color: var(--agent-muted, var(--text-muted));
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1.25;
 }
 
-.pending-agent-action-card pre {
-  max-height: 120px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.18);
-  font-size: 0.78rem;
-}
-
-.pending-agent-task-list {
-  display: grid;
+.pending-agent-file-row {
+  display: flex;
+  align-items: center;
   gap: 6px;
+  min-height: 18px;
+  min-width: 0;
+  color: var(--agent-text, var(--text));
+  font-size: 13px;
+  line-height: 18px;
 }
 
-.pending-agent-task {
+.pending-agent-file-row svg,
+.pending-agent-file-row .context-suggestion-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 18px;
+  color: var(--agent-muted, var(--text-muted));
+  line-height: 0;
+  transform: translateY(0.5px);
+}
+
+.pending-agent-file-row .context-suggestion-file-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pending-agent-file-action {
+  display: inline-flex;
+  align-items: center;
+  color: var(--agent-muted, var(--text-muted));
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.pending-agent-file-name {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 18px;
+}
+
+.pending-agent-action-buttons {
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 0;
+}
+
+.pending-agent-action-buttons .primary-button,
+.pending-agent-action-buttons .danger-button {
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 4px;
+  border-color: color-mix(in srgb, var(--agent-accent, var(--accent)) 62%, #000 38%);
+  background: color-mix(in srgb, var(--agent-accent, var(--accent)) 62%, #000 38%);
+  color: var(--agent-accent-contrast, var(--accent-contrast));
+  font-family: var(--system-font-family);
+  font-size: 13px;
+  font-weight: 400;
+  font-variation-settings: "wght" 400;
+}
+
+.pending-agent-action-buttons .primary-button:hover:not(:disabled),
+.pending-agent-action-buttons .danger-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--agent-accent, var(--accent)) 72%, #000 28%);
+  border-color: color-mix(in srgb, var(--agent-accent, var(--accent)) 72%, #000 28%);
+  color: var(--agent-accent-contrast, var(--accent-contrast));
+}
+
+.pending-agent-action-buttons .primary-button:disabled,
+.pending-agent-action-buttons .danger-button:disabled {
+  background: color-mix(in srgb, var(--agent-accent, var(--accent)) 42%, var(--agent-bg, var(--bg-editor)) 58%);
+  border-color: color-mix(in srgb, var(--agent-accent, var(--accent)) 42%, transparent);
+  color: color-mix(in srgb, var(--agent-accent-contrast, var(--accent-contrast)) 68%, transparent);
+}
+
+.pending-agent-action-meta-row {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.14);
+  min-height: 31px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--agent-border, var(--line));
+  background: var(--pending-agent-action-surface);
+  color: var(--agent-muted, var(--text-muted));
+  font-size: 13px;
+  line-height: 1.25;
 }
 
-.pending-agent-task-status {
-  color: var(--text-muted);
-  font-size: 0.68rem;
-  text-transform: uppercase;
+.pending-agent-action-meta-row svg {
+  color: var(--agent-muted, var(--text-muted));
 }
 
-.pending-agent-task-title {
+.pending-agent-action-meta-row span {
   min-width: 0;
-  color: var(--text);
-  font-size: 0.78rem;
-  overflow-wrap: anywhere;
-}
-
-.pending-agent-task-completed .pending-agent-task-status {
-  color: #7bd88f;
-}
-
-.pending-agent-task-running .pending-agent-task-status {
-  color: #80bfff;
-}
-
-.pending-agent-task-blocked .pending-agent-task-status {
-  color: #ffbf69;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Composer box */
-.copilot-composer-container {
+.tantalum-ai-composer-container {
   margin: 10px 12px 12px;
-  background: #161719;
-  border: 1px solid #23272e;
-  border-radius: 6px; /* Tight rounded corners */
-  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: none;
+}
+
+.tantalum-ai-composer-input-shell {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  position: relative;
+  padding: 6px 8px;
+  border: 1px solid #23272e;
+  border-radius: 6px;
+  background: #161719;
   box-shadow: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.copilot-composer-container:focus-within {
-  border-color: #007acc;
-  box-shadow: 0 0 0 1px #007acc;
+.tantalum-ai-composer-input-shell:focus-within {
+  border-color: rgba(226, 232, 240, 0.28);
+  box-shadow: none;
 }
 
-.copilot-composer-chip {
+.tantalum-ai-composer-container:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.agent-composer-review-panel {
+  display: grid;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(126, 146, 166, 0.24);
+  border-radius: 5px;
+  background: #1d1d1f;
+  color: #d8dde5;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.agent-composer-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(126, 146, 166, 0.14);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.agent-composer-review-panel:not(.open) .agent-composer-review-head {
+  border-bottom: none;
+}
+
+.agent-composer-review-toggle {
+  display: grid;
+  grid-template-columns: 16px minmax(0, auto);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #c7d0dc;
+  cursor: pointer;
+  text-align: left;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.agent-composer-review-toggle:hover {
+  color: #f2f6fa;
+}
+
+.agent-composer-review-toggle svg {
+  display: block;
+  justify-self: center;
+  color: currentColor;
+}
+
+.agent-composer-review-toggle span {
+  min-width: 0;
+  color: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-review-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.agent-composer-review-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(226, 232, 240, 0.72);
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.agent-composer-review-action svg {
+  flex: 0 0 auto;
+}
+
+.agent-composer-review-action:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(226, 232, 240, 0.08);
+  color: #f2f5f8;
+}
+
+.agent-composer-review-action.accept {
+  border-color: rgba(226, 232, 240, 0.86);
+  background: rgba(226, 232, 240, 0.88);
+  color: var(--agent-bg, #0b0d10);
+}
+
+.agent-composer-review-action.accept svg {
+  color: currentColor;
+}
+
+.agent-composer-review-action.accept:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.94);
+  background: rgba(226, 232, 240, 0.94);
+  color: var(--agent-bg, #0b0d10);
+}
+
+.agent-composer-review-action.decline {
+  border-color: rgba(226, 232, 240, 0.72);
+  background: transparent;
+  color: rgba(226, 232, 240, 0.9);
+}
+
+.agent-composer-review-action.decline svg {
+  color: currentColor;
+}
+
+.agent-composer-review-action.decline:hover:not(:disabled) {
+  border-color: rgba(226, 232, 240, 0.9);
+  background: rgba(226, 232, 240, 0.08);
+  color: #f2f5f8;
+}
+
+.agent-composer-review-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.agent-composer-review-file-list {
+  display: grid;
+  gap: 1px;
+  max-height: 138px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.agent-composer-review-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 25px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #d8dde5;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.agent-composer-review-file:hover,
+.agent-composer-review-file:focus-visible {
+  background: rgba(113, 119, 132, 0.24);
+  outline: none;
+}
+
+.agent-composer-review-file .context-suggestion-file-icon,
+.agent-composer-review-file .context-suggestion-file-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.agent-composer-review-file .context-suggestion-file-icon {
+  transform: translateY(0.5px);
+}
+
+.agent-composer-review-file-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #dce2ea;
+  font-size: 0.86rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-review-file-dir {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b929d;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-tasks {
+  display: grid;
+  gap: 0;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 5px;
+  background: rgba(14, 16, 20, 0.52);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.agent-composer-tasks-toggle {
+  display: grid;
+  grid-template-columns: 16px auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: rgba(148, 163, 184, 0.12);
+  color: #c7d0dc;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: left;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.agent-composer-tasks-toggle:hover {
+  background: rgba(148, 163, 184, 0.16);
+  color: #f2f6fa;
+}
+
+.agent-composer-tasks-toggle svg {
+  display: block;
+  justify-self: center;
+  color: currentColor;
+}
+
+.agent-composer-tasks-toggle span {
+  color: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.agent-composer-tasks-toggle strong {
+  color: inherit;
+  font-size: 0.84rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.agent-composer-tasks-toggle em {
+  min-width: 0;
+  color: #8f9baa;
+  font-size: 0.69rem;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-composer-task-list {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px 10px 14px;
+  border-top: none;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.agent-composer-task {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.agent-composer-task + .agent-composer-task {
+  margin-top: 0;
+}
+
+.agent-composer-task:hover {
+  background: transparent;
+}
+
+.agent-composer-task-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border: 1.4px solid #a8b6c8;
+  border-radius: 999px;
+  background: transparent;
+  color: #7bd88f;
+}
+
+.agent-composer-task-check svg {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-composer-task strong {
+  display: block;
+  min-width: 0;
+  color: #d9e0e7;
+  font-size: 0.88rem;
+  font-weight: 450;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.agent-composer-task p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.agent-composer-task-running .agent-composer-task-check {
+  border-color: #80bfff;
+  box-shadow: 0 0 0 3px rgba(128, 191, 255, 0.1);
+}
+
+.agent-composer-task-completed .agent-composer-task-check {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.agent-composer-task-completed strong,
+.agent-composer-task-skipped strong {
+  color: #b8c3cf;
+}
+
+.agent-composer-task-blocked .agent-composer-task-check {
+  border-color: #ffbf69;
+  box-shadow: 0 0 0 3px rgba(255, 191, 105, 0.1);
+}
+
+.tantalum-ai-composer-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -5613,9 +7157,281 @@ body.panel-resizing-row * {
   max-width: 100%;
 }
 
-.chip-plus-accent {
+.tantalum-ai-context-chip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 0 2px;
+}
+
+.tantalum-ai-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 2px 6px;
+  border: 1px solid rgba(76, 175, 80, 0.34);
+  border-radius: 4px;
+  background: rgba(76, 175, 80, 0.09);
+  color: #e0e0e0;
+  font: inherit;
+  line-height: 1;
+}
+
+.tantalum-ai-context-attached-chip {
+  gap: 5px;
+  height: 23px;
+  padding: 2px 7px 3px 5px;
+  border-color: #263340;
+  background: transparent;
+  color: #d8dfd2;
+}
+
+.tantalum-ai-context-chip.selection {
+  border-color: rgba(77, 163, 255, 0.3);
+  background: rgba(77, 163, 255, 0.08);
+}
+
+.tantalum-ai-context-attached-chip.selection {
+  border-color: #263340;
+  background: transparent;
+}
+
+.tantalum-ai-context-attached-chip.previewable {
+  cursor: pointer;
+}
+
+.tantalum-ai-context-attached-chip.image {
+  border-color: rgba(77, 163, 255, 0.32);
+}
+
+.tantalum-ai-context-attached-chip.image:hover,
+.tantalum-ai-context-attached-chip.image:focus-visible {
+  border-color: rgba(77, 163, 255, 0.56);
+  color: #f0f2ee;
+  outline: none;
+}
+
+.tantalum-ai-context-suggestion-chip {
+  gap: 5px;
+  height: 23px;
+  padding: 2px 7px 3px 6px;
+  border-style: solid;
+  border-color: #263340;
+  border-radius: 4px;
+  background: transparent;
+  color: #cfd5d8;
+  cursor: pointer;
+}
+
+.tantalum-ai-context-suggestion-chip:hover {
+  background: transparent;
+  border-color: #364655;
+  color: #f0f2ee;
+}
+
+.tantalum-ai-context-suggestion-chip.selection {
+  border-color: #263340;
+  background: transparent;
+}
+
+.tantalum-ai-context-suggestion-chip .chip-plus-accent {
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  color: #6e8290;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.context-suggestion-file-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+}
+
+.context-suggestion-file-icon svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+.tantalum-ai-context-attached-chip .context-suggestion-file-icon {
+  flex: 0 0 auto;
+}
+
+.tantalum-ai-context-attached-chip .chip-filename {
+  position: relative;
+  top: -0.5px;
+  color: #d8dfd2;
   font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.tantalum-ai-context-attached-chip .chip-close-btn {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-left: -1px;
+  padding: 0;
+  border-radius: 3px;
+  color: #6e8290;
+}
+
+.tantalum-ai-context-suggestion-chip .chip-filename {
+  position: relative;
+  top: -0.5px;
+  color: #b8c2bc;
+  font-size: 11px;
+  font-weight: 400;
+  font-style: italic;
+  line-height: 1.25;
+}
+
+.context-mention-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  max-height: 132px;
+  overflow: hidden;
+  padding: 5px;
+  border: 1px solid #2f3540;
+  border-radius: 6px;
+  background: #111418;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.36);
+}
+
+.context-mention-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #dfe7ef;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-mention-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.context-mention-item svg {
+  color: #4caf50;
+}
+
+.context-mention-item:hover,
+.context-mention-item.active {
+  background: rgba(77, 163, 255, 0.13);
+}
+
+.context-mention-empty {
+  padding: 7px 8px;
+  color: #858585;
+  font-size: 12px;
+}
+
+.context-image-preview-popover {
+  position: absolute;
+  left: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 42;
+  display: grid;
+  gap: 6px;
+  width: min(240px, calc(100% - 16px));
+  padding: 7px;
+  border: 1px solid #2f3540;
+  border-radius: 6px;
+  background: #111418;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+}
+
+.context-image-preview-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.context-image-preview-header span {
+  min-width: 0;
+  overflow: hidden;
+  color: #dfe7ef;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-image-preview-header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #858585;
+  cursor: pointer;
+}
+
+.context-image-preview-header button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.context-image-preview-popover img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #0b0d10;
+}
+
+.tantalum-ai-chat-layout.context-drop-active .tantalum-ai-composer-input-shell {
+  border-color: #4da3ff;
+  box-shadow: 0 0 0 1px rgba(77, 163, 255, 0.42);
+}
+
+.chip-plus-accent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 10px;
   font-weight: 600;
+  color: #4caf50;
+  line-height: 1;
+}
+
+.chip-added-accent {
+  flex: 0 0 auto;
   color: #4caf50;
 }
 
@@ -5624,6 +7440,8 @@ body.panel-resizing-row * {
 }
 
 .chip-filename {
+  min-width: 0;
+  max-width: 180px;
   font-size: 11px;
   font-weight: 500;
   color: #e0e0e0;
@@ -5649,19 +7467,24 @@ body.panel-resizing-row * {
   color: #ffffff;
 }
 
-.copilot-composer-textarea {
+.tantalum-ai-composer-textarea {
   background: transparent;
   border: none;
+  border-radius: 0;
   outline: none;
   resize: none;
   width: 100%;
   color: #e0e0e0;
   font-size: 13px;
   line-height: 1.4;
-  padding: 2px 4px;
+  padding: 4px 6px;
 }
 
-.copilot-composer-bottom {
+.tantalum-ai-composer-textarea:focus {
+  border-color: transparent;
+}
+
+.tantalum-ai-composer-bottom {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5693,17 +7516,71 @@ body.panel-resizing-row * {
   color: #ffffff;
 }
 
+.composer-attach-btn:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.composer-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-at-btn span {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.composer-attachment-menu .agent-popup-menu {
+  min-width: 154px;
+}
+
 .composer-participant-pill {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  font-size: 10px;
+  gap: 4px;
+  font-size: 11px;
   font-weight: 500;
+  line-height: 1.2;
   color: #cccccc;
-  background: rgba(255, 255, 255, 0.08); /* Grey/white pill */
-  padding: 1px 5px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  padding: 1px 2px;
+  border-radius: 0;
+  border: none;
+}
+
+.composer-participant-pill svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.composer-participant-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.composer-participant-agent-icon {
+  width: 12px;
+  height: 12px;
+  margin-left: -0.5px;
+  margin-right: -0.5px;
+}
+
+.composer-participant-menu-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.composer-participant-menu-agent-icon {
+  width: 14px;
+  height: 14px;
+  margin-left: -0.5px;
+  margin-right: -0.5px;
+}
+
+.composer-participant-pill span {
+  line-height: 1.2;
 }
 
 .composer-participant-button {
@@ -5711,24 +7588,62 @@ body.panel-resizing-row * {
   cursor: pointer;
 }
 
-.composer-participant-button:hover,
-.composer-participant-button.active {
-  background: rgba(0, 122, 204, 0.16);
-  border-color: rgba(0, 122, 204, 0.38);
+.composer-participant-button:hover {
+  background: transparent;
   color: #ffffff;
+}
+
+.composer-participant-button.active {
+  background: transparent;
+  color: #cccccc;
 }
 
 .composer-participant-menu .agent-popup-menu {
   min-width: 142px;
 }
 
-.copilot-mode-selector-wrapper {
+.composer-mode-picker {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #cccccc;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.composer-mode-picker:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.composer-mode-dropdown {
+  color: inherit;
+}
+
+.composer-mode-dropdown .custom-dropdown-trigger {
+  min-height: 20px;
+  padding: 1px 2px;
+}
+
+.composer-mode-dropdown .custom-dropdown-menu {
+  min-width: 132px;
+}
+
+.status-permission-dropdown .custom-dropdown-menu {
+  min-width: 172px;
+}
+
+.tantalum-ai-mode-selector-wrapper {
   position: relative;
   display: inline-flex;
   align-items: center;
 }
 
-.copilot-mode-select {
+.tantalum-ai-mode-select {
   appearance: none;
   -webkit-appearance: none;
   background: transparent !important; /* Transparent background */
@@ -5743,7 +7658,7 @@ body.panel-resizing-row * {
   height: auto;
 }
 
-.copilot-mode-select:hover {
+.tantalum-ai-mode-select:hover {
   color: #ffffff;
 }
 
@@ -5767,7 +7682,7 @@ body.panel-resizing-row * {
   align-items: center;
 }
 
-.copilot-send-btn {
+.tantalum-ai-send-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5782,46 +7697,48 @@ body.panel-resizing-row * {
   transition: color 0.15s ease;
 }
 
-.copilot-send-btn:not(:disabled) {
+.tantalum-ai-send-btn:not(:disabled) {
   color: #cccccc; /* Bright send icon */
 }
 
-.copilot-send-btn:hover:not(:disabled) {
+.tantalum-ai-send-btn:hover:not(:disabled) {
   color: #ffffff;
 }
 
-.copilot-send-btn:disabled {
+.tantalum-ai-send-btn:disabled {
   color: #4b5563;
   cursor: not-allowed;
 }
 
-.copilot-send-btn.copilot-stop-btn {
-  color: #ffffff;
-  background: #d92d20 !important;
+.tantalum-ai-send-btn.tantalum-ai-stop-btn {
+  color: #9aa6b2;
+  border: none;
+  background: transparent !important;
 }
 
-.copilot-send-btn.copilot-stop-btn:hover:not(:disabled) {
-  color: #ffffff;
-  background: #b42318 !important;
+.tantalum-ai-send-btn.tantalum-ai-stop-btn:hover:not(:disabled) {
+  color: #f0f2f5;
+  background: rgba(154, 166, 178, 0.12) !important;
 }
 
-.copilot-send-btn.copilot-stop-btn:disabled {
-  color: rgba(255, 255, 255, 0.78);
-  background: #7a271a !important;
+.tantalum-ai-send-btn.tantalum-ai-stop-btn:disabled {
+  color: #9aa6b2;
+  border: none;
+  background: transparent !important;
   cursor: progress;
 }
 
 /* Bottom Environment / Status Bar */
-.copilot-bottom-status-bar {
+.tantalum-ai-bottom-status-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 12px;
+  padding: 5px 12px;
   background: #0b0d10;
   border-top: 1px solid #1e2023;
   font-size: 11px;
   color: #858585;
-  min-height: 26px;
+  min-height: 30px;
 }
 
 .status-bar-left {
@@ -5855,7 +7772,7 @@ body.panel-resizing-row * {
   outline-offset: 2px;
 }
 
-.status-item-dropdown.copilot-status-mode-wrapper {
+.status-item-dropdown.tantalum-ai-status-mode-wrapper {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -5883,6 +7800,12 @@ body.panel-resizing-row * {
   box-shadow: none;
 }
 
+.status-permission-chevron {
+  flex: 0 0 auto;
+  margin-left: -2px;
+  opacity: 0.9;
+}
+
 .icon-only {
   padding: 0 !important;
 }
@@ -5890,31 +7813,83 @@ body.panel-resizing-row * {
 .status-bar-right {
   display: flex;
   align-items: center;
+  gap: 6px;
 }
 
-.copilot-credit-badge {
+.tantalum-ai-context-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  line-height: 1.3;
+}
+
+.tantalum-ai-context-badge-icon {
+  color: inherit;
+  flex: 0 0 auto;
+}
+
+.tantalum-ai-context-badge strong {
+  color: inherit;
+  font-size: 10px;
+}
+
+.tantalum-ai-context-badge em {
+  color: inherit;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.tantalum-ai-context-badge em::before {
+  content: "/";
+  margin-right: 3px;
+  color: inherit;
+}
+
+.tantalum-ai-context-badge.warning {
+  border-color: rgba(240, 173, 78, 0.42);
+  background: transparent;
+}
+
+.tantalum-ai-credit-badge {
   display: flex;
   align-items: center;
   gap: 4px;
-  cursor: help;
+  cursor: default;
   padding: 1px 4px;
   border-radius: 4px;
 }
 
-.copilot-credit-badge:hover {
+.tantalum-ai-context-badge:hover,
+.tantalum-ai-credit-badge:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.tantalum-ai-credit-badge:hover {
   color: #ffffff;
 }
 
-.copilot-svg-loader {
+.tantalum-ai-context-badge:hover strong,
+.tantalum-ai-context-badge:hover em,
+.tantalum-ai-context-badge:hover em::before {
+  color: #ffffff;
+}
+
+.tantalum-ai-svg-loader {
   flex-shrink: 0;
 }
 
-.copilot-svg-loader .bg-ring {
+.tantalum-ai-svg-loader .bg-ring {
   opacity: 0.15;
 }
 
-.copilot-svg-loader .fg-ring {
+.tantalum-ai-svg-loader .fg-ring {
   transition: stroke-dashoffset 0.35s ease;
 }
 
@@ -5924,7 +7899,7 @@ body.panel-resizing-row * {
 }
 
 /* Settings redone view */
-.copilot-settings-layout {
+.tantalum-ai-settings-layout {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -5933,7 +7908,7 @@ body.panel-resizing-row * {
   height: 100%;
 }
 
-.copilot-settings-card {
+.tantalum-ai-settings-card {
   background: #161719;
   border: 1px solid #1e2023;
   border-radius: 8px;
@@ -5943,7 +7918,7 @@ body.panel-resizing-row * {
   gap: 12px;
 }
 
-.copilot-settings-card .card-header {
+.tantalum-ai-settings-card .card-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -5951,13 +7926,13 @@ body.panel-resizing-row * {
   padding-bottom: 8px;
 }
 
-.copilot-settings-card .card-header h3 {
+.tantalum-ai-settings-card .card-header h3 {
   font-size: 13.5px;
   font-weight: 600;
   margin: 0;
 }
 
-.copilot-settings-card .card-body {
+.tantalum-ai-settings-card .card-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -5983,19 +7958,37 @@ body.panel-resizing-row * {
   margin: 0;
 }
 
-.copilot-settings-select {
+.tantalum-ai-settings-select {
   width: 100%;
-  padding: 6px;
-  border-radius: 4px;
-  background: #0b0d10;
-  border: 1px solid #1e2023;
-  color: #ffffff;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 6px;
+  background: #0f141b;
+  border: 1px solid #303846;
+  color: #dce3ea;
   outline: none;
   font-size: 12px;
 }
 
-.copilot-settings-select:focus {
-  border-color: #007acc;
+.tantalum-ai-settings-select.open,
+.tantalum-ai-settings-select:focus-within {
+  border-color: #435064;
+  box-shadow: 0 0 0 1px rgba(108, 126, 151, 0.14);
+}
+
+.tantalum-ai-settings-select .custom-dropdown-trigger {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.tantalum-ai-settings-select .custom-dropdown-trigger-label {
+  font-size: 12px;
+}
+
+.tantalum-ai-settings-select .custom-dropdown-menu {
+  width: 100%;
+  min-width: 100%;
 }
 
 /* Agent panel color refresh */
@@ -6016,151 +8009,359 @@ body.panel-resizing-row * {
   color: var(--agent-text);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-header,
-.agent-panel.tantalum-ai-panel .copilot-chat-layout,
-.agent-panel.tantalum-ai-panel .copilot-conversation-header,
-.agent-panel.tantalum-ai-panel .copilot-bottom-status-bar {
+.agent-panel.tantalum-ai-panel .tantalum-ai-header,
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-layout,
+.agent-panel.tantalum-ai-panel .tantalum-ai-conversation-header,
+.agent-panel.tantalum-ai-panel .tantalum-ai-bottom-status-bar {
   background: var(--agent-bg);
   border-color: var(--agent-border-soft);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-tab-title {
+.agent-panel.tantalum-ai-panel .tantalum-ai-tab-title {
   color: var(--agent-text);
   border-bottom-color: var(--agent-accent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-header-actions button,
+.agent-panel.tantalum-ai-panel .tantalum-ai-header-actions button,
 .agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button,
 .agent-panel.tantalum-ai-panel .composer-action-btn,
 .agent-panel.tantalum-ai-panel .chip-close-btn,
-.agent-panel.tantalum-ai-panel .copilot-thread-item-actions button,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item-actions button,
 .agent-panel.tantalum-ai-panel .status-item-dropdown {
   color: var(--agent-muted);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-header-actions button:hover,
-.agent-panel.tantalum-ai-panel .copilot-header-actions button.active,
+.agent-panel.tantalum-ai-panel .tantalum-ai-header-actions button:hover,
+.agent-panel.tantalum-ai-panel .tantalum-ai-header-actions button.active,
 .agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button:hover,
 .agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button.active,
 .agent-panel.tantalum-ai-panel .composer-action-btn:hover,
 .agent-panel.tantalum-ai-panel .chip-close-btn:hover,
-.agent-panel.tantalum-ai-panel .copilot-thread-item-actions button:hover,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item-actions button:hover,
 .agent-panel.tantalum-ai-panel .status-item-dropdown:hover {
   background: color-mix(in srgb, var(--agent-accent) 12%, transparent);
   color: var(--agent-text);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-tabs,
-.agent-panel.tantalum-ai-panel .copilot-settings-card .card-header {
+.agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button.active {
+  background: transparent;
+  color: #ffffff;
+}
+
+.agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button:hover,
+.agent-panel.tantalum-ai-panel .sessions-toolbar-buttons button.active {
+  background: transparent;
+  color: #ffffff;
+}
+
+.agent-panel.tantalum-ai-panel .composer-attach-btn:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-status-permission-wrapper:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-tabs,
+.agent-panel.tantalum-ai-panel .tantalum-ai-settings-card .card-header {
   border-color: var(--agent-border-soft);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-tabs button,
+.agent-panel.tantalum-ai-panel .tantalum-ai-tabs button,
 .agent-panel.tantalum-ai-panel .sessions-title,
 .agent-panel.tantalum-ai-panel .welcome-desc,
 .agent-panel.tantalum-ai-panel .time-tag,
 .agent-panel.tantalum-ai-panel .status-alert-body,
-.agent-panel.tantalum-ai-panel .copilot-thread-time-sub {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-time-sub {
   color: var(--agent-muted);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-tabs button.active {
+.agent-panel.tantalum-ai-panel .tantalum-ai-tabs button.active {
   border-bottom-color: var(--agent-accent) !important;
   color: var(--agent-text) !important;
 }
 
 .agent-panel.tantalum-ai-panel .agent-popup-menu,
-.agent-panel.tantalum-ai-panel .copilot-session-search,
+.agent-panel.tantalum-ai-panel .context-mention-menu,
+.agent-panel.tantalum-ai-panel .tantalum-ai-session-search,
 .agent-panel.tantalum-ai-panel .shortcut-card,
-.agent-panel.tantalum-ai-panel .copilot-chat-bubble,
-.agent-panel.tantalum-ai-panel .copilot-composer-container,
-.agent-panel.tantalum-ai-panel .copilot-settings-card,
-.agent-panel.tantalum-ai-panel .copilot-settings-select {
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble,
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-input-shell,
+.agent-panel.tantalum-ai-panel .tantalum-ai-settings-card,
+.agent-panel.tantalum-ai-panel .tantalum-ai-settings-select {
   background: var(--agent-surface);
   border-color: var(--agent-border);
 }
 
 .agent-panel.tantalum-ai-panel .agent-popup-menu button,
-.agent-panel.tantalum-ai-panel .copilot-session-search input,
-.agent-panel.tantalum-ai-panel .copilot-composer-textarea,
-.agent-panel.tantalum-ai-panel .copilot-thread-title-text,
-.agent-panel.tantalum-ai-panel .copilot-conversation-header h3,
-.agent-panel.tantalum-ai-panel .copilot-bubble-content,
+.agent-panel.tantalum-ai-panel .context-mention-item,
+.agent-panel.tantalum-ai-panel .tantalum-ai-session-search input,
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-textarea,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-title-text,
+.agent-panel.tantalum-ai-panel .tantalum-ai-conversation-header h3,
+.agent-panel.tantalum-ai-panel .tantalum-ai-bubble-content,
 .agent-panel.tantalum-ai-panel .chip-filename {
   color: var(--agent-text);
 }
 
 .agent-panel.tantalum-ai-panel .agent-popup-menu button:hover:not(:disabled),
 .agent-panel.tantalum-ai-panel .agent-popup-menu button.active,
+.agent-panel.tantalum-ai-panel .context-mention-item:hover,
+.agent-panel.tantalum-ai-panel .context-mention-item.active,
 .agent-panel.tantalum-ai-panel .shortcut-card:hover,
-.agent-panel.tantalum-ai-panel .copilot-thread-item:hover,
-.agent-panel.tantalum-ai-panel .copilot-thread-item.running,
-.agent-panel.tantalum-ai-panel .copilot-thread-item.unread-complete {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item:hover,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item.running,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item.unread-complete {
   background: var(--agent-surface-strong);
 }
 
 .agent-panel.tantalum-ai-panel .shortcut-card:hover,
-.agent-panel.tantalum-ai-panel .copilot-composer-container:focus-within,
-.agent-panel.tantalum-ai-panel .copilot-settings-select:focus {
+.agent-panel.tantalum-ai-panel .tantalum-ai-settings-select.open,
+.agent-panel.tantalum-ai-panel .tantalum-ai-settings-select:focus-within {
   border-color: var(--agent-accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent-accent) 28%, transparent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-thread-bullet,
-.agent-panel.tantalum-ai-panel .session-indicator-pill,
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-input-shell:focus-within {
+  border-color: rgba(226, 232, 240, 0.28);
+  box-shadow: none;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-textarea:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.agent-panel.tantalum-ai-panel .agent-popup-menu,
+.agent-panel.tantalum-ai-panel .custom-dropdown-menu {
+  background: var(--agent-bg);
+  border-color: var(--agent-border-soft);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.46);
+}
+
+.agent-panel.tantalum-ai-panel .custom-dropdown-container.tantalum-ai-settings-select {
+  background: #0f141b;
+  border-color: #303846;
+}
+
+.agent-panel.tantalum-ai-panel .agent-popup-menu button,
+.agent-panel.tantalum-ai-panel .custom-dropdown-item,
+.agent-panel.tantalum-ai-panel .custom-dropdown-search input {
+  color: #cbd3dd;
+}
+
+.agent-panel.tantalum-ai-panel .agent-popup-menu button:hover:not(:disabled),
+.agent-panel.tantalum-ai-panel .agent-popup-menu button.active,
+.agent-panel.tantalum-ai-panel .custom-dropdown-item:hover,
+.agent-panel.tantalum-ai-panel .custom-dropdown-item.active {
+  background: color-mix(in srgb, var(--agent-text) 7%, transparent);
+  color: #f1f5f9;
+}
+
+.agent-panel.tantalum-ai-panel .agent-popup-menu button svg,
+.agent-panel.tantalum-ai-panel .custom-dropdown-search,
+.agent-panel.tantalum-ai-panel .custom-dropdown-empty {
+  color: #7f8a9a;
+}
+
+.agent-panel.tantalum-ai-panel .agent-popup-menu button:hover:not(:disabled) svg,
+.agent-panel.tantalum-ai-panel .agent-popup-menu button.active svg {
+  color: #dce7f3;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-bullet,
 .agent-panel.tantalum-ai-panel .sparkle-icon,
-.agent-panel.tantalum-ai-panel .copilot-welcome-logo,
+.agent-panel.tantalum-ai-panel .tantalum-ai-welcome-logo,
+.agent-panel.tantalum-ai-panel .chip-added-accent,
 .agent-panel.tantalum-ai-panel .chip-plus-accent,
-.agent-panel.tantalum-ai-panel .chip-icon.text-green {
+.agent-panel.tantalum-ai-panel .chip-icon.text-green,
+.agent-panel.tantalum-ai-panel .context-mention-item svg {
   color: var(--agent-accent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-thread-bullet {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-bullet {
   background: var(--agent-accent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-thread-activity span,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-activity span,
 .agent-panel.tantalum-ai-panel .agent-thinking-dots span,
-.agent-panel.tantalum-ai-panel .copilot-thread-complete-dot {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-complete-dot {
   background: var(--agent-accent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-thread-complete-dot {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-complete-dot {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--agent-accent) 18%, transparent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-thread-item:not(.active) .copilot-thread-bullet {
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-item:not(.active) .tantalum-ai-thread-bullet {
   background: #64756d;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-welcome-logo {
+.agent-panel.tantalum-ai-panel .tantalum-ai-welcome-logo {
   background: color-mix(in srgb, var(--agent-accent) 10%, transparent);
   border-color: color-mix(in srgb, var(--agent-accent) 28%, transparent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-chat-bubble.agent-message-user {
-  background: color-mix(in srgb, var(--agent-accent) 8%, transparent);
-  border-color: color-mix(in srgb, var(--agent-accent) 28%, transparent);
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-user {
+  background: transparent;
+  border-color: transparent;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-composer-chip {
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-assistant,
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-status {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-assistant .tantalum-ai-bubble-content,
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-assistant .markdown-renderer {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-bubble.agent-message-user .tantalum-ai-bubble-content {
+  background: color-mix(in srgb, var(--agent-accent) 16%, var(--agent-bg) 84%);
+  border-color: color-mix(in srgb, var(--agent-accent) 22%, transparent);
+}
+
+.agent-panel.tantalum-ai-panel .agent-work-summary-toggle {
+  color: var(--agent-muted);
+}
+
+.agent-panel.tantalum-ai-panel .agent-work-summary-toggle:hover,
+.agent-panel.tantalum-ai-panel .agent-work-file-pill,
+.agent-panel.tantalum-ai-panel .agent-work-title {
+  color: var(--agent-text);
+}
+
+.agent-panel.tantalum-ai-panel .agent-work-details {
+  border-left-color: var(--agent-border-soft);
+}
+
+.agent-panel.tantalum-ai-panel .agent-work-file-pill {
+  border-color: var(--agent-border-soft);
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-chip,
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-chip,
+.agent-panel.tantalum-ai-panel .agent-message-context-chip {
   background: color-mix(in srgb, var(--agent-accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--agent-accent) 30%, transparent);
 }
 
-.agent-panel.tantalum-ai-panel .composer-participant-pill {
-  background: rgba(224, 177, 93, 0.1);
-  border-color: rgba(224, 177, 93, 0.26);
+.agent-panel.tantalum-ai-panel .agent-message-context-chip {
+  background: color-mix(in srgb, var(--agent-accent) 10%, var(--agent-bg) 90%);
+  color: #d8dfd2;
+}
+
+.agent-panel.tantalum-ai-panel .agent-message-context-chip.clickable:hover,
+.agent-panel.tantalum-ai-panel .agent-message-context-chip.clickable:focus-visible {
+  background: color-mix(in srgb, var(--agent-accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--agent-accent) 48%, transparent);
+  color: #f0f2ee;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip {
+  background: transparent;
+  border-color: #263340;
+  box-shadow: none;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip:hover {
+  border-color: #364655;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip.image:hover,
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip.image:focus-visible {
+  border-color: color-mix(in srgb, var(--agent-accent) 48%, #364655);
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip .chip-filename {
+  color: #d8dfd2;
+  font-weight: 500;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip .chip-close-btn {
+  color: #6e8290;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-attached-chip .chip-close-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #f0f2ee;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-suggestion-chip {
+  background: transparent;
+  border-color: #263340;
+  border-style: solid;
+  box-shadow: none;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-suggestion-chip .chip-plus-accent {
+  color: #6e8290;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-suggestion-chip .chip-filename {
+  color: #b8c2bc;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-suggestion-chip:hover {
+  background: transparent;
+  border-color: #364655;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-suggestion-chip:hover .chip-filename {
+  color: #f0f2ee;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-badge {
+  background: transparent;
+  border-color: transparent;
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-context-badge:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.agent-panel.tantalum-ai-panel .context-image-preview-popover {
+  background: var(--agent-surface);
+  border-color: var(--agent-border);
+}
+
+.agent-panel.tantalum-ai-panel .context-image-preview-header span {
   color: var(--agent-text);
 }
 
-.agent-panel.tantalum-ai-panel .composer-participant-button:hover,
-.agent-panel.tantalum-ai-panel .composer-participant-button.active {
-  background: color-mix(in srgb, var(--agent-accent) 16%, transparent);
-  border-color: color-mix(in srgb, var(--agent-accent) 42%, transparent);
+.agent-panel.tantalum-ai-panel .tantalum-ai-chat-layout.context-drop-active .tantalum-ai-composer-input-shell {
+  border-color: var(--agent-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent-accent) 36%, transparent);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn {
+.agent-panel.tantalum-ai-panel .composer-participant-pill,
+.agent-panel.tantalum-ai-panel .composer-mode-picker {
+  background: transparent;
+  border-color: transparent;
+  color: var(--agent-muted);
+}
+
+.agent-panel.tantalum-ai-panel .composer-participant-button:hover,
+.agent-panel.tantalum-ai-panel .composer-mode-picker:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--agent-text);
+}
+
+.agent-panel.tantalum-ai-panel .composer-participant-button.active {
+  background: transparent;
+  border-color: transparent;
+  color: var(--agent-muted);
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn {
   width: 24px;
   height: 24px;
   border-radius: 6px;
@@ -6168,33 +8369,35 @@ body.panel-resizing-row * {
   background: var(--agent-accent) !important;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn:not(:disabled) {
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn:not(:disabled) {
   color: var(--agent-accent-contrast);
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn:hover:not(:disabled) {
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn:hover:not(:disabled) {
   color: var(--agent-accent-contrast);
   background: var(--agent-accent-strong) !important;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn:disabled {
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn:disabled {
   color: var(--agent-muted);
   background: color-mix(in srgb, var(--bg-editor) 84%, var(--line) 16%) !important;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn.copilot-stop-btn {
-  color: #ffffff;
-  background: #d92d20 !important;
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn.tantalum-ai-stop-btn {
+  color: #9aa6b2;
+  border: none;
+  background: transparent !important;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn.copilot-stop-btn:hover:not(:disabled) {
-  color: #ffffff;
-  background: #b42318 !important;
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn.tantalum-ai-stop-btn:hover:not(:disabled) {
+  color: #f0f2f5;
+  background: rgba(154, 166, 178, 0.12) !important;
 }
 
-.agent-panel.tantalum-ai-panel .copilot-send-btn.copilot-stop-btn:disabled {
-  color: rgba(255, 255, 255, 0.78);
-  background: #7a271a !important;
+.agent-panel.tantalum-ai-panel .tantalum-ai-send-btn.tantalum-ai-stop-btn:disabled {
+  color: #9aa6b2;
+  border: none;
+  background: transparent !important;
 }
 
 .selectors-grid {

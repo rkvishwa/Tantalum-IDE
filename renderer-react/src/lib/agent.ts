@@ -1,7 +1,7 @@
 import { executeFunction } from './functions';
 import { appwriteConfig } from './config';
 
-export type AgentMode = 'fast' | 'plan';
+export type AgentMode = 'fast' | 'power';
 export type AgentSource = 'managed' | 'custom';
 
 export type AgentUiMessage = {
@@ -28,11 +28,11 @@ export type AgentManagedModelMetadata = {
   providerLabel: string;
   fastModel: string;
   fastEditorModel: string;
-  planModel: string;
-  planEditorModel: string;
-  planReasoningEffort: string;
+  powerModel: string;
+  powerEditorModel: string;
+  powerReasoningEffort: string;
   fastContextWindow: number | null;
-  planContextWindow: number | null;
+  powerContextWindow: number | null;
   repoMapTokens: number;
 };
 
@@ -55,6 +55,12 @@ export type AgentPreferences = {
   selectedCustomModelName: string | null;
 };
 
+type LegacyAgentPreferences = Omit<AgentPreferences, 'selectedCustomModelName'>;
+
+type SaveAgentPreferencesOptions = {
+  includeCustomModelName?: boolean;
+};
+
 export type AgentCreditAccount = {
   id: string;
   periodKey: string;
@@ -62,14 +68,17 @@ export type AgentCreditAccount = {
   usedCredits: number;
   remainingCredits: number;
   resetAt: string;
+  createdAt: string;
   updatedAt: string;
 };
 
 export type AgentUsageEvent = {
   id: string;
+  requestId: string;
   source: AgentSource;
   mode: AgentMode;
   status: 'success' | 'failed' | 'blocked' | string;
+  providerLabel: string | null;
   modelAlias: string | null;
   totalTokens: number;
   multiplier: number;
@@ -138,16 +147,48 @@ function assertAgentSettingsFunction() {
   }
 }
 
+function isUnknownSelectedCustomModelError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('Unknown attribute') && message.includes('selectedCustomModelName');
+}
+
+function normalizeSavedPreferences(saved: Partial<AgentPreferences>, fallback: AgentPreferences): AgentPreferences {
+  const selectedSource = saved.selectedSource === 'custom' || saved.selectedSource === 'managed' ? saved.selectedSource : fallback.selectedSource;
+  const savedMode = String(saved.defaultMode || '');
+  const defaultMode = savedMode === 'power' || savedMode === 'plan' ? 'power' : savedMode === 'fast' ? 'fast' : fallback.defaultMode;
+
+  return {
+    selectedSource,
+    defaultMode,
+    selectedCustomCredentialId:
+      selectedSource === 'custom'
+        ? (typeof saved.selectedCustomCredentialId === 'string' && saved.selectedCustomCredentialId) || fallback.selectedCustomCredentialId || null
+        : null,
+    selectedCustomModelName:
+      selectedSource === 'custom'
+        ? (typeof saved.selectedCustomModelName === 'string' && saved.selectedCustomModelName) || fallback.selectedCustomModelName || null
+        : null,
+  };
+}
+
+function withoutSelectedCustomModelName(preferences: AgentPreferences): LegacyAgentPreferences {
+  return {
+    selectedSource: preferences.selectedSource,
+    defaultMode: preferences.defaultMode,
+    selectedCustomCredentialId: preferences.selectedCustomCredentialId,
+  };
+}
+
 export function createDefaultAgentSettings(): AgentSettingsState {
   const managedModelMetadata: AgentManagedModelMetadata = {
     providerLabel: 'Azure AI Foundry',
     fastModel: 'gpt-4.1',
     fastEditorModel: 'gpt-4.1',
-    planModel: 'gpt-5.5',
-    planEditorModel: 'gpt-4.1',
-    planReasoningEffort: 'medium',
+    powerModel: 'gpt-5.5',
+    powerEditorModel: 'gpt-4.1',
+    powerReasoningEffort: 'medium',
     fastContextWindow: null,
-    planContextWindow: null,
+    powerContextWindow: null,
     repoMapTokens: 2048,
   };
 
@@ -164,14 +205,14 @@ export function createDefaultAgentSettings(): AgentSettingsState {
         repoMapTokens: managedModelMetadata.repoMapTokens,
       },
       {
-        id: 'plan',
-        label: 'Plan',
+        id: 'power',
+        label: 'Power',
         creditMultiplier: 2,
-        model: managedModelMetadata.planModel,
-        editorModel: managedModelMetadata.planEditorModel,
-        contextWindow: managedModelMetadata.planContextWindow,
+        model: managedModelMetadata.powerModel,
+        editorModel: managedModelMetadata.powerEditorModel,
+        contextWindow: managedModelMetadata.powerContextWindow,
         repoMapTokens: managedModelMetadata.repoMapTokens,
-        reasoningEffort: managedModelMetadata.planReasoningEffort,
+        reasoningEffort: managedModelMetadata.powerReasoningEffort,
       },
     ],
     managedModelMetadata,
@@ -189,6 +230,7 @@ export function createDefaultAgentSettings(): AgentSettingsState {
       usedCredits: 0,
       remainingCredits: 0,
       resetAt: '',
+      createdAt: '',
       updatedAt: '',
     },
     recentUsage: [],
@@ -196,22 +238,39 @@ export function createDefaultAgentSettings(): AgentSettingsState {
   };
 }
 
-export async function loadAgentSettings() {
+export async function loadAgentSettings(workspaceKey?: string | null) {
   assertAgentSettingsFunction();
-  return executeFunction<Record<string, never>, AgentSettingsState>(
+  return executeFunction<{ workspaceKey?: string | null }, AgentSettingsState>(
     appwriteConfig.agentSettingsFunctionId,
-    {},
+    { workspaceKey: workspaceKey ?? null },
     '/bootstrap',
   );
 }
 
-export async function saveAgentPreferences(preferences: AgentPreferences) {
+export async function saveAgentPreferences(preferences: AgentPreferences, options: SaveAgentPreferencesOptions = {}) {
   assertAgentSettingsFunction();
-  return executeFunction<AgentPreferences, AgentPreferences>(
-    appwriteConfig.agentSettingsFunctionId,
-    preferences,
-    '/preferences',
-  );
+  const firstPayload = options.includeCustomModelName === false ? withoutSelectedCustomModelName(preferences) : preferences;
+
+  try {
+    const saved = await executeFunction<typeof firstPayload, Partial<AgentPreferences>>(
+      appwriteConfig.agentSettingsFunctionId,
+      firstPayload,
+      '/preferences',
+    );
+    return normalizeSavedPreferences(saved, preferences);
+  } catch (error) {
+    if (!isUnknownSelectedCustomModelError(error) || options.includeCustomModelName === false) {
+      throw error;
+    }
+
+    const legacyPreferences = withoutSelectedCustomModelName(preferences);
+    const saved = await executeFunction<typeof legacyPreferences, Partial<AgentPreferences>>(
+      appwriteConfig.agentSettingsFunctionId,
+      legacyPreferences,
+      '/preferences',
+    );
+    return normalizeSavedPreferences(saved, preferences);
+  }
 }
 
 export async function createCustomCredential(input: AgentCredentialInput) {

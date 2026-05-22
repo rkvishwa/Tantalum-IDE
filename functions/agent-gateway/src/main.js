@@ -3,6 +3,12 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 
 import { Account, Client, Databases, ID, Query } from 'node-appwrite';
+import {
+  AGENT_OUTPUT_STYLE_SETTING_KEY,
+  DEFAULT_AGENT_OUTPUT_STYLE,
+  applyAgentOutputPolicy,
+  normalizeAgentOutputStyle,
+} from './outputPolicy.js';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -13,12 +19,13 @@ const {
   APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID = 'agent_custom_credentials',
   APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID = 'agent_credit_accounts',
   APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID = 'agent_usage_ledger',
+  APPWRITE_APP_SETTINGS_COLLECTION_ID = 'app_settings',
   AGENT_DEFAULT_MONTHLY_CREDITS = '500',
 } = process.env;
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
-const DEFAULT_PLAN_REASONING_EFFORT = 'medium';
+const DEFAULT_POWER_REASONING_EFFORT = 'medium';
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -204,6 +211,20 @@ async function findDocument(databases, collectionId, queries) {
   return response.documents[0] || null;
 }
 
+async function resolveAgentOutputStyle(databases) {
+  try {
+    const document = await databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_APP_SETTINGS_COLLECTION_ID, AGENT_OUTPUT_STYLE_SETTING_KEY);
+    return normalizeAgentOutputStyle(document?.value);
+  } catch {
+    try {
+      const document = await findDocument(databases, APPWRITE_APP_SETTINGS_COLLECTION_ID, [Query.equal('key', AGENT_OUTPUT_STYLE_SETTING_KEY)]);
+      return normalizeAgentOutputStyle(document?.value);
+    } catch {
+      return DEFAULT_AGENT_OUTPUT_STYLE;
+    }
+  }
+}
+
 async function ensureCreditAccount(databases, userId) {
   const now = new Date().toISOString();
   const periodKey = periodKeyFor();
@@ -238,18 +259,22 @@ function stripOpenAiPrefix(modelName) {
   return value.startsWith('openai/') ? value.slice('openai/'.length) : value;
 }
 
+function normalizeAgentMode(value) {
+  return value === 'power' || value === 'plan' ? 'power' : 'fast';
+}
+
 function resolveManagedModel(poolKey, mode, incomingModel) {
   const alias = stripOpenAiPrefix(incomingModel);
-  if (alias === 'tantalum-plan-editor') {
-    return poolKey.planEditorModel || poolKey.planModel;
+  if (alias === 'tantalum-power-editor' || alias === 'tantalum-plan-editor') {
+    return poolKey.powerEditorModel || poolKey.planEditorModel || poolKey.powerModel || poolKey.planModel;
   }
 
   if (alias === 'tantalum-fast-editor') {
     return poolKey.fastEditorModel || poolKey.fastModel;
   }
 
-  if (mode === 'plan') {
-    return poolKey.planModel || poolKey.fastModel;
+  if (mode === 'power') {
+    return poolKey.powerModel || poolKey.planModel || poolKey.fastModel;
   }
 
   return poolKey.fastModel;
@@ -282,9 +307,9 @@ async function resolveManagedProvider(databases, userId, mode, incomingModel) {
     isAzure: endpoint.isAzure,
     apiKey: poolKey.apiKey,
     model,
-    modelAlias: mode === 'plan' ? 'Plan' : 'Fast',
+    modelAlias: mode === 'power' ? 'Power' : 'Fast',
     sourceLabel: poolKey.providerLabel || 'Managed',
-    reasoningEffort: mode === 'plan' ? poolKey.planReasoningEffort || DEFAULT_PLAN_REASONING_EFFORT : null,
+    reasoningEffort: mode === 'power' ? poolKey.powerReasoningEffort || poolKey.planReasoningEffort || DEFAULT_POWER_REASONING_EFFORT : null,
   };
 }
 
@@ -405,12 +430,14 @@ async function handleChatCompletion(req, res) {
   const user = await resolveUser(req);
   const databases = new Databases(createAdminClient(req));
   const source = payload.source === 'custom' ? 'custom' : 'managed';
-  const mode = payload.mode === 'plan' ? 'plan' : 'fast';
-  const multiplier = source === 'managed' && mode === 'plan' ? 2 : 1;
+  const mode = normalizeAgentMode(payload.mode);
+  const multiplier = source === 'managed' && mode === 'power' ? 2 : 1;
   const requestBody = payload.request && typeof payload.request === 'object' ? payload.request : {};
   const endpointPath = normalizeGatewayPath(payload.apiPath || req.path);
   const requestId = crypto.randomUUID();
   const creditAccount = await ensureCreditAccount(databases, user.$id);
+  const outputStyle = await resolveAgentOutputStyle(databases);
+  const upstreamRequestBody = applyAgentOutputPolicy(requestBody, endpointPath, outputStyle);
 
   if (source === 'managed') {
     const remainingCredits = Number(creditAccount.monthlyAllowance || 0) - Number(creditAccount.usedCredits || 0);
@@ -432,14 +459,14 @@ async function handleChatCompletion(req, res) {
   try {
     provider =
       source === 'custom'
-        ? await resolveCustomProvider(databases, user.$id, payload.customCredentialId, payload.customModelName || requestBody.model)
-        : await resolveManagedProvider(databases, user.$id, mode, requestBody.model);
+        ? await resolveCustomProvider(databases, user.$id, payload.customCredentialId, payload.customModelName || upstreamRequestBody.model)
+        : await resolveManagedProvider(databases, user.$id, mode, upstreamRequestBody.model);
 
-    const upstreamResponse = await callUpstream(provider, requestBody, endpointPath);
-    const credits = calculateCredits(upstreamResponse, requestBody, multiplier);
+    const upstreamResponse = await callUpstream(provider, upstreamRequestBody, endpointPath);
+    const credits = calculateCredits(upstreamResponse, upstreamRequestBody, multiplier);
     const chargedCredits = source === 'managed' ? credits.chargedCredits : 0;
     if (source === 'managed' && upstreamResponse && typeof upstreamResponse === 'object') {
-      upstreamResponse.model = requestBody.model || (mode === 'plan' ? 'openai/tantalum-plan' : 'openai/tantalum-fast');
+      upstreamResponse.model = upstreamRequestBody.model || (mode === 'power' ? 'openai/tantalum-power' : 'openai/tantalum-fast');
     }
 
     if (source === 'managed') {
@@ -500,3 +527,5 @@ export default async function ({ req, res, error }) {
     return fail(res, 500, message);
   }
 }
+
+export { applyAgentOutputPolicy, normalizeAgentOutputStyle } from './outputPolicy.js';

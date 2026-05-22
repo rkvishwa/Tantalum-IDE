@@ -1,9 +1,10 @@
 const crypto = require("node:crypto");
+const { canonicalizeCommandVerbsInText } = require("./commandCanonicalizer");
 
 const LOCAL_ENGINE = "local";
 const DIRECT_LLM_ENGINE = "direct_llm";
-const AIDER_ASK_ENGINE = "aider_ask";
-const AIDER_EDIT_ENGINE = "aider_edit";
+const OPENCODE_ASK_ENGINE = "opencode_ask";
+const OPENCODE_EDIT_ENGINE = "opencode_edit";
 
 function normalizePrompt(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
@@ -52,8 +53,40 @@ function isLowSignalPrompt(prompt) {
 }
 
 function isExplicitEditRequest(prompt) {
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
+  return /\b(add|apply|build|change|clean up|convert|create|delete|edit|fix|implement|install|make|modify|move|patch|refactor|remove|rename|replace|rewrite|scaffold|update|write)\b/.test(normalized);
+}
+
+function isCompletedTaskReferencePrompt(prompt) {
   const normalized = normalizePrompt(prompt).toLowerCase();
-  return /\b(add|apply|build|change|clean up|convert|create|delete|edit|fix|implement|install|make|modify|patch|refactor|remove|rename|replace|rewrite|scaffold|update|write)\b/.test(normalized);
+  return (
+    /\b(do|make|apply|repeat|use)\s+(?:it|that|this|the same|same)\s+(?:again|like|to|for|here)?\b/.test(normalized) ||
+    /\b(?:same as before|same thing|like before|like that|like this|similar to before|similar to that|previous task|last task)\b/.test(normalized) ||
+    /^(?:again|same again|repeat that|repeat it|do that again|do it again)$/.test(normalized)
+  );
+}
+
+function hasCompletedTaskReferences(value) {
+  return Array.isArray(value) && value.some((reference) => Array.isArray(reference?.items) && reference.items.length > 0);
+}
+
+function classifyReferenceEditRisk(prompt, completedTaskReferences) {
+  const baseRisk = classifyEditRisk(prompt);
+  if (baseRisk.requiresApproval) {
+    return baseRisk;
+  }
+
+  const itemTexts = Array.isArray(completedTaskReferences)
+    ? completedTaskReferences
+        .flatMap((reference) => (Array.isArray(reference?.items) ? reference.items : []))
+        .map((item) => [item?.kind, item?.title, item?.instruction, item?.result].filter(Boolean).join(" ").toLowerCase())
+    : [];
+  const destructive = itemTexts.some((text) => /\b(delete|remove|rm|rename|move|replace|overwrite|discard)\b/.test(text));
+  if (destructive) {
+    return { requiresApproval: true, riskLevel: "high", reason: "reference_destructive_edit" };
+  }
+
+  return { requiresApproval: false, riskLevel: "low", reason: "reference_workspace_edit" };
 }
 
 function isContinuationPrompt(prompt) {
@@ -62,13 +95,13 @@ function isContinuationPrompt(prompt) {
 }
 
 function countEditVerbs(prompt) {
-  const normalized = normalizePrompt(prompt).toLowerCase();
-  const matches = normalized.match(/\b(add|apply|build|change|convert|create|delete|edit|fix|implement|install|make|modify|patch|refactor|remove|rename|replace|rewrite|scaffold|update|write)\b/g);
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
+  const matches = normalized.match(/\b(add|apply|build|change|convert|create|delete|edit|fix|implement|install|make|modify|move|patch|refactor|remove|rename|replace|rewrite|scaffold|update|write)\b/g);
   return new Set(matches || []).size;
 }
 
 function classifyEditRisk(prompt) {
-  const normalized = normalizePrompt(prompt).toLowerCase();
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
   const destructive = /\b(delete|remove|rm|rename|move|replace|overwrite|discard)\b/.test(normalized);
   const shell = /\b(run|execute)\b.*\b(command|terminal|shell|cmd|powershell|bash|script)\b/.test(normalized);
   const broad = /\b(all files|entire project|whole repo|whole repository|everything|mass|globally|everywhere)\b/.test(normalized);
@@ -133,19 +166,48 @@ function isReadOnlyWorkspaceQuestion(prompt) {
   return asksAboutWorkspace && readOnlyVerb;
 }
 
-function canAnswerFromActiveTab(prompt, activeTab) {
-  if (!activeTab?.content || !activeTab?.path) {
+function normalizeContextPath(value) {
+  return String(value || "").replace(/\\/g, "/").toLowerCase();
+}
+
+function hasExplicitContext(contextItems) {
+  return Array.isArray(contextItems) && contextItems.some((item) => (item?.content && item?.path) || (item?.kind === "image" && item?.dataUrl));
+}
+
+function promptReferencesContextItem(prompt, item) {
+  const normalizedPrompt = normalizePrompt(prompt).toLowerCase();
+  const pathValue = normalizeContextPath(item?.relativePath || item?.path || "");
+  const nameValue = String(item?.name || pathValue.split("/").at(-1) || "").toLowerCase();
+  const basename = pathValue.split("/").filter(Boolean).at(-1) || nameValue;
+
+  return Boolean(
+    (nameValue && normalizedPrompt.includes(nameValue)) ||
+      (basename && normalizedPrompt.includes(basename)) ||
+      (pathValue && normalizedPrompt.includes(pathValue)),
+  );
+}
+
+function canAnswerFromContextItems(prompt, contextItems) {
+  if (!hasExplicitContext(contextItems)) {
     return false;
   }
 
   const normalized = normalizePrompt(prompt).toLowerCase();
-  return /\b(this file|active file|current file|this code|selected file|open file|explain this|summari[sz]e this)\b/.test(normalized);
+  if (
+    /\b(this file|active file|current file|this code|selected file|selected lines|attached context|added context|user-added context|context|explain this|summari[sz]e this)\b/.test(normalized) ||
+    /\b(this image|attached image|this photo|attached photo|this picture|attached picture|this screenshot|attached screenshot)\b/.test(normalized)
+  ) {
+    return true;
+  }
+
+  return contextItems.some((item) => promptReferencesContextItem(prompt, item));
 }
 
 function routeAgentPrompt(payload = {}) {
   const prompt = normalizePrompt(payload.prompt);
   const titleSuggestion = titleFromPrompt(prompt);
   const pendingAction = normalizePendingAction(payload.pendingAction);
+  const bypassApproval = payload.permissionMode === "bypass";
 
   if (isContinuationPrompt(prompt)) {
     if (!pendingAction || !["pending", "blocked"].includes(pendingAction.status)) {
@@ -175,7 +237,7 @@ function routeAgentPrompt(payload = {}) {
     }
 
     return {
-      engine: AIDER_EDIT_ENGINE,
+      engine: OPENCODE_EDIT_ENGINE,
       reason: "approved_pending_action",
       confidence: 0.96,
       persistThread: true,
@@ -212,7 +274,9 @@ function routeAgentPrompt(payload = {}) {
     };
   }
 
-  const wantsEdit = isExplicitEditRequest(prompt);
+  const wantsReferenceEdit =
+    payload.intent !== "ask" && hasCompletedTaskReferences(payload.completedTaskReferences) && isCompletedTaskReferencePrompt(prompt);
+  const wantsEdit = isExplicitEditRequest(prompt) || wantsReferenceEdit;
   if (wantsEdit && payload.intent === "ask") {
     return {
       engine: LOCAL_ENGINE,
@@ -227,11 +291,11 @@ function routeAgentPrompt(payload = {}) {
   }
 
   if (wantsEdit) {
-    const risk = classifyEditRisk(prompt);
-    if (risk.requiresApproval) {
+    const risk = wantsReferenceEdit ? classifyReferenceEditRisk(prompt, payload.completedTaskReferences) : classifyEditRisk(prompt);
+    if (risk.requiresApproval && !bypassApproval) {
       const nextPendingAction = createPendingAction(prompt, risk);
       return {
-        engine: AIDER_EDIT_ENGINE,
+        engine: OPENCODE_EDIT_ENGINE,
         reason: risk.reason,
         confidence: 0.9,
         persistThread: true,
@@ -244,9 +308,9 @@ function routeAgentPrompt(payload = {}) {
     }
 
     return {
-      engine: AIDER_EDIT_ENGINE,
-      reason: "explicit_workspace_edit",
-      confidence: 0.86,
+      engine: OPENCODE_EDIT_ENGINE,
+      reason: risk.requiresApproval ? `${risk.reason}_bypassed` : "explicit_workspace_edit",
+      confidence: risk.requiresApproval ? 0.9 : 0.86,
       persistThread: true,
       titleSuggestion,
       requiresUserDecision: false,
@@ -254,9 +318,10 @@ function routeAgentPrompt(payload = {}) {
     };
   }
 
-  if (isReadOnlyWorkspaceQuestion(prompt) && !canAnswerFromActiveTab(prompt, payload.activeTab)) {
+  const canAnswerFromExplicitContext = canAnswerFromContextItems(prompt, payload.contextItems);
+  if (isReadOnlyWorkspaceQuestion(prompt) && !canAnswerFromExplicitContext) {
     return {
-      engine: AIDER_ASK_ENGINE,
+      engine: OPENCODE_ASK_ENGINE,
       reason: "read_only_workspace_question",
       confidence: 0.8,
       persistThread: true,
@@ -268,7 +333,7 @@ function routeAgentPrompt(payload = {}) {
 
   return {
     engine: DIRECT_LLM_ENGINE,
-    reason: canAnswerFromActiveTab(prompt, payload.activeTab) ? "active_tab_direct_question" : "general_direct_question",
+    reason: canAnswerFromExplicitContext ? "explicit_context_direct_question" : "general_direct_question",
     confidence: 0.72,
     persistThread: true,
     titleSuggestion,
@@ -278,10 +343,10 @@ function routeAgentPrompt(payload = {}) {
 }
 
 module.exports = {
-  AIDER_ASK_ENGINE,
-  AIDER_EDIT_ENGINE,
   DIRECT_LLM_ENGINE,
   LOCAL_ENGINE,
+  OPENCODE_ASK_ENGINE,
+  OPENCODE_EDIT_ENGINE,
   isContinuationPrompt,
   normalizePendingAction,
   routeAgentPrompt,

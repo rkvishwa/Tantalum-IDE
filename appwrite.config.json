@@ -155,6 +155,10 @@
                     "value": "agent_user_preferences"
                 },
                 {
+                    "key": "APPWRITE_APP_SETTINGS_COLLECTION_ID",
+                    "value": "app_settings"
+                },
+                {
                     "key": "APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID",
                     "value": "agent_credit_accounts"
                 },
@@ -225,6 +229,10 @@
                 {
                     "key": "APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID",
                     "value": "agent_usage_ledger"
+                },
+                {
+                    "key": "APPWRITE_APP_SETTINGS_COLLECTION_ID",
+                    "value": "app_settings"
                 },
                 {
                     "key": "AGENT_DEFAULT_MONTHLY_CREDITS",
@@ -595,6 +603,62 @@
             ]
         },
         {
+            "$id": "app_settings",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "App Settings",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "key",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "value",
+                    "type": "text",
+                    "required": true,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "description",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 512,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "app_settings_key",
+                    "type": "unique",
+                    "status": "available",
+                    "columns": [
+                        "key"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
             "$id": "agent_managed_key_pool",
             "$permissions": [],
             "databaseId": "697b8f660033fffde4be",
@@ -657,7 +721,7 @@
                     "encrypt": false
                 },
                 {
-                    "key": "planModel",
+                    "key": "powerModel",
                     "type": "string",
                     "required": true,
                     "array": false,
@@ -666,7 +730,7 @@
                     "encrypt": false
                 },
                 {
-                    "key": "planEditorModel",
+                    "key": "powerEditorModel",
                     "type": "string",
                     "required": false,
                     "array": false,
@@ -675,7 +739,7 @@
                     "encrypt": false
                 },
                 {
-                    "key": "planReasoningEffort",
+                    "key": "powerReasoningEffort",
                     "type": "string",
                     "required": false,
                     "array": false,
@@ -691,7 +755,7 @@
                     "default": 0
                 },
                 {
-                    "key": "planContextWindow",
+                    "key": "powerContextWindow",
                     "type": "integer",
                     "required": false,
                     "array": false,
@@ -1418,6 +1482,23 @@
                     "orders": []
                 },
                 {
+                    "key": "agent_threads_workspace_history",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "status",
+                        "workspaceKey",
+                        "lastMessageAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
                     "key": "agent_threads_last_message",
                     "type": "key",
                     "status": "available",
@@ -1487,7 +1568,7 @@
                     "type": "string",
                     "required": false,
                     "array": false,
-                    "size": 4096,
+                    "size": 32768,
                     "default": "{}",
                     "encrypt": false
                 },

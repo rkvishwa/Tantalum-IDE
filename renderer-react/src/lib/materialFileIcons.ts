@@ -100,6 +100,14 @@ const materialIconUrlsByFileName = Object.fromEntries(Object.entries(materialIco
 
 const materialFileNameIcons = createCaseInsensitiveMap(materialIconTheme.fileNames);
 const materialFileExtensionIcons = createCaseInsensitiveMap(materialIconTheme.fileExtensions);
+const materialLanguageFileExtensionIcons = createCaseInsensitiveMap({
+  cjs: 'javascript',
+  cts: 'typescript',
+  html: 'html',
+  js: 'javascript',
+  mts: 'typescript',
+  ts: 'typescript',
+});
 
 function createCaseInsensitiveMap(values: Record<string, string> = {}) {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.toLowerCase(), value]));
@@ -167,7 +175,7 @@ function getMaterialFileIconId(filePath: string) {
   }
 
   for (const extension of getExtensionCandidates(baseName)) {
-    const extensionIcon = materialFileExtensionIcons[extension];
+    const extensionIcon = materialFileExtensionIcons[extension] ?? materialLanguageFileExtensionIcons[extension];
     if (extensionIcon) {
       return extensionIcon;
     }

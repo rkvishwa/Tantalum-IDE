@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react';
+import { Terminal } from 'lucide-react';
 
 type MarkdownRendererProps = {
   content: string;
@@ -8,6 +9,29 @@ type Block =
   | { type: 'code'; language: string; content: string }
   | { type: 'list'; ordered: boolean; items: string[] }
   | { type: 'paragraph'; content: string };
+
+const COMMAND_LANGUAGE_LABELS: Record<string, string> = {
+  bash: 'Bash',
+  cmd: 'Command Prompt',
+  command: 'Command Prompt',
+  'command prompt': 'Command Prompt',
+  console: 'Terminal',
+  powershell: 'PowerShell',
+  ps: 'PowerShell',
+  ps1: 'PowerShell',
+  shell: 'Terminal',
+  sh: 'Shell',
+  terminal: 'Terminal',
+  zsh: 'Zsh',
+};
+
+function normalizeLanguage(language: string) {
+  return language.trim().toLowerCase();
+}
+
+function commandLanguageLabel(language: string) {
+  return COMMAND_LANGUAGE_LABELS[normalizeLanguage(language)];
+}
 
 function renderInline(content: string) {
   const parts: ReactNode[] = [];
@@ -117,9 +141,17 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
     <div className="markdown-renderer">
       {blocks.map((block, index) => {
         if (block.type === 'code') {
+          const commandLabel = commandLanguageLabel(block.language);
+          const blockClassName = commandLabel ? 'markdown-code-block markdown-command-block' : 'markdown-code-block';
+
           return (
-            <pre key={`code-${index}`} className="markdown-code-block">
-              {block.language ? <span className="markdown-code-language">{block.language}</span> : null}
+            <pre key={`code-${index}`} className={blockClassName}>
+              {block.language ? (
+                <span className="markdown-code-language">
+                  {commandLabel ? <Terminal className="markdown-command-icon" size={12} aria-hidden="true" /> : null}
+                  {commandLabel ?? block.language}
+                </span>
+              ) : null}
               <code>{block.content}</code>
             </pre>
           );

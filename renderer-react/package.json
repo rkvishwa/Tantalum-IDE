@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@knurdz/jack-editor-tab": "^0.1.1",
+    "@knurdz/jack-editor-tab": "^0.1.5",
     "@knurdz/jack-file-tree": "^0.2.9",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-context-menu": "^2.2.16",
