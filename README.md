@@ -7,8 +7,8 @@ Tantalum IDE is an Electron desktop app with a React + TypeScript renderer for e
 - React + TypeScript renderer under `renderer-react/`
 - Secure Electron preload bridge for native-only capabilities
 - Appwrite auth, database, storage, and function-backed board workflows
-- Local-only storage for WiFi passwords and raw board tokens
-- OTA provisioning firmware updated to call an Appwrite Function execution endpoint
+- Local-only storage for raw board tokens and provisioning command secrets
+- OTA provisioning firmware updated to use runtime WiFi provisioning, heartbeat fallback, and optional MQTT triggers
 
 ## Local scripts
 
@@ -61,8 +61,11 @@ Live function IDs:
 
 Function variables:
 
-- `board-admin`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`
+- `board-admin`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`
 - `device-gateway`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`, `APPWRITE_FIRMWARE_BUCKET_ID`
+- MQTT command variables for `board-admin`: `TANTALUM_MQTT_URL` or `TANTALUM_MQTT_HOST`/`TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_PUBLISHER_USERNAME`, `TANTALUM_MQTT_PUBLISHER_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`. MQTT requires `mqtts://` plus a CA certificate; if these are missing, HTTPS heartbeat fallback remains active.
+- MQTT device subscribe variables for desktop/runtime builds: `TANTALUM_MQTT_HOST`, `TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_DEVICE_USERNAME`, `TANTALUM_MQTT_DEVICE_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
+- Set `TANTALUM_BOARD_SECRET_KEK_V1` on `board-admin` to encrypt per-board MQTT command secrets. Generate it with the same 32-byte base64 command shown below.
 - AI key functions (`agent-settings`, `agent-gateway`, `board-detection`) also require `TANTALUM_SECRET_KEK_V1` as an Appwrite secret variable. Generate it with:
 
 ```bash
@@ -109,6 +112,20 @@ Expected `boards` attributes:
 - `tokenHash` string
 - `tokenPreview` string
 - `firmwareVersion` string
+- `commandSecretEnvelope` string
+- `mqttTopicSuffix` string
+- `provisioningPop` string
+- `desiredFirmwareId` string
+- `desiredVersion` string
+- `desiredDeploymentId` string
+- `lastAppliedDeploymentId` string
+- `runtimeVersion` string
+- `lastUpdateCheckAt` string or datetime
+- `otaStatus` string
+- `provisioningStatus` string
+- `provisioningRequestedAt` string or datetime
+- `provisioningMode` string
+- `lastOtaError` string
 - `status` string
 - `lastSeen` string or datetime
 - `lastProvisionedAt` string or datetime

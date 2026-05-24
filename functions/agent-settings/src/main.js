@@ -26,6 +26,7 @@ const {
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
 const MESSAGE_METADATA_JSON_MAX = 32768;
+const RECENT_USAGE_LIMIT = 50;
 const DEFAULT_MANAGED_MODEL_METADATA = {
   providerLabel: 'Azure AI Foundry',
   fastModel: 'gpt-4.1',
@@ -507,26 +508,13 @@ async function listCustomCredentials(databases, userId) {
 }
 
 async function listRecentUsage(databases, userId) {
-  const documents = [];
-  let cursor = null;
+  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID, [
+    Query.equal('userId', userId),
+    Query.orderDesc('createdAt'),
+    Query.limit(RECENT_USAGE_LIMIT),
+  ]);
 
-  do {
-    const queries = [
-      Query.equal('userId', userId),
-      Query.orderDesc('createdAt'),
-      Query.limit(100),
-    ];
-
-    if (cursor) {
-      queries.push(Query.cursorAfter(cursor));
-    }
-
-    const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID, queries);
-    documents.push(...response.documents);
-    cursor = response.documents.length === 100 ? response.documents.at(-1)?.$id ?? null : null;
-  } while (cursor);
-
-  return documents.map((entry) => ({
+  return response.documents.map((entry) => ({
     id: entry.$id,
     requestId: entry.requestId || '',
     source: entry.source,
@@ -622,7 +610,6 @@ async function listThreadMessages(req, res) {
   const thread = await getOwnedThread(databases, user.$id, payload.threadId);
 
   const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID, [
-    Query.equal('userId', user.$id),
     Query.equal('threadId', thread.$id),
     Query.orderAsc('createdAt'),
     Query.limit(200),

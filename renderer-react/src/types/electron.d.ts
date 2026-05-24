@@ -24,6 +24,24 @@ export type UsbUploadProgressEvent = {
   progress: number | null;
 };
 
+export type CompileProgressEvent = {
+  compileId: string;
+  stream: 'stdout' | 'stderr' | string;
+  chunk: string;
+  message: string;
+  progress: number | null;
+};
+
+export type StorageUploadProgressEvent = {
+  progressId: string;
+  bucketId: string;
+  fileId: string;
+  filename: string;
+  sentBytes: number;
+  totalBytes: number;
+  progress: number;
+};
+
 export type ArduinoLibraryDirectoryInfo = {
   userDir: string;
   librariesDir: string;
@@ -84,6 +102,7 @@ export type ToolchainNotificationKind =
   | 'platform-remove'
   | 'usb-upload'
   | 'firmware-upload'
+  | 'cloud-runtime-install'
   | 'toolchain-task';
 
 export type ToolchainNotificationMetadata = Record<string, string | number | boolean | null | undefined>;
@@ -247,6 +266,7 @@ export type MenuAction =
   | { type: 'show-platforms' }
   | { type: 'show-my-projects' }
   | { type: 'show-output' }
+  | { type: 'show-serial-monitor' }
   | { type: 'compile' }
   | { type: 'upload-local' }
   | { type: 'upload-cloud' }
@@ -331,6 +351,10 @@ export type LocalBoardProfile = {
   fingerprint: string;
   confidence?: number | null;
   connected?: boolean;
+  cloudBoardId?: string;
+  cloudLinkedAt?: string;
+  lastCloudProvisionedAt?: string;
+  lastCloudUsbUploadAt?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -346,6 +370,21 @@ export type TerminalExitEvent = {
   signal: number;
 };
 
+export type SerialMonitorDataEvent = {
+  sessionId: string;
+  data: string;
+};
+
+export type SerialMonitorErrorEvent = {
+  sessionId: string;
+  error: string;
+};
+
+export type SerialMonitorCloseEvent = {
+  sessionId: string;
+  reason: string;
+};
+
 export type CloudConfig = {
   endpoint: string;
   projectId: string;
@@ -359,16 +398,65 @@ export type CloudConfig = {
   agentSettingsFunctionId: string;
   agentGatewayFunctionId: string;
   boardDetectionFunctionId?: string;
+  mqttHost?: string;
+  mqttPort?: string | number;
+  mqttUsername?: string;
+  mqttPassword?: string;
+  mqttCaCert?: string;
+  tlsCaCert?: string;
 };
 
-export type AgentToolName = 'opencode_apply';
-export type AgentRouteEngine = 'local' | 'direct_llm' | 'opencode_ask' | 'opencode_edit';
+export type AgentToolName = 'opencode_apply' | string;
+export type AgentRouteEngine = 'local' | 'direct_llm' | 'opencode_ask' | 'opencode_edit' | 'agent_tool';
 export type AgentReviewMode = 'live-applied' | 'none';
 export type AgentPermissionMode = 'default' | 'bypass';
-export type AgentRunStageName = 'routing' | 'preparing_workspace' | 'running_direct_llm' | 'running_opencode' | 'applying_changes';
+export type AgentRunStageName = 'routing' | 'preparing_workspace' | 'running_direct_llm' | 'running_opencode' | 'running_tool' | 'applying_changes';
 export type PendingAgentActionStatus = 'pending' | 'approved' | 'running' | 'blocked' | 'skipped' | 'executed' | 'expired';
 export type AgentDecisionKind = 'approve_skip' | 'clarify' | 'none';
 export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'blocked' | 'skipped';
+
+export type AgentToolRisk = 'low' | 'medium' | 'high' | string;
+export type AgentToolOrigin = 'user' | 'agent' | string;
+
+export type AgentToolRequest = {
+  requestId: string;
+  toolId: string;
+  summary: string;
+  risk: AgentToolRisk;
+  origin: AgentToolOrigin;
+  arguments: Record<string, unknown>;
+  approvalReason?: string;
+};
+
+export type AgentToolDescriptor = {
+  id: string;
+  category: string;
+  label: string;
+  description: string;
+  risk: AgentToolRisk;
+  approval: 'never' | 'default' | 'always' | string;
+  enabledByDefault: boolean;
+  available: boolean;
+  unavailableReason?: string;
+};
+
+export type AgentToolSettings = {
+  tools: Record<string, { enabled: boolean }>;
+  updatedAt: string;
+};
+
+export type AgentToolSettingsResponse = {
+  descriptors: AgentToolDescriptor[];
+  settings: AgentToolSettings;
+  categories: Record<string, string>;
+};
+
+export type AgentToolProgressEvent = {
+  toolRequest?: AgentToolRequest;
+  status: 'queued' | 'running' | 'completed' | 'error' | 'canceled' | string;
+  message: string;
+  createdAt: string;
+};
 
 export type PendingAgentAction = {
   id: string;
@@ -380,6 +468,7 @@ export type PendingAgentAction = {
   reason: string;
   createdAt: string;
   status: PendingAgentActionStatus;
+  toolRequest?: AgentToolRequest;
 };
 
 export type AgentTaskItem = {
@@ -683,8 +772,21 @@ export type AgentRunPayload = {
   } | null;
   contextItems?: AgentContextItem[];
   boardContext?: {
+    id?: string;
     name: string;
     fqbn: string;
+  } | null;
+  localBoardContext?: {
+    profileId?: string;
+    name: string;
+    fqbn: string;
+    port: string;
+    boardLabel?: string;
+    connected?: boolean;
+  } | null;
+  arduinoPreferences?: {
+    verifyBeforeUpload: boolean;
+    nextReleaseVersion?: string;
   } | null;
   pendingAction?: PendingAgentAction | null;
   taskList?: AgentTaskList | null;
@@ -750,6 +852,12 @@ export type DesktopApi = {
     stop: (payload: { threadId: string }) => Promise<Result<{ stopped: boolean }>>;
     resolveApproval: (payload: { requestId: string; approved: boolean }) => Promise<AgentApprovalResolution>;
     onProgress: (callback: (event: AgentProgressEvent) => void) => () => void;
+    tools: {
+      listSettings: () => Promise<Result<AgentToolSettingsResponse>>;
+      updateSettings: (payload: { tools: Record<string, boolean | { enabled: boolean }> }) => Promise<Result<AgentToolSettingsResponse>>;
+      onSettingsChanged: (callback: (settings: AgentToolSettingsResponse) => void) => () => void;
+      onProgress: (callback: (event: AgentToolProgressEvent) => void) => () => void;
+    };
   };
   cloud: {
     auth: {
@@ -759,14 +867,15 @@ export type DesktopApi = {
       signOut: () => Promise<Result>;
     };
     databases: {
-      listDocuments: (payload: { databaseId: string; collectionId: string; queries?: string[] }) => Promise<Result<{ total: number; documents: Array<Record<string, unknown>> }>>;
+      listDocuments: (payload: { databaseId: string; collectionId: string; queries?: string[]; cacheTtlMs?: number; cacheKey?: string; bypassCache?: boolean }) => Promise<Result<{ total: number; documents: Array<Record<string, unknown>> }>>;
       createDocument: (payload: { databaseId: string; collectionId: string; documentId: string; data: Record<string, unknown>; permissions?: string[] }) => Promise<Result<{ document: Record<string, unknown> }>>;
       updateDocument: (payload: { databaseId: string; collectionId: string; documentId: string; data: Record<string, unknown>; permissions?: string[] }) => Promise<Result<{ document: Record<string, unknown> }>>;
       deleteDocument: (payload: { databaseId: string; collectionId: string; documentId: string }) => Promise<Result>;
     };
     storage: {
-      createFile: (payload: { bucketId: string; fileId: string; filename: string; base64: string; contentType?: string; permissions?: string[] }) => Promise<Result<{ file: Record<string, unknown> }>>;
+      createFile: (payload: { bucketId: string; fileId: string; filename: string; base64: string; contentType?: string; permissions?: string[]; progressId?: string }) => Promise<Result<{ file: Record<string, unknown> }>>;
       deleteFile: (payload: { bucketId: string; fileId: string }) => Promise<Result>;
+      onUploadProgress: (callback: (event: StorageUploadProgressEvent) => void) => () => void;
     };
     functions: {
       createExecution: (payload: { functionId: string; body: string; async?: boolean; pathName?: string; method?: string; headers?: Record<string, string> }) => Promise<Result<{ execution: Record<string, unknown> }>>;
@@ -850,17 +959,19 @@ export type DesktopApi = {
     }) => Promise<Result<{ config: GitConfiguration }>>;
   };
   secrets: {
-    setBoardSecrets: (payload: { boardId: string; apiToken?: string; wifiPassword?: string }) => Promise<Result>;
-    getBoardSecrets: (boardId: string) => Promise<Result<{ secrets: { apiToken?: string; wifiPassword?: string; updatedAt?: string } | null }>>;
+    setBoardSecrets: (payload: { boardId: string; apiToken?: string; commandSecret?: string; mqttTopic?: string; provisioningPop?: string }) => Promise<Result>;
+    getBoardSecrets: (boardId: string) => Promise<Result<{ secrets: { apiToken?: string; commandSecret?: string; mqttTopic?: string; provisioningPop?: string; updatedAt?: string } | null }>>;
     deleteBoardSecrets: (boardId: string) => Promise<Result>;
   };
   toolchain: {
-    compile: (payload: { code: string; board: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string }>>;
+    compile: (payload: { code: string; board: string; cloudRuntime?: Record<string, unknown> | null; compileId?: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string; cloudRuntime?: boolean }>>;
     detectLocalBoards: (payload?: { portsOnly?: boolean; probeEsp?: boolean; aiFallback?: boolean }) => Promise<Result<{ boards: LocalBoardDetection[]; ports?: LocalBoardPort[]; detectedAt: string }>>;
     listLocalBoardProfiles: () => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     saveLocalBoardProfile: (payload: Partial<LocalBoardProfile>) => Promise<Result<{ profile: LocalBoardProfile }>>;
     deleteLocalBoardProfile: (profileId: string) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
-    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string }) => Promise<Result<{ message?: string; output?: string; board: string; port: string }>>;
+    replaceLocalBoardProfiles: (profiles: Array<Partial<LocalBoardProfile>>) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
+    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string; cloudRuntime?: Record<string, unknown> | null }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean }>>;
+    provisionBoardWifiUsb: (payload: { boardId: string; port: string; ssid: string; password: string }) => Promise<Result<{ status?: string; message?: string; boardId: string; port: string }>>;
     installBoardPackage: (payload: { packageName: string; packageUrl?: string | null; installId?: string }) => Promise<Result<{ output?: string; installId?: string }>>;
     cancelBoardPackageInstall: (payload: { installId: string }) => Promise<Result<{ alreadyStopped?: boolean }>>;
     removeBoardPackage: (payload: { packageName: string }) => Promise<Result<{ output?: string }>>;
@@ -888,6 +999,7 @@ export type DesktopApi = {
     listPorts: () => Promise<Result<{ ports: PortInfo[] }>>;
     provisionBoard: (payload: Record<string, unknown>) => Promise<Result<{ message?: string; output?: string }>>;
     installEsp32Support: () => Promise<Result<{ message?: string; output?: string }>>;
+    onCompileProgress: (callback: (event: CompileProgressEvent) => void) => () => void;
     onInstallProgress: (callback: (chunk: string) => void) => () => void;
     onUsbUploadProgress: (callback: (event: UsbUploadProgressEvent) => void) => () => void;
     onLibraryInstallProgress: (callback: (event: LibraryInstallProgressEvent) => void) => () => void;
@@ -901,6 +1013,14 @@ export type DesktopApi = {
     resize: (payload: { sessionId: string; cols: number; rows: number }) => void;
     onData: (callback: (event: TerminalDataEvent) => void) => () => void;
     onExit: (callback: (event: TerminalExitEvent) => void) => () => void;
+  };
+  serialMonitor: {
+    open: (options: { port: string; baudRate?: number }) => Promise<Result<{ sessionId: string; port: string; baudRate: number }>>;
+    close: (sessionId: string) => Promise<Result>;
+    write: (payload: { sessionId: string; data: string }) => void;
+    onData: (callback: (event: SerialMonitorDataEvent) => void) => () => void;
+    onError: (callback: (event: SerialMonitorErrorEvent) => void) => () => void;
+    onClose: (callback: (event: SerialMonitorCloseEvent) => void) => () => void;
   };
 };
 

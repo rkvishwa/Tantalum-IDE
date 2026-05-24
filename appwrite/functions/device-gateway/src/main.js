@@ -1,8 +1,6 @@
 import crypto from 'node:crypto';
 
-import sdk from 'node-appwrite';
-
-const { Client, Databases, Query } = sdk;
+import { Client, Databases } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -12,6 +10,8 @@ const {
   APPWRITE_FIRMWARE_COLLECTION_ID,
   APPWRITE_FIRMWARE_BUCKET_ID,
 } = process.env;
+
+const DEFAULT_RECOMMENDED_POLL_MS = 15 * 60 * 1000;
 
 function createAdminClient(req) {
   if (!APPWRITE_FUNCTION_API_ENDPOINT || !APPWRITE_FUNCTION_PROJECT_ID) {
@@ -98,46 +98,166 @@ async function resolveBoard(databases, payload) {
   return board;
 }
 
+async function resolveDesiredFirmware(databases, board) {
+  if (!board.desiredFirmwareId) {
+    return null;
+  }
+
+  try {
+    return await databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_FIRMWARE_COLLECTION_ID, board.desiredFirmwareId);
+  } catch {
+    return null;
+  }
+}
+
+function hasPendingDesiredFirmware(board, payload) {
+  if (!board.desiredFirmwareId) {
+    return false;
+  }
+
+  const deploymentId = board.desiredDeploymentId || board.desiredFirmwareId;
+  if (deploymentId && (payload.lastAppliedDeploymentId === deploymentId || board.lastAppliedDeploymentId === deploymentId)) {
+    return false;
+  }
+
+  if (deploymentId && board.otaStatus === 'failed') {
+    return false;
+  }
+
+  return payload.firmwareId !== board.desiredFirmwareId || Boolean(deploymentId);
+}
+
+function signOtaCommand(apiToken, command) {
+  const message = [
+    command.deploymentId || '',
+    command.firmwareId || '',
+    command.version || '',
+    command.size || 0,
+    command.checksum || '',
+    command.downloadUrl || '',
+  ].join('\n');
+
+  return crypto.createHmac('sha256', apiToken).update(message).digest('hex');
+}
+
+function shouldOfferUpdate(board, firmware, payload) {
+  if (!firmware) {
+    return false;
+  }
+
+  const deploymentId = board.desiredDeploymentId || firmware.$id;
+  if (deploymentId && (payload.lastAppliedDeploymentId === deploymentId || board.lastAppliedDeploymentId === deploymentId)) {
+    return false;
+  }
+
+  if (deploymentId && board.desiredDeploymentId === deploymentId && board.otaStatus === 'failed') {
+    return false;
+  }
+
+  if (payload.firmwareId && payload.firmwareId === firmware.$id && compareVersions(firmware.version, payload.currentVersion) <= 0) {
+    return false;
+  }
+
+  return compareVersions(firmware.version, payload.currentVersion) > 0 || payload.firmwareId !== firmware.$id;
+}
+
+function buildOtaCommand(board, firmware, payload) {
+  const command = {
+    deploymentId: board.desiredDeploymentId || firmware.$id,
+    firmwareId: firmware.$id,
+    version: firmware.version,
+    size: firmware.size,
+    checksum: firmware.checksum,
+    downloadUrl: buildDownloadUrl(firmware.fileId),
+  };
+  command.signature = signOtaCommand(payload.apiToken, command);
+  return command;
+}
+
+async function buildDeviceResponse(databases, board, payload, options = {}) {
+  const shouldResolveFirmware = options.resolveFirmware || hasPendingDesiredFirmware(board, payload);
+  const firmware = shouldResolveFirmware ? await resolveDesiredFirmware(databases, board) : null;
+  const data = {
+    recommendedPollMs: DEFAULT_RECOMMENDED_POLL_MS,
+  };
+
+  if (shouldOfferUpdate(board, firmware, payload)) {
+    data.otaCommand = buildOtaCommand(board, firmware, payload);
+  }
+
+  if (board.provisioningStatus === 'requested') {
+    data.provisioningCommand = {
+      open: true,
+      mode: board.provisioningMode || 'auto',
+      requestedAt: board.provisioningRequestedAt || null,
+    };
+  }
+
+  return data;
+}
+
 async function handleHeartbeat(databases, payload, res) {
   const board = await resolveBoard(databases, payload);
-  await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, {
-    status: 'online',
-    lastSeen: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
+  const now = new Date().toISOString();
 
-  return ok(res, { received: true });
+  const updates = {
+    status: 'online',
+    lastSeen: now,
+    updatedAt: now,
+  };
+
+  if (payload.runtimeVersion) {
+    updates.runtimeVersion = String(payload.runtimeVersion);
+  }
+
+  await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
+  const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload);
+  return ok(res, response);
 }
 
 async function handleCheckUpdate(databases, payload, res) {
   const board = await resolveBoard(databases, payload);
-  const firmwareList = await databases.listDocuments(
-    APPWRITE_DATABASE_ID,
-    APPWRITE_FIRMWARE_COLLECTION_ID,
-    [Query.equal('boardId', board.$id)],
-  );
+  const now = new Date().toISOString();
+  const updates = {
+    lastUpdateCheckAt: now,
+    lastSeen: now,
+    status: 'online',
+    updatedAt: now,
+  };
 
-  const deployedFirmware = firmwareList.documents
-    .filter((firmware) => firmware.deployed)
-    .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt))[0];
-
-  if (!deployedFirmware) {
-    return ok(res, { updateAvailable: false });
+  if (payload.runtimeVersion) {
+    updates.runtimeVersion = String(payload.runtimeVersion);
   }
 
-  if (compareVersions(deployedFirmware.version, payload.currentVersion) <= 0) {
-    return ok(res, { updateAvailable: false });
+  await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
+  const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload, { resolveFirmware: true });
+  return ok(res, response);
+}
+
+async function handleOtaResult(databases, payload, res) {
+  const board = await resolveBoard(databases, payload);
+  const now = new Date().toISOString();
+  const status = payload.status === 'success' ? 'success' : 'failed';
+
+  const updates = {
+    status: 'online',
+    lastSeen: now,
+    updatedAt: now,
+    otaStatus: status,
+    lastOtaError: status === 'failed' ? String(payload.error || 'OTA update failed.') : '',
+  };
+
+  if (payload.runtimeVersion) {
+    updates.runtimeVersion = String(payload.runtimeVersion);
   }
 
-  return ok(res, {
-    updateAvailable: true,
-    firmware: {
-      version: deployedFirmware.version,
-      size: deployedFirmware.size,
-      checksum: deployedFirmware.checksum,
-      downloadUrl: buildDownloadUrl(deployedFirmware.fileId),
-    },
-  });
+  if (status === 'success') {
+    updates.firmwareVersion = String(payload.version || board.desiredVersion || board.firmwareVersion || '0.0.0');
+    updates.lastAppliedDeploymentId = String(payload.deploymentId || board.desiredDeploymentId || '');
+  }
+
+  const updatedBoard = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
+  return ok(res, { received: true, board: updatedBoard });
 }
 
 export default async function ({ req, res, error }) {
@@ -155,6 +275,10 @@ export default async function ({ req, res, error }) {
 
     if (req.path === '/check-update') {
       return await handleCheckUpdate(databases, payload, res);
+    }
+
+    if (req.path === '/ota-result') {
+      return await handleOtaResult(databases, payload, res);
     }
 
     return fail(res, 404, `Unknown device gateway path: ${req.path}`);

@@ -43,6 +43,12 @@ contextBridge.exposeInMainWorld("tantalum", {
     stop: (payload) => ipcRenderer.invoke("agent:stop", payload),
     resolveApproval: (payload) => ipcRenderer.invoke("agent:resolve-approval", payload),
     onProgress: (callback) => subscribe("agent:progress", callback),
+    tools: {
+      listSettings: () => ipcRenderer.invoke("agent:tools:list-settings"),
+      updateSettings: (payload) => ipcRenderer.invoke("agent:tools:update-settings", payload),
+      onSettingsChanged: (callback) => subscribe("agent:tools-settings-changed", callback),
+      onProgress: (callback) => subscribe("agent:tool-progress", callback),
+    },
   },
   cloud: {
     auth: {
@@ -59,7 +65,8 @@ contextBridge.exposeInMainWorld("tantalum", {
     },
     storage: {
       createFile: (payload) => ipcRenderer.invoke("cloud:storage:create-file", payload),
-      deleteFile: (payload) => ipcRenderer.invoke("cloud:storage:delete-file", payload)
+      deleteFile: (payload) => ipcRenderer.invoke("cloud:storage:delete-file", payload),
+      onUploadProgress: (callback) => subscribe("cloud:storage-upload-progress", callback)
     },
     functions: {
       createExecution: (payload) => ipcRenderer.invoke("cloud:functions:create-execution", payload)
@@ -137,6 +144,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     listLocalBoardProfiles: () => ipcRenderer.invoke("toolchain:list-local-board-profiles"),
     saveLocalBoardProfile: (payload) => ipcRenderer.invoke("toolchain:save-local-board-profile", payload),
     deleteLocalBoardProfile: (profileId) => ipcRenderer.invoke("toolchain:delete-local-board-profile", profileId),
+    replaceLocalBoardProfiles: (profiles) => ipcRenderer.invoke("toolchain:replace-local-board-profiles", profiles),
     uploadLocalSketch: (payload) => ipcRenderer.invoke("toolchain:upload-local-sketch", payload),
     installBoardPackage: (payload) => ipcRenderer.invoke("toolchain:install-board-package", payload),
     cancelBoardPackageInstall: (payload) => ipcRenderer.invoke("toolchain:cancel-board-package-install", payload),
@@ -158,7 +166,9 @@ contextBridge.exposeInMainWorld("tantalum", {
     listInstalledLibraries: () => ipcRenderer.invoke("toolchain:list-installed-libraries"),
     listPorts: () => ipcRenderer.invoke("toolchain:list-ports"),
     provisionBoard: (payload) => ipcRenderer.invoke("toolchain:provision-board", payload),
+    provisionBoardWifiUsb: (payload) => ipcRenderer.invoke("toolchain:provision-board-wifi-usb", payload),
     installEsp32Support: () => ipcRenderer.invoke("toolchain:install-esp32-support"),
+    onCompileProgress: (callback) => subscribe("toolchain:compile-progress", callback),
     onInstallProgress: (callback) => subscribe("toolchain:install-progress", callback),
     onUsbUploadProgress: (callback) => subscribe("toolchain:usb-upload-progress", callback),
     onLibraryInstallProgress: (callback) => subscribe("toolchain:library-install-progress", callback),
@@ -172,5 +182,13 @@ contextBridge.exposeInMainWorld("tantalum", {
     resize: (payload) => ipcRenderer.send("terminal:resize", payload),
     onData: (callback) => subscribe("terminal:data", callback),
     onExit: (callback) => subscribe("terminal:exit", callback)
+  },
+  serialMonitor: {
+    open: (options) => ipcRenderer.invoke("serial-monitor:open", options),
+    close: (sessionId) => ipcRenderer.invoke("serial-monitor:close", sessionId),
+    write: (payload) => ipcRenderer.send("serial-monitor:write", payload),
+    onData: (callback) => subscribe("serial-monitor:data", callback),
+    onError: (callback) => subscribe("serial-monitor:error", callback),
+    onClose: (callback) => subscribe("serial-monitor:close", callback)
   }
 });

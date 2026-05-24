@@ -42,7 +42,7 @@ export function nextSemver(version: string) {
 }
 
 export function calculateBoardStatus(lastSeen: string | null | undefined, persistedStatus: string) {
-  if (persistedStatus === 'pending') {
+  if (persistedStatus === 'pending' && !lastSeen) {
     return 'pending';
   }
 
@@ -51,7 +51,7 @@ export function calculateBoardStatus(lastSeen: string | null | undefined, persis
   }
 
   const ageInMinutes = (Date.now() - new Date(lastSeen).getTime()) / 60000;
-  return ageInMinutes <= 2 ? 'online' : 'offline';
+  return ageInMinutes <= 5 ? 'online' : 'offline';
 }
 
 export function fileNameFromPath(filePath: string) {

@@ -2,13 +2,50 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron")
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const http = require("node:http");
+const https = require("node:https");
 const fs = require("node:fs");
 const fsPromises = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+const { Permission, Query, Role } = require("appwrite");
+
+function isBrokenPipeError(error) {
+  return error?.code === "EPIPE" || /EPIPE|broken pipe/i.test(String(error?.message || ""));
+}
+
+function installSafeConsole() {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream?.on?.("error", (error) => {
+      if (!isBrokenPipeError(error)) {
+        return;
+      }
+      // Electron can outlive the launcher pipe on Windows; logging must not crash the app.
+    });
+  }
+
+  for (const method of ["log", "info", "warn", "error", "debug"]) {
+    const original = console[method]?.bind(console);
+    if (typeof original !== "function") {
+      continue;
+    }
+
+    console[method] = (...args) => {
+      try {
+        original(...args);
+      } catch (error) {
+        if (!isBrokenPipeError(error)) {
+          throw error;
+        }
+      }
+    };
+  }
+}
+
+installSafeConsole();
 
 const {
+  buildTantalumWifiHostname,
   compileArduino,
   configureArduinoStorageRoot,
   getFeaturedLibraries,
@@ -28,6 +65,8 @@ const {
 } = require("./arduinoHandler");
 const { SecurityManager } = require("./src/agent/securityManager");
 const { AgentRuntimeManager } = require("./src/agent/opencodeRuntimeManager");
+const { AgentToolRegistry } = require("./src/agent/toolRegistry");
+const { AgentToolExecutor } = require("./src/agent/toolExecutor");
 const { deriveFunctionId, getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
 const { detectLocalBoardsDeterministic } = require("./src/services/localBoardService");
@@ -50,6 +89,7 @@ void loop() {
 `;
 const LOCAL_BOARD_PROFILES_KEY = "localBoardProfiles";
 const ARDUINO_STORAGE_ROOT_KEY = "arduinoStorageRoot";
+const AGENT_TOOL_SETTINGS_KEY = "agentToolSettings";
 const BOARD_DETECTION_FUNCTION_ID = deriveFunctionId(appwriteManifest, "board-detection");
 const TOOLCHAIN_NOTIFICATIONS_KEY = "toolchainNotifications";
 const TOOLCHAIN_NOTIFICATIONS_LIMIT = 100;
@@ -59,15 +99,57 @@ let preferenceStore = null;
 let secretStore = null;
 let currentWorkspace = null;
 let terminalSessionCounter = 0;
+let serialMonitorSessionCounter = 0;
 let rendererServer = null;
 let rendererServerUrl = null;
 const trustedRoots = new Set();
 const terminalSessions = new Map();
+const serialMonitorSessions = new Map();
+const activeSerialMonitorPorts = new Map();
 const activeBoardPackageInstalls = new Map();
 const activeLibraryInstallOperations = new Map();
 const activeLocalUploadPorts = new Set();
 const workspaceScanner = new WorkspaceScanner();
 const securityManager = new SecurityManager();
+const agentToolRegistry = new AgentToolRegistry();
+const agentToolExecutor = new AgentToolExecutor({
+  registry: agentToolRegistry,
+  getSettings: getAgentToolSettings,
+  getWorkspaceRoot: () => currentWorkspace,
+  compileArduino,
+  uploadLocalSketch: uploadLocalSketchForAgent,
+  installLibrary,
+  installBoardPackage,
+  listInstalledLibraries,
+  listInstalledPlatforms,
+  registerLibraryInstall: (installId, controller, metadata = {}) => {
+    activeLibraryInstallOperations.set(installId, {
+      controller,
+      sender: { send: (channel, payload) => sendRendererEvent(channel, payload) },
+      name: metadata.name,
+      version: metadata.version,
+    });
+  },
+  unregisterLibraryInstall: (installId) => activeLibraryInstallOperations.delete(installId),
+  registerBoardPackageInstall: (installId, controller) => activeBoardPackageInstalls.set(installId, controller),
+  unregisterBoardPackageInstall: (installId) => activeBoardPackageInstalls.delete(installId),
+  emitToolchainEvent: (channel, payload) => sendRendererEvent(channel, payload),
+  emitProgress: (event) => sendRendererEvent("agent:tool-progress", event),
+  upsertNotification: upsertToolchainNotification,
+  uploadCloudFirmware: uploadCloudFirmwareFromAgent,
+  git: {
+    getStatus: getGitStatus,
+    getDiff: getAgentGitDiff,
+    getLog: getGitLog,
+    stage: stageGitPathsForAgent,
+    commit: commitGitForAgent,
+    branch: branchGitForAgent,
+    pull: pullGitForAgent,
+    push: pushGitForAgent,
+    discard: discardGitPaths,
+    publish: publishGitRepository,
+  },
+});
 const agentRuntimeManager = new AgentRuntimeManager({
   app,
   getWorkspaceRoot: () => currentWorkspace,
@@ -75,6 +157,10 @@ const agentRuntimeManager = new AgentRuntimeManager({
   securityManager,
   markWorkspaceDirty,
   addRecentFile,
+  toolRegistry: agentToolRegistry,
+  toolExecutor: agentToolExecutor,
+  getAgentToolSettings,
+  listInstalledLibraries,
   emitProgress: (event) => sendRendererEvent("agent:progress", event),
 });
 
@@ -170,6 +256,19 @@ function normalizeNotificationText(value, fallback = "") {
   return String(value ?? fallback).trim();
 }
 
+function latestToolchainProgressLine(value, fallback = "") {
+  const lines = String(value || "")
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^\d{1,3}(?:\.\d+)?\s*%$/.test(line));
+
+  return normalizeNotificationText(lines.at(-1), fallback);
+}
+
 function normalizeToolchainNotification(entry, existing = null) {
   const source = entry && typeof entry === "object" ? entry : {};
   const now = Date.now();
@@ -242,6 +341,42 @@ function upsertToolchainNotification(notification) {
 
 function clearToolchainNotifications() {
   return persistToolchainNotifications([]);
+}
+
+function getAgentToolSettings() {
+  return agentToolRegistry.normalizeSettings(preferenceStore?.get(AGENT_TOOL_SETTINGS_KEY));
+}
+
+function updateAgentToolSettings(patch = {}) {
+  const current = getAgentToolSettings();
+  const incomingTools = patch && typeof patch === "object" && patch.tools && typeof patch.tools === "object" ? patch.tools : {};
+  const nextTools = { ...current.tools };
+
+  for (const descriptor of agentToolRegistry.listDescriptors()) {
+    if (!Object.prototype.hasOwnProperty.call(incomingTools, descriptor.id)) {
+      continue;
+    }
+
+    const incoming = incomingTools[descriptor.id];
+    const enabled =
+      typeof incoming === "boolean"
+        ? incoming
+        : incoming && typeof incoming === "object" && typeof incoming.enabled === "boolean"
+          ? incoming.enabled
+          : nextTools[descriptor.id]?.enabled;
+    nextTools[descriptor.id] = {
+      enabled: descriptor.available === false ? false : Boolean(enabled),
+    };
+  }
+
+  const next = agentToolRegistry.normalizeSettings({
+    tools: nextTools,
+    updatedAt: new Date().toISOString(),
+  });
+  preferenceStore?.set(AGENT_TOOL_SETTINGS_KEY, next);
+  const response = agentToolRegistry.settingsResponse(next);
+  sendRendererEvent("agent:tools-settings-changed", response);
+  return response;
 }
 
 function interruptActiveToolchainNotifications() {
@@ -319,6 +454,10 @@ function normalizeLocalBoardProfile(entry) {
     fingerprint: normalizeBoardText(source.fingerprint, 128),
     confidence: Number.isFinite(Number(source.confidence)) ? Number(source.confidence) : null,
     connected: Boolean(source.connected),
+    cloudBoardId: normalizeBoardText(source.cloudBoardId, 128),
+    cloudLinkedAt: normalizeBoardText(source.cloudLinkedAt, 64),
+    lastCloudProvisionedAt: normalizeBoardText(source.lastCloudProvisionedAt, 64),
+    lastCloudUsbUploadAt: normalizeBoardText(source.lastCloudUsbUploadAt, 64),
     createdAt: normalizeBoardText(source.createdAt, 64) || now,
     updatedAt: now
   };
@@ -348,6 +487,36 @@ function getLocalBoardProfiles() {
   return normalized;
 }
 
+function findLocalBoardProfileMatch(profile, profiles, usedIds = new Set(), allowVidPidFallback = false) {
+  const availableProfiles = profiles.filter((entry) => !usedIds.has(entry.id));
+  const strongMatch = availableProfiles.find((entry) => {
+    return (
+      entry.id === profile.id ||
+      (profile.fingerprint && entry.fingerprint === profile.fingerprint) ||
+      (profile.serialNumber && entry.serialNumber === profile.serialNumber) ||
+      (profile.pnpId && entry.pnpId === profile.pnpId) ||
+      (profile.locationId && entry.locationId === profile.locationId) ||
+      (profile.port && entry.port === profile.port)
+    );
+  });
+
+  if (strongMatch || !allowVidPidFallback) {
+    return strongMatch || null;
+  }
+
+  if (profile.vendorId && profile.productId) {
+    const vidPidMatches = availableProfiles.filter((entry) => entry.vendorId === profile.vendorId && entry.productId === profile.productId);
+    if (vidPidMatches.length === 1) {
+      return vidPidMatches[0];
+    }
+  }
+
+  const cloudLinkedTypeMatches = availableProfiles.filter((entry) => {
+    return Boolean(entry.cloudBoardId && profile.fqbn && entry.fqbn === profile.fqbn);
+  });
+  return cloudLinkedTypeMatches.length === 1 ? cloudLinkedTypeMatches[0] : null;
+}
+
 function saveLocalBoardProfile(profile) {
   const normalized = normalizeLocalBoardProfile(profile);
   if (!normalized?.fqbn) {
@@ -359,27 +528,39 @@ function saveLocalBoardProfile(profile) {
   }
 
   const profiles = getLocalBoardProfiles();
-  const existingIndex = profiles.findIndex((entry) => {
-    return (
-      entry.id === normalized.id ||
-      (normalized.fingerprint && entry.fingerprint === normalized.fingerprint) ||
-      (normalized.serialNumber && entry.serialNumber === normalized.serialNumber)
-    );
-  });
+  const existingProfile = findLocalBoardProfileMatch(normalized, profiles, new Set(), true);
+  const existingIndex = existingProfile ? profiles.findIndex((entry) => entry.id === existingProfile.id) : -1;
 
   const nextProfile =
     existingIndex >= 0
-      ? {
+      ? preserveLocalBoardCloudLink({
           ...profiles[existingIndex],
           ...normalized,
           id: profiles[existingIndex].id,
           createdAt: profiles[existingIndex].createdAt,
           updatedAt: new Date().toISOString(),
-        }
+        }, profiles[existingIndex], profile)
       : normalized;
-  const nextProfiles = [nextProfile];
+  const nextProfiles =
+    existingIndex >= 0
+      ? profiles.map((entry, index) => (index === existingIndex ? nextProfile : entry))
+      : [nextProfile, ...profiles];
 
   preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, nextProfiles);
+  return nextProfile;
+}
+
+function preserveLocalBoardCloudLink(nextProfile, existingProfile, sourceProfile) {
+  if (!existingProfile || !sourceProfile || typeof sourceProfile !== "object") {
+    return nextProfile;
+  }
+
+  for (const key of ["cloudBoardId", "cloudLinkedAt", "lastCloudProvisionedAt", "lastCloudUsbUploadAt"]) {
+    if (!Object.prototype.hasOwnProperty.call(sourceProfile, key)) {
+      nextProfile[key] = existingProfile[key] || "";
+    }
+  }
+
   return nextProfile;
 }
 
@@ -389,7 +570,61 @@ function deleteLocalBoardProfile(profileId) {
     throw new Error("A local board profile ID is required.");
   }
 
+  const nextProfiles = getLocalBoardProfiles().filter((profile) => profile.id !== id);
+  preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, nextProfiles);
+  return nextProfiles;
+}
+
+function replaceLocalBoardProfiles(profiles) {
+  if (!Array.isArray(profiles)) {
+    throw new Error("Local board profiles must be an array.");
+  }
+
+  const existingProfiles = getLocalBoardProfiles();
   const nextProfiles = [];
+  const seen = new Set();
+  const usedExistingIds = new Set();
+
+  for (const profile of profiles) {
+    const normalized = normalizeLocalBoardProfile(profile);
+    if (!normalized?.port) {
+      continue;
+    }
+
+    const existingProfile = findLocalBoardProfileMatch(normalized, existingProfiles, usedExistingIds, true);
+    const nextProfile = existingProfile
+      ? preserveLocalBoardCloudLink({
+          ...existingProfile,
+          ...normalized,
+          id: existingProfile.id,
+          name: normalized.name || existingProfile.name,
+          createdAt: existingProfile.createdAt,
+          updatedAt: new Date().toISOString(),
+        }, existingProfile, profile)
+      : normalized;
+
+    if (!seen.has(nextProfile.id)) {
+      seen.add(nextProfile.id);
+      if (existingProfile) {
+        usedExistingIds.add(existingProfile.id);
+      }
+      nextProfiles.push(nextProfile);
+    }
+  }
+
+  for (const existingProfile of existingProfiles) {
+    if (!existingProfile.cloudBoardId || usedExistingIds.has(existingProfile.id) || seen.has(existingProfile.id)) {
+      continue;
+    }
+
+    seen.add(existingProfile.id);
+    nextProfiles.push({
+      ...existingProfile,
+      connected: false,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   preferenceStore?.set(LOCAL_BOARD_PROFILES_KEY, nextProfiles);
   return nextProfiles;
 }
@@ -1700,6 +1935,91 @@ async function discardGitPaths(payload = {}) {
   return { output: formatGitCommandOutput(result) || `Discarded ${paths.length} ${paths.length === 1 ? "file" : "files"}.` };
 }
 
+async function getAgentGitDiff(payload = {}) {
+  const pathValue = String(payload.path ?? "").trim();
+  const mode = payload.mode === "staged" ? "staged" : "working-tree";
+  if (!pathValue) {
+    const result = await runGit(mode === "staged" ? ["diff", "--staged"] : ["diff"], { allowFailure: true });
+    if (result.code !== 0) {
+      throw classifyGitFailure(["diff"], result.stdout, result.stderr, result.code);
+    }
+    return {
+      mode,
+      output: formatGitCommandOutput(result) || "No Git diff.",
+    };
+  }
+
+  return getGitDiff({ ...payload, mode, path: pathValue });
+}
+
+async function stageGitPathsForAgent(payload = {}) {
+  const rawPaths = Array.isArray(payload.paths ?? payload.path) ? payload.paths ?? payload.path : [payload.paths ?? payload.path];
+  const stageAll = rawPaths.length === 0 || rawPaths.some((entry) => !String(entry ?? "").trim() || String(entry ?? "").trim() === ".");
+  const result = stageAll
+    ? await runGit(["add", "-A"])
+    : await runGit(["add", "--", ...normalizeGitPathList(rawPaths)]);
+  markWorkspaceDirty();
+  return { output: formatGitCommandOutput(result) || (stageAll ? "Staged all Git changes." : "Staged Git changes.") };
+}
+
+async function commitGitForAgent(payload = {}) {
+  const message = String(payload.message ?? "").trim();
+  if (!message) {
+    throw new Error("Write a commit message before committing.");
+  }
+
+  const result = await runGit(["commit", "-m", message], { timeoutMs: GIT_COMMAND_NETWORK_TIMEOUT_MS });
+  markWorkspaceDirty();
+  return { output: formatGitCommandOutput(result) || "Committed changes." };
+}
+
+async function branchGitForAgent(payload = {}) {
+  const branch = String(payload.branch ?? "").trim();
+  if (!branch) {
+    throw new Error("Use a valid Git branch name.");
+  }
+
+  await runGit(["check-ref-format", "--branch", branch]);
+  const mode = payload.mode === "checkout" ? "checkout" : "create";
+  const result = await runGit(mode === "checkout" ? ["checkout", branch] : ["checkout", "-b", branch]);
+  markWorkspaceDirty();
+  return { output: formatGitCommandOutput(result) || (mode === "checkout" ? `Switched to ${branch}.` : `Created ${branch}.`) };
+}
+
+async function pullGitForAgent() {
+  const result = await runGit(["pull", "--ff-only"], { timeoutMs: GIT_COMMAND_NETWORK_TIMEOUT_MS });
+  markWorkspaceDirty();
+  return { output: formatGitCommandOutput(result) || "Pulled from upstream." };
+}
+
+async function pushGitForAgent() {
+  const result = await runGit(["push"], { timeoutMs: GIT_COMMAND_NETWORK_TIMEOUT_MS });
+  return { output: formatGitCommandOutput(result) || "Pushed to upstream." };
+}
+
+async function uploadLocalSketchForAgent(code, board, port, onProgress, options = {}) {
+  const portValue = String(port || "").trim();
+  const portKey = portValue.toLowerCase();
+  if (portKey && activeLocalUploadPorts.has(portKey)) {
+    throw new Error(`A USB upload is already running on ${portValue}. Wait for it to finish before starting another upload.`);
+  }
+  if (portKey && activeSerialMonitorPorts.has(portKey)) {
+    throw new Error(`Serial Monitor is open on ${portValue}. Disconnect it before uploading.`);
+  }
+
+  if (portKey) {
+    activeLocalUploadPorts.add(portKey);
+  }
+
+  try {
+    return await uploadLocalSketch(code, board, port, onProgress, options);
+  } finally {
+    if (portKey) {
+      activeLocalUploadPorts.delete(portKey);
+    }
+  }
+}
+
 const WORKSPACE_SEARCH_DEFAULT_MAX_RESULTS = 300;
 const WORKSPACE_SEARCH_MAX_RESULTS = 1000;
 const WORKSPACE_SEARCH_MAX_FILE_SIZE = "2M";
@@ -2747,6 +3067,7 @@ function getAppwriteSessionHeaders() {
 function clearAppwriteSession() {
   secretStore?.delete("appwrite.sessionFallback");
   secretStore?.delete("appwrite.sessionCookie");
+  clearAppwriteReadCache();
 }
 
 function storeAppwriteSession(response) {
@@ -2788,7 +3109,282 @@ async function readAppwritePayload(response) {
   return { message: text };
 }
 
-async function appwriteRequest({ method = "GET", pathName, queries = [], body, formData, useSession = true }) {
+function headerListValue(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).join(", ");
+  }
+
+  return typeof value === "string" ? value : "";
+}
+
+function storeAppwriteSessionFromNodeHeaders(headers = {}) {
+  const fallbackCookies = headerListValue(headers["x-fallback-cookies"]);
+  if (fallbackCookies) {
+    secretStore?.set("appwrite.sessionFallback", fallbackCookies);
+  }
+
+  const cookies = Array.isArray(headers["set-cookie"])
+    ? headers["set-cookie"]
+    : typeof headers["set-cookie"] === "string"
+      ? [headers["set-cookie"]]
+      : [];
+
+  if (cookies.length > 0) {
+    const cookieHeader = cookies
+      .map((value) => String(value).split(";")[0])
+      .filter(Boolean)
+      .join("; ");
+
+    if (cookieHeader) {
+      secretStore?.set("appwrite.sessionCookie", cookieHeader);
+    }
+  }
+}
+
+function parseAppwriteNodePayload(headers, buffer) {
+  const text = buffer.toString("utf8");
+  if (headerListValue(headers["content-type"]).includes("application/json")) {
+    try {
+      return JSON.parse(text || "{}");
+    } catch {
+      return { message: text };
+    }
+  }
+
+  return { message: text };
+}
+
+async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [], rawBody, headers: requestHeaders = {}, useSession = true }, onUploadProgress) {
+  if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
+    throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
+  }
+
+  const normalizedPath = String(pathName || "").replace(/^\/+/, "");
+  const url = new URL(`${APPWRITE_ENDPOINT}/${normalizedPath}`);
+  const bodyBuffer = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody || "");
+  const headers = {
+    "X-Appwrite-Project": APPWRITE_PROJECT_ID,
+    "X-Appwrite-Response-Format": "1.4.0",
+    "Content-Length": String(bodyBuffer.length),
+  };
+
+  if (Array.isArray(queries)) {
+    queries.filter(Boolean).forEach((query) => {
+      url.searchParams.append("queries[]", query);
+    });
+  }
+
+  if (useSession) {
+    Object.assign(headers, getAppwriteSessionHeaders());
+  }
+  Object.assign(headers, requestHeaders);
+
+  const transport = url.protocol === "https:" ? https : http;
+  const totalBytes = bodyBuffer.length;
+
+  return await new Promise((resolve, reject) => {
+    const request = transport.request(url, { method, headers }, (response) => {
+      const chunks = [];
+
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        storeAppwriteSessionFromNodeHeaders(response.headers);
+        const payload = parseAppwriteNodePayload(response.headers, Buffer.concat(chunks));
+
+        if (Number(response.statusCode || 0) < 200 || Number(response.statusCode || 0) >= 300) {
+          const error = new Error(payload?.message || `Appwrite request failed with status ${response.statusCode}.`);
+          error.status = response.statusCode;
+          error.type = payload?.type || "appwrite_error";
+          reject(error);
+          return;
+        }
+
+        resolve(payload);
+      });
+    });
+
+    request.on("error", reject);
+
+    let sentBytes = 0;
+    const chunkSize = 256 * 1024;
+    const emitProgress = () => {
+      onUploadProgress?.({
+        sentBytes,
+        totalBytes,
+        progress: totalBytes > 0 ? Math.max(0, Math.min(100, (sentBytes / totalBytes) * 100)) : 100,
+      });
+    };
+
+    const writeNextChunk = () => {
+      if (sentBytes >= totalBytes) {
+        request.end();
+        emitProgress();
+        return;
+      }
+
+      const nextSentBytes = Math.min(totalBytes, sentBytes + chunkSize);
+      const canContinue = request.write(bodyBuffer.subarray(sentBytes, nextSentBytes));
+      sentBytes = nextSentBytes;
+      emitProgress();
+
+      if (canContinue) {
+        setImmediate(writeNextChunk);
+      } else {
+        request.once("drain", writeNextChunk);
+      }
+    };
+
+    emitProgress();
+    writeNextChunk();
+  });
+}
+
+const APPWRITE_READ_CACHE_MAX_ENTRIES = 200;
+const APPWRITE_BOARD_LIST_CACHE_TTL_MS = 2 * 60 * 1000;
+const APPWRITE_FIRMWARE_LIST_CACHE_TTL_MS = 5 * 60 * 1000;
+const APPWRITE_AGENT_BOOTSTRAP_CACHE_TTL_MS = 60 * 1000;
+const APPWRITE_AGENT_THREADS_CACHE_TTL_MS = 60 * 1000;
+const APPWRITE_AGENT_MESSAGES_CACHE_TTL_MS = 30 * 1000;
+const appwriteReadCache = new Map();
+const appwriteInflightReadCache = new Map();
+let appwriteReadCacheEpoch = 0;
+
+function cloneAppwritePayload(payload) {
+  try {
+    return structuredClone(payload);
+  } catch {
+    return JSON.parse(JSON.stringify(payload));
+  }
+}
+
+function appwriteSessionCacheKey(useSession = true) {
+  if (!useSession) {
+    return "public";
+  }
+
+  const headers = getAppwriteSessionHeaders();
+  return crypto
+    .createHash("sha256")
+    .update(`${headers.Cookie || ""}\n${headers["X-Fallback-Cookies"] || ""}`)
+    .digest("hex");
+}
+
+function appwriteCacheKeyForRequest(request, cacheKey) {
+  return JSON.stringify({
+    cacheKey: cacheKey || "",
+    endpoint: APPWRITE_ENDPOINT,
+    projectId: APPWRITE_PROJECT_ID,
+    session: appwriteSessionCacheKey(request.useSession !== false),
+    method: String(request.method || "GET").toUpperCase(),
+    pathName: String(request.pathName || "").replace(/^\/+/, ""),
+    queries: Array.isArray(request.queries) ? request.queries.filter(Boolean) : [],
+    body: request.body ?? null,
+  });
+}
+
+function pruneAppwriteReadCache(now = Date.now()) {
+  for (const [key, entry] of appwriteReadCache) {
+    if (entry.expiresAt <= now) {
+      appwriteReadCache.delete(key);
+    }
+  }
+
+  while (appwriteReadCache.size > APPWRITE_READ_CACHE_MAX_ENTRIES) {
+    const oldestKey = appwriteReadCache.keys().next().value;
+    if (!oldestKey) {
+      return;
+    }
+    appwriteReadCache.delete(oldestKey);
+  }
+}
+
+function clearAppwriteReadCache() {
+  appwriteReadCacheEpoch += 1;
+  appwriteReadCache.clear();
+  appwriteInflightReadCache.clear();
+}
+
+async function cachedAppwriteRequest(request, { ttlMs = 0, cacheKey = "", bypassCache = false } = {}) {
+  const safeTtlMs = Number(ttlMs || 0);
+  if (bypassCache || !Number.isFinite(safeTtlMs) || safeTtlMs <= 0) {
+    return appwriteRequest(request);
+  }
+
+  const now = Date.now();
+  pruneAppwriteReadCache(now);
+
+  const key = appwriteCacheKeyForRequest(request, cacheKey);
+  const cached = appwriteReadCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cloneAppwritePayload(cached.payload);
+  }
+
+  const inflight = appwriteInflightReadCache.get(key);
+  if (inflight) {
+    return cloneAppwritePayload(await inflight);
+  }
+
+  const cacheEpoch = appwriteReadCacheEpoch;
+  const promise = appwriteRequest({ ...request, invalidateCache: false })
+    .then((payload) => {
+      if (cacheEpoch === appwriteReadCacheEpoch) {
+        appwriteReadCache.set(key, {
+          expiresAt: Date.now() + safeTtlMs,
+          payload: cloneAppwritePayload(payload),
+        });
+        pruneAppwriteReadCache();
+      }
+      return payload;
+    })
+    .finally(() => {
+      appwriteInflightReadCache.delete(key);
+    });
+
+  appwriteInflightReadCache.set(key, promise);
+  return cloneAppwritePayload(await promise);
+}
+
+function defaultDatabaseListCacheTtlMs(collectionId) {
+  switch (collectionId) {
+    case "boards":
+      return APPWRITE_BOARD_LIST_CACHE_TTL_MS;
+    case "firmwares":
+      return APPWRITE_FIRMWARE_LIST_CACHE_TTL_MS;
+    default:
+      return 0;
+  }
+}
+
+function functionExecutionCacheTtlMs(payload) {
+  if (payload?.async) {
+    return 0;
+  }
+
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.agentSettingsFunctionId || payload?.functionId !== cloudConfig.agentSettingsFunctionId) {
+    return 0;
+  }
+
+  const pathName = String(payload?.pathName ?? "/");
+  const method = String(payload?.method ?? "POST").toUpperCase();
+  if (method !== "POST") {
+    return 0;
+  }
+
+  switch (pathName) {
+    case "/bootstrap":
+    case "/":
+      return APPWRITE_AGENT_BOOTSTRAP_CACHE_TTL_MS;
+    case "/threads/list":
+      return APPWRITE_AGENT_THREADS_CACHE_TTL_MS;
+    case "/threads/messages":
+      return APPWRITE_AGENT_MESSAGES_CACHE_TTL_MS;
+    default:
+      return 0;
+  }
+}
+
+async function appwriteRequest({ method = "GET", pathName, queries = [], body, formData, rawBody, headers: requestHeaders = {}, useSession = true, invalidateCache = true }) {
   if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
     throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
   }
@@ -2809,13 +3405,16 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   if (useSession) {
     Object.assign(headers, getAppwriteSessionHeaders());
   }
+  Object.assign(headers, requestHeaders);
 
   const options = {
     method,
     headers,
   };
 
-  if (formData) {
+  if (rawBody !== undefined) {
+    options.body = rawBody;
+  } else if (formData) {
     options.body = formData;
   } else if (body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -2833,7 +3432,369 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
     throw error;
   }
 
+  if (invalidateCache && String(method || "GET").toUpperCase() !== "GET") {
+    clearAppwriteReadCache();
+  }
+
   return payload;
+}
+
+function cloudFirmwarePermissions(userId) {
+  return [
+    Permission.read(Role.user(userId)),
+    Permission.update(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
+}
+
+function cloudFirmwareFilePermissions(userId) {
+  return [
+    Permission.read(Role.any()),
+    Permission.update(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
+}
+
+function escapeMultipartValue(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
+}
+
+function buildMultipartBody({ fields = [], files = [] }) {
+  const boundary = `----Tantalum${crypto.randomUUID().replace(/-/g, "")}`;
+  const chunks = [];
+  const appendText = (value) => chunks.push(Buffer.from(value, "utf8"));
+
+  for (const [name, value] of fields) {
+    appendText(`--${boundary}\r\n`);
+    appendText(`Content-Disposition: form-data; name="${escapeMultipartValue(name)}"\r\n\r\n`);
+    appendText(`${String(value ?? "")}\r\n`);
+  }
+
+  for (const file of files) {
+    appendText(`--${boundary}\r\n`);
+    appendText(`Content-Disposition: form-data; name="${escapeMultipartValue(file.name)}"; filename="${escapeMultipartValue(file.filename)}"\r\n`);
+    appendText(`Content-Type: ${file.contentType || "application/octet-stream"}\r\n\r\n`);
+    chunks.push(Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer || ""));
+    appendText("\r\n");
+  }
+
+  appendText(`--${boundary}--\r\n`);
+  const body = Buffer.concat(chunks);
+  return {
+    body,
+    headers: {
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      "Content-Length": String(body.length),
+    },
+  };
+}
+
+function generateCloudDocumentId(prefix) {
+  return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function sha256HexBase64(value) {
+  return crypto.createHash("sha256").update(Buffer.from(String(value || ""), "base64")).digest("hex");
+}
+
+function requireCloudConfigForFirmware() {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.databaseId || !cloudConfig.boardsCollectionId || !cloudConfig.firmwareCollectionId || !cloudConfig.firmwareBucketId) {
+    throw new Error("Cloud firmware storage is not configured.");
+  }
+
+  return cloudConfig;
+}
+
+function buildCloudRuntimeConfigForAgent(board, secrets, cloudConfig, overrides = {}) {
+  return {
+    boardId: board.$id,
+    boardName: board.name,
+    wifiHostname: buildTantalumWifiHostname(board.name, board.$id),
+    apiToken: secrets.apiToken,
+    commandSecret: secrets.commandSecret,
+    mqttTopic: secrets.mqttTopic,
+    provisioningPop: secrets.provisioningPop,
+    appwriteEndpoint: cloudConfig.endpoint,
+    appwriteProjectId: cloudConfig.projectId,
+    deviceGatewayFunctionId: cloudConfig.deviceGatewayFunctionId,
+    firmwareVersion: overrides.firmwareVersion || board.firmwareVersion || "0.0.0",
+    firmwareId: overrides.firmwareId || board.desiredFirmwareId || "",
+    mqttHost: cloudConfig.mqttHost,
+    mqttPort: cloudConfig.mqttPort,
+    mqttUsername: cloudConfig.mqttUsername,
+    mqttPassword: cloudConfig.mqttPassword,
+    mqttCaCert: cloudConfig.mqttCaCert,
+    tlsCaCert: cloudConfig.tlsCaCert,
+  };
+}
+
+async function deployCloudFirmwareFromAgent(cloudConfig, boardId, firmwareId, deploymentId) {
+  if (cloudConfig.boardAdminFunctionId) {
+    const execution = await appwriteRequest({
+      method: "POST",
+      pathName: `functions/${encodeURIComponent(cloudConfig.boardAdminFunctionId)}/executions`,
+      body: {
+        body: JSON.stringify({ boardId, firmwareId, deploymentId }),
+        async: false,
+        path: "/deploy-firmware",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      },
+    });
+
+    const parsed = safeJsonParse(execution.responseBody || '{"ok":false,"error":"Function returned an empty response."}', {
+      ok: false,
+      error: "Function returned an unreadable response.",
+    });
+    if (Number(execution.responseStatusCode || 0) >= 400 || !parsed?.ok || !parsed?.data) {
+      throw new Error(parsed?.error || execution.responseBody || execution.errors || "Function execution failed.");
+    }
+    return parsed.data;
+  }
+
+  const firmwareList = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents`,
+    queries: [
+      Query.equal("boardId", boardId),
+      Query.equal("deployed", true),
+      Query.limit(100),
+    ],
+  });
+  const firmware = Array.isArray(firmwareList.documents)
+    ? firmwareList.documents.find((entry) => entry.$id === firmwareId)
+    : null;
+  if (!firmware) {
+    throw new Error("Firmware release was not found.");
+  }
+
+  const board = await appwriteRequest({
+    method: "PATCH",
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.boardsCollectionId)}/documents/${encodeURIComponent(boardId)}`,
+    body: {
+      data: {
+        desiredFirmwareId: firmwareId,
+        desiredVersion: firmware.version,
+        desiredDeploymentId: deploymentId,
+        otaStatus: "pending",
+        lastOtaError: "",
+        updatedAt: new Date().toISOString(),
+      },
+    },
+  });
+
+  return { firmware, board };
+}
+
+async function uploadCloudFirmwareFromAgent(payload = {}) {
+  const cloudConfig = requireCloudConfigForFirmware();
+  const boardId = String(payload.boardId || "").trim();
+  const boardType = String(payload.boardType || "").trim();
+  const version = String(payload.version || "1.0.0").trim();
+  if (!boardId || !boardType) {
+    throw new Error("A cloud board and board FQBN are required before OTA upload.");
+  }
+
+  const user = await appwriteRequest({ pathName: "account" });
+  const board = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.boardsCollectionId)}/documents/${encodeURIComponent(boardId)}`,
+  });
+  const secrets = secretStore?.get(`boards.${boardId}`) || {};
+  if (!secrets.apiToken || !secrets.commandSecret || !secrets.mqttTopic || !secrets.provisioningPop) {
+    throw new Error("Local board secrets are missing. Rotate the board token, then provision the board again.");
+  }
+
+  const firmwareId = generateCloudDocumentId("fw");
+  const deploymentId = generateCloudDocumentId("dep");
+  const notificationId = payload.notificationId || firmwareId;
+  const boardName = String(payload.boardName || board.name || boardType || "cloud board");
+  const cloudRuntime = buildCloudRuntimeConfigForAgent(board, secrets, cloudConfig, {
+    firmwareId,
+    firmwareVersion: version,
+  });
+  let notificationProgress = 2;
+  let compileProgressEvents = 0;
+  const updateFirmwareNotification = (patch = {}) => {
+    notificationProgress = typeof patch.progress === "number"
+      ? Math.max(notificationProgress, Math.max(0, Math.min(100, patch.progress)))
+      : notificationProgress;
+
+    upsertToolchainNotification({
+      id: notificationId,
+      kind: "firmware-upload",
+      title: patch.title || (patch.phase === "upload" || patch.phase === "queue" ? `Uploading ${boardName} ${version}` : `Building ${boardName} ${version}`),
+      detail: patch.detail || "Preparing firmware release...",
+      status: patch.status || "running",
+      phase: patch.phase || "prepare",
+      progress: notificationProgress,
+      name: boardName,
+      version,
+      target: boardName,
+      metadata: {
+        boardId,
+        boardType,
+        filename: patch.filename,
+        agentTool: true,
+      },
+    });
+  };
+
+  updateFirmwareNotification({
+    detail: "Preparing firmware release...",
+    phase: "prepare",
+    progress: 2,
+  });
+
+  const compileResult = await compileArduino(String(payload.code || DEFAULT_EDITOR_CONTENT), boardType, {
+    cloudRuntime,
+    signal: payload.signal,
+    onProgress: (progressEvent) => {
+      compileProgressEvents += 1;
+      const rawMessage = typeof progressEvent === "string" ? progressEvent : progressEvent?.message || progressEvent?.phase || "";
+      const normalizedMessage = latestToolchainProgressLine(rawMessage).slice(0, 180);
+      const dependencyPhase = /(download|extract|install|library|dependency|index)/i.test(normalizedMessage);
+      const phaseStart = dependencyPhase ? 8 : 18;
+      const phaseEnd = dependencyPhase ? 18 : 68;
+      const cliProgress = typeof progressEvent?.progress === "number" ? progressEvent.progress : extractLastCliProgressPercent(rawMessage);
+      const estimatedProgress = cliProgress === null
+        ? phaseStart + Math.min(phaseEnd - phaseStart - 1, compileProgressEvents * (dependencyPhase ? 1.2 : 0.75))
+        : phaseStart + ((phaseEnd - phaseStart) * cliProgress) / 100;
+
+      updateFirmwareNotification({
+        detail: normalizedMessage || (dependencyPhase ? "Checking cloud runtime dependencies..." : "Compiling firmware release..."),
+        phase: dependencyPhase ? "dependencies" : "compile",
+        progress: Math.min(phaseEnd - 0.5, estimatedProgress),
+      });
+    },
+  });
+
+  updateFirmwareNotification({
+    detail: "Calculating firmware checksum...",
+    phase: "checksum",
+    progress: 68,
+    filename: compileResult.filename,
+  });
+  const checksum = sha256HexBase64(compileResult.binData);
+  updateFirmwareNotification({
+    title: `Uploading ${boardName} ${version}`,
+    detail: "Uploading firmware to Appwrite storage...",
+    phase: "upload",
+    progress: 72,
+    filename: compileResult.filename,
+  });
+
+  const fileBuffer = Buffer.from(compileResult.binData, "base64");
+  const multipart = buildMultipartBody({
+    fields: [
+      ["fileId", firmwareId],
+      ...cloudFirmwareFilePermissions(user.$id).map((permission) => ["permissions[]", permission]),
+    ],
+    files: [
+      {
+        name: "file",
+        filename: compileResult.filename,
+        contentType: "application/octet-stream",
+        buffer: fileBuffer,
+      },
+    ],
+  });
+
+  const file = await appwriteRawUploadRequest({
+    method: "POST",
+    pathName: `storage/buckets/${encodeURIComponent(cloudConfig.firmwareBucketId)}/files`,
+    rawBody: multipart.body,
+    headers: multipart.headers,
+  }, (progressEvent) => {
+    const uploadProgress = 72 + (Math.max(0, Math.min(100, Number(progressEvent.progress) || 0)) * 18) / 100;
+    updateFirmwareNotification({
+      title: `Uploading ${boardName} ${version}`,
+      detail: progressEvent.progress >= 100 ? "Queuing OTA deployment..." : "Uploading firmware to Appwrite storage...",
+      phase: progressEvent.progress >= 100 ? "queue" : "upload",
+      progress: progressEvent.progress >= 100 ? 90 : uploadProgress,
+      filename: compileResult.filename,
+    });
+  });
+
+  updateFirmwareNotification({
+    title: `Uploading ${boardName} ${version}`,
+    detail: "Updating firmware records...",
+    phase: "queue",
+    progress: 92,
+    filename: compileResult.filename,
+  });
+  const existing = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents`,
+    queries: [
+      Query.equal("boardId", boardId),
+      Query.equal("deployed", true),
+      Query.limit(100),
+    ],
+  });
+  await Promise.all(
+    (Array.isArray(existing.documents) ? existing.documents : [])
+      .filter((firmware) => firmware.deployed)
+      .map((firmware) =>
+        appwriteRequest({
+          method: "PATCH",
+          pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents/${encodeURIComponent(firmware.$id)}`,
+          body: { data: { deployed: false } },
+        }),
+      ),
+  );
+
+  updateFirmwareNotification({
+    title: `Uploading ${boardName} ${version}`,
+    detail: "Creating firmware release record...",
+    phase: "queue",
+    progress: 94,
+    filename: compileResult.filename,
+  });
+  const firmware = await appwriteRequest({
+    method: "POST",
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents`,
+    body: {
+      documentId: firmwareId,
+      data: {
+        userId: user.$id,
+        boardId,
+        version,
+        fileId: file.$id,
+        filename: compileResult.filename,
+        size: compileResult.binSize,
+        checksum,
+        uploadedAt: new Date().toISOString(),
+        deployed: true,
+        notes: String(payload.notes || ""),
+      },
+      permissions: cloudFirmwarePermissions(user.$id),
+    },
+  });
+
+  updateFirmwareNotification({
+    title: `Uploading ${boardName} ${version}`,
+    detail: "Queuing OTA deployment...",
+    phase: "queue",
+    progress: 96,
+    filename: compileResult.filename,
+  });
+  await deployCloudFirmwareFromAgent(cloudConfig, boardId, firmwareId, deploymentId);
+  updateFirmwareNotification({
+    title: `Uploaded ${boardName} ${version}`,
+    detail: "Firmware uploaded and queued for OTA deployment.",
+    status: "success",
+    phase: "complete",
+    progress: 100,
+    filename: compileResult.filename,
+  });
+
+  return {
+    firmwareId,
+    firmware,
+    output: [
+      compileResult.output || compileResult.message || "Compilation successful.",
+      `Firmware ${version} uploaded to Appwrite storage and queued for OTA deployment.`,
+    ].filter(Boolean).join("\n\n"),
+  };
 }
 
 function safeJsonParse(value, fallback) {
@@ -3260,7 +4221,8 @@ function createMenu() {
         { label: "My Projects", click: () => sendMenuAction({ type: "show-my-projects" }) },
         { type: "separator" },
         { label: "Output", click: () => sendMenuAction({ type: "show-output" }) },
-        { label: "Serial / Terminal", accelerator: "CmdOrCtrl+Shift+M", click: () => sendMenuAction({ type: "toggle-terminal" }) }
+        { label: "Terminal", accelerator: "CmdOrCtrl+Shift+M", click: () => sendMenuAction({ type: "toggle-terminal" }) },
+        { label: "Serial Monitor", click: () => sendMenuAction({ type: "show-serial-monitor" }) }
       ]
     },
     {
@@ -3278,7 +4240,8 @@ function createMenu() {
       label: "Tools",
       submenu: [
         { label: "Auto Format", accelerator: "CmdOrCtrl+T", click: () => sendMenuAction({ type: "format-document" }) },
-        { label: "Serial / Terminal", accelerator: "CmdOrCtrl+Shift+M", click: () => sendMenuAction({ type: "toggle-terminal" }) }
+        { label: "Terminal", accelerator: "CmdOrCtrl+Shift+M", click: () => sendMenuAction({ type: "toggle-terminal" }) },
+        { label: "Serial Monitor", click: () => sendMenuAction({ type: "show-serial-monitor" }) }
       ]
     },
     {
@@ -3398,6 +4361,33 @@ function createTerminalSessionId() {
   return `terminal-${terminalSessionCounter}`;
 }
 
+function createSerialMonitorSessionId() {
+  serialMonitorSessionCounter += 1;
+  return `serial-monitor-${serialMonitorSessionCounter}`;
+}
+
+function normalizeSerialMonitorPort(value) {
+  const port = String(value || "").trim();
+  if (!port) {
+    throw new Error("Select a serial port before opening Serial Monitor.");
+  }
+
+  return port;
+}
+
+function normalizeSerialMonitorBaudRate(value) {
+  const baudRate = Number(value);
+  if (!Number.isInteger(baudRate) || baudRate < 300 || baudRate > 2000000) {
+    throw new Error("Use a valid serial baud rate between 300 and 2000000.");
+  }
+
+  return baudRate;
+}
+
+function serialMonitorPortKey(port) {
+  return String(port || "").trim().toLowerCase();
+}
+
 function buildTerminalNavigationCommand(shellBinary, targetPath) {
   const normalizedShell = String(shellBinary || "").toLowerCase();
 
@@ -3432,6 +4422,56 @@ function disposeTerminalSession(sessionId) {
 function disposeAllTerminalSessions() {
   for (const sessionId of [...terminalSessions.keys()]) {
     disposeTerminalSession(sessionId);
+  }
+}
+
+function finalizeSerialMonitorSession(sessionId, reason = "closed", notify = true) {
+  const session = serialMonitorSessions.get(sessionId);
+  if (!session) {
+    return false;
+  }
+
+  serialMonitorSessions.delete(sessionId);
+  if (session.portKey) {
+    activeSerialMonitorPorts.delete(session.portKey);
+  }
+  if (notify) {
+    sendRendererEvent("serial-monitor:close", { sessionId, reason });
+  }
+  return true;
+}
+
+function disposeSerialMonitorSession(sessionId, reason = "closed", notify = true) {
+  const session = serialMonitorSessions.get(sessionId);
+  if (!session) {
+    return false;
+  }
+
+  session.closing = true;
+  session.closeReason = reason;
+  session.notifyOnClose = notify;
+
+  try {
+    if (session.serialPort.isOpen) {
+      session.serialPort.close((error) => {
+        if (error) {
+          console.warn(`Failed to close serial monitor ${sessionId}:`, error.message);
+          finalizeSerialMonitorSession(sessionId, "error", notify);
+        }
+      });
+      return true;
+    }
+  } catch (error) {
+    console.warn(`Failed to close serial monitor ${sessionId}:`, error.message);
+  }
+
+  finalizeSerialMonitorSession(sessionId, reason, notify);
+  return true;
+}
+
+function disposeAllSerialMonitorSessions() {
+  for (const sessionId of [...serialMonitorSessions.keys()]) {
+    disposeSerialMonitorSession(sessionId, "closed", false);
   }
 }
 
@@ -3482,14 +4522,17 @@ function createMainWindow() {
     });
   });
 
-  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+  mainWindow.webContents.on("console-message", (details) => {
+    const level = details.level || "info";
+    const message = details.message || "";
+    const location = details.sourceId ? `(${details.sourceId}:${details.lineNumber || 0})` : "";
     const prefix = `[renderer console:${level}]`;
-    if (level >= 2) {
-      console.error(prefix, message, sourceId ? `(${sourceId}:${line})` : "");
+    if (level === "error" || level === "warning") {
+      console.error(prefix, message, location);
       return;
     }
 
-    console.log(prefix, message, sourceId ? `(${sourceId}:${line})` : "");
+    console.log(prefix, message, location);
   });
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -3512,6 +4555,7 @@ function createMainWindow() {
 
   mainWindow.on("closed", () => {
     disposeAllTerminalSessions();
+    disposeAllSerialMonitorSessions();
     mainWindow = null;
   });
 
@@ -3656,6 +4700,28 @@ ipcMain.handle("agent:resolve-approval", async (_event, payload = {}) => {
   }
 });
 
+ipcMain.handle("agent:tools:list-settings", async () => {
+  try {
+    return {
+      success: true,
+      ...agentToolRegistry.settingsResponse(getAgentToolSettings()),
+    };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("agent:tools:update-settings", async (_event, payload = {}) => {
+  try {
+    return {
+      success: true,
+      ...updateAgentToolSettings(payload),
+    };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("cloud:auth:get-current-user", async () => {
   try {
     const user = await appwriteRequest({ pathName: "account" });
@@ -3682,6 +4748,7 @@ ipcMain.handle("cloud:auth:sign-in", async (_event, payload) => {
       useSession: false,
     });
 
+    clearAppwriteReadCache();
     return { success: true, session };
   } catch (error) {
     return toErrorResult(error);
@@ -3702,6 +4769,7 @@ ipcMain.handle("cloud:auth:register", async (_event, payload) => {
       useSession: false,
     });
 
+    clearAppwriteReadCache();
     return { success: true, user };
   } catch (error) {
     return toErrorResult(error);
@@ -3721,15 +4789,23 @@ ipcMain.handle("cloud:auth:sign-out", async () => {
   }
 
   clearAppwriteSession();
+  clearAppwriteReadCache();
   return { success: true };
 });
 
 ipcMain.handle("cloud:databases:list-documents", async (_event, payload) => {
   try {
-    const response = await appwriteRequest({
-      pathName: `databases/${encodeURIComponent(payload.databaseId)}/collections/${encodeURIComponent(payload.collectionId)}/documents`,
-      queries: payload.queries,
-    });
+    const response = await cachedAppwriteRequest(
+      {
+        pathName: `databases/${encodeURIComponent(payload.databaseId)}/collections/${encodeURIComponent(payload.collectionId)}/documents`,
+        queries: payload.queries,
+      },
+      {
+        ttlMs: payload.cacheTtlMs ?? defaultDatabaseListCacheTtlMs(payload.collectionId),
+        cacheKey: payload.cacheKey,
+        bypassCache: Boolean(payload.bypassCache),
+      },
+    );
 
     return {
       success: true,
@@ -3753,6 +4829,7 @@ ipcMain.handle("cloud:databases:create-document", async (_event, payload) => {
       },
     });
 
+    clearAppwriteReadCache();
     return { success: true, document };
   } catch (error) {
     return toErrorResult(error);
@@ -3770,6 +4847,7 @@ ipcMain.handle("cloud:databases:update-document", async (_event, payload) => {
       },
     });
 
+    clearAppwriteReadCache();
     return { success: true, document };
   } catch (error) {
     return toErrorResult(error);
@@ -3783,32 +4861,60 @@ ipcMain.handle("cloud:databases:delete-document", async (_event, payload) => {
       pathName: `databases/${encodeURIComponent(payload.databaseId)}/collections/${encodeURIComponent(payload.collectionId)}/documents/${encodeURIComponent(payload.documentId)}`,
     });
 
+    clearAppwriteReadCache();
     return { success: true };
   } catch (error) {
     return toErrorResult(error);
   }
 });
 
-ipcMain.handle("cloud:storage:create-file", async (_event, payload) => {
+ipcMain.handle("cloud:storage:create-file", async (event, payload) => {
   try {
-    const formData = new FormData();
     const fileBuffer = Buffer.from(payload.base64, "base64");
-
-    formData.append("fileId", payload.fileId);
-    formData.append("file", new Blob([fileBuffer], { type: payload.contentType || "application/octet-stream" }), payload.filename);
-
-    if (Array.isArray(payload.permissions)) {
-      payload.permissions.forEach((permission) => {
-        formData.append("permissions[]", permission);
-      });
-    }
-
-    const file = await appwriteRequest({
-      method: "POST",
-      pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files`,
-      formData,
+    const multipart = buildMultipartBody({
+      fields: [
+        ["fileId", payload.fileId],
+        ...(Array.isArray(payload.permissions) ? payload.permissions.map((permission) => ["permissions[]", permission]) : []),
+      ],
+      files: [
+        {
+          name: "file",
+          filename: payload.filename,
+          contentType: payload.contentType || "application/octet-stream",
+          buffer: fileBuffer,
+        },
+      ],
     });
+    const progressId = typeof payload.progressId === "string" && payload.progressId.trim() ? payload.progressId.trim() : "";
+    const sendUploadProgress = progressId
+      ? (progress) => {
+          event.sender.send("cloud:storage-upload-progress", {
+            progressId,
+            bucketId: payload.bucketId,
+            fileId: payload.fileId,
+            filename: payload.filename,
+            sentBytes: progress.sentBytes,
+            totalBytes: progress.totalBytes,
+            progress: progress.progress,
+          });
+        }
+      : null;
 
+    const file = sendUploadProgress
+      ? await appwriteRawUploadRequest({
+          method: "POST",
+          pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files`,
+          rawBody: multipart.body,
+          headers: multipart.headers,
+        }, sendUploadProgress)
+      : await appwriteRequest({
+          method: "POST",
+          pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files`,
+          rawBody: multipart.body,
+          headers: multipart.headers,
+        });
+
+    clearAppwriteReadCache();
     return { success: true, file };
   } catch (error) {
     return toErrorResult(error);
@@ -3822,6 +4928,7 @@ ipcMain.handle("cloud:storage:delete-file", async (_event, payload) => {
       pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files/${encodeURIComponent(payload.fileId)}`,
     });
 
+    clearAppwriteReadCache();
     return { success: true };
   } catch (error) {
     return toErrorResult(error);
@@ -3830,7 +4937,7 @@ ipcMain.handle("cloud:storage:delete-file", async (_event, payload) => {
 
 ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
   try {
-    const execution = await appwriteRequest({
+    const request = {
       method: "POST",
       pathName: `functions/${encodeURIComponent(payload.functionId)}/executions`,
       body: {
@@ -3840,7 +4947,19 @@ ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
         method: payload.method ?? "POST",
         headers: payload.headers ?? { "content-type": "application/json" },
       },
-    });
+    };
+    const cacheTtlMs = functionExecutionCacheTtlMs(payload);
+    const execution = cacheTtlMs > 0
+      ? await cachedAppwriteRequest(request, {
+          ttlMs: cacheTtlMs,
+          cacheKey: `function:${payload.functionId}:${payload.pathName ?? "/"}:${payload.body ?? ""}`,
+          bypassCache: Boolean(payload.bypassCache),
+        })
+      : await appwriteRequest(request);
+
+    if (cacheTtlMs <= 0) {
+      clearAppwriteReadCache();
+    }
 
     return { success: true, execution };
   } catch (error) {
@@ -4548,7 +5667,9 @@ ipcMain.handle("secrets:set-board", async (_event, payload) => {
 
     secretStore?.set(`boards.${payload.boardId}`, {
       apiToken: payload.apiToken ?? "",
-      wifiPassword: payload.wifiPassword ?? "",
+      commandSecret: payload.commandSecret ?? "",
+      mqttTopic: payload.mqttTopic ?? "",
+      provisioningPop: payload.provisioningPop ?? "",
       updatedAt: new Date().toISOString()
     });
 
@@ -4565,6 +5686,11 @@ ipcMain.handle("secrets:get-board", async (_event, boardId) => {
     }
 
     const boardSecrets = secretStore?.get(`boards.${boardId}`) ?? null;
+    if (boardSecrets && Object.prototype.hasOwnProperty.call(boardSecrets, "wifiPassword")) {
+      const { wifiPassword, ...sanitizedSecrets } = boardSecrets;
+      secretStore?.set(`boards.${boardId}`, sanitizedSecrets);
+      return { success: true, secrets: sanitizedSecrets };
+    }
     return { success: true, secrets: boardSecrets };
   } catch (error) {
     return toErrorResult(error);
@@ -4586,7 +5712,24 @@ ipcMain.handle("secrets:delete-board", async (_event, boardId) => {
 
 ipcMain.handle("toolchain:compile", async (_event, payload) => {
   try {
-    return await compileArduino(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board ?? "arduino:avr:uno");
+    const compileId = typeof payload?.compileId === "string" && payload.compileId.trim() ? payload.compileId.trim() : "";
+    const emitCompileProgress = compileId
+      ? (progressEvent, stream = "stdout") => {
+          const rawChunk = typeof progressEvent === "string" ? progressEvent : progressEvent?.message || progressEvent?.phase || "";
+          _event.sender.send("toolchain:compile-progress", {
+            compileId,
+            stream,
+            chunk: rawChunk,
+            message: String(rawChunk || "").trim(),
+            progress: typeof progressEvent?.progress === "number" ? progressEvent.progress : extractLastCliProgressPercent(rawChunk),
+          });
+        }
+      : undefined;
+
+    return await compileArduino(payload?.code ?? DEFAULT_EDITOR_CONTENT, payload?.board ?? "arduino:avr:uno", {
+      cloudRuntime: payload?.cloudRuntime || null,
+      onProgress: emitCompileProgress,
+    });
   } catch (error) {
     return toErrorResult(error);
   }
@@ -4624,6 +5767,14 @@ ipcMain.handle("toolchain:delete-local-board-profile", async (_event, profileId)
   }
 });
 
+ipcMain.handle("toolchain:replace-local-board-profiles", async (_event, profiles = []) => {
+  try {
+    return { success: true, profiles: replaceLocalBoardProfiles(profiles) };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => {
   const port = String(payload.port || "").trim();
   const portKey = port.toLowerCase();
@@ -4632,6 +5783,12 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
     return {
       success: false,
       error: `A USB upload is already running on ${port}. Wait for it to finish before starting another upload.`
+    };
+  }
+  if (portKey && activeSerialMonitorPorts.has(portKey)) {
+    return {
+      success: false,
+      error: `Serial Monitor is open on ${port}. Disconnect it before uploading.`
     };
   }
 
@@ -4650,6 +5807,8 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
         message: formatUsbUploadProgressMessage(chunk),
         progress: extractLastCliProgressPercent(chunk)
       });
+    }, {
+      cloudRuntime: payload?.cloudRuntime || null
     });
   } catch (error) {
     return toErrorResult(error);
@@ -4966,14 +6125,15 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
     const board = payload?.board;
     const secrets = payload?.secrets;
     const appwriteConfig = payload?.appwriteConfig;
-    const port = payload?.port;
+    const port = String(payload?.port || "").trim();
+    const uploadId = String(payload?.uploadId || `cloud-runtime-install:${board?.$id || Date.now()}`);
 
-    if (!board?.$id || !board?.boardType || !board?.wifiSSID) {
+    if (!board?.$id || !board?.boardType) {
       throw new Error("A valid board payload is required for provisioning.");
     }
 
-    if (!secrets?.apiToken || !secrets?.wifiPassword) {
-      throw new Error("Local board secrets are missing. Re-enter the WiFi password or rotate the board token.");
+    if (!secrets?.apiToken || !secrets?.commandSecret || !secrets?.mqttTopic || !secrets?.provisioningPop) {
+      throw new Error("Local board secrets are missing. Rotate the board token, then provision again.");
     }
 
     if (!appwriteConfig?.endpoint || !appwriteConfig?.projectId || !appwriteConfig?.deviceGatewayFunctionId) {
@@ -4984,11 +6144,49 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
       {
         ...board,
         apiToken: secrets.apiToken,
-        wifiPassword: secrets.wifiPassword
+        commandSecret: secrets.commandSecret,
+        mqttTopic: secrets.mqttTopic,
+        provisioningPop: secrets.provisioningPop
       },
       port,
-      appwriteConfig
+      appwriteConfig,
+      (chunk, stream) => {
+        _event.sender.send("toolchain:usb-upload-progress", {
+          uploadId,
+          port,
+          board: board.boardType,
+          stream: stream || "stdout",
+          chunk,
+          message: formatUsbUploadProgressMessage(chunk),
+          progress: extractLastCliProgressPercent(chunk)
+        });
+      }
     );
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:provision-board-wifi-usb", async (_event, payload = {}) => {
+  try {
+    const boardId = String(payload.boardId || "").trim();
+    const secrets = secretStore?.get(`boards.${boardId}`) ?? null;
+
+    if (!boardId) {
+      throw new Error("A cloud board ID is required.");
+    }
+
+    if (!secrets?.commandSecret) {
+      throw new Error("Local command secret is missing. Rotate the board token, then flash the cloud runtime again.");
+    }
+
+    return await provisioningService.provisionBoardWifiUsb({
+      boardId,
+      commandSecret: secrets.commandSecret,
+      port: payload.port,
+      ssid: payload.ssid,
+      password: payload.password,
+    });
   } catch (error) {
     return toErrorResult(error);
   }
@@ -5105,6 +6303,108 @@ ipcMain.on("terminal:resize", (_event, payload) => {
   session.ptyProcess.resize(cols, rows);
 });
 
+ipcMain.handle("serial-monitor:open", async (_event, options = {}) => {
+  try {
+    let SerialPort;
+    try {
+      ({ SerialPort } = require("serialport"));
+    } catch (error) {
+      throw new Error(`Serial port support is unavailable: ${error.message}`);
+    }
+
+    const port = normalizeSerialMonitorPort(options.port);
+    const baudRate = normalizeSerialMonitorBaudRate(options.baudRate || 115200);
+    const portKey = serialMonitorPortKey(port);
+
+    if (activeLocalUploadPorts.has(portKey)) {
+      throw new Error(`A USB upload is already running on ${port}. Wait for it to finish before opening Serial Monitor.`);
+    }
+    if (activeSerialMonitorPorts.has(portKey)) {
+      throw new Error(`Serial Monitor is already open on ${port}.`);
+    }
+
+    const sessionId = createSerialMonitorSessionId();
+    const serialPort = new SerialPort({ path: port, baudRate, autoOpen: false });
+    const session = {
+      serialPort,
+      port,
+      baudRate,
+      portKey,
+      closing: false,
+      closeReason: "closed",
+      notifyOnClose: true,
+    };
+
+    serialPort.on("data", (chunk) => {
+      sendRendererEvent("serial-monitor:data", { sessionId, data: chunk.toString("utf8") });
+    });
+
+    serialPort.on("error", (error) => {
+      sendRendererEvent("serial-monitor:error", { sessionId, error: error.message });
+    });
+
+    serialPort.on("close", () => {
+      finalizeSerialMonitorSession(sessionId, session.closing ? session.closeReason : "disconnected", session.notifyOnClose !== false);
+    });
+
+    await new Promise((resolve, reject) => {
+      serialPort.open((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+
+    serialMonitorSessions.set(sessionId, session);
+    activeSerialMonitorPorts.set(portKey, sessionId);
+
+    return { success: true, sessionId, port, baudRate };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("serial-monitor:close", async (_event, sessionId) => {
+  try {
+    if (typeof sessionId === "string" && sessionId.length > 0) {
+      disposeSerialMonitorSession(sessionId);
+    }
+
+    return { success: true };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.on("serial-monitor:write", (_event, payload) => {
+  const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+  const session = serialMonitorSessions.get(sessionId);
+  if (!session || !session.serialPort.isOpen) {
+    return;
+  }
+
+  const data = String(payload?.data ?? "");
+  if (!data) {
+    return;
+  }
+
+  session.serialPort.write(data, (error) => {
+    if (error) {
+      sendRendererEvent("serial-monitor:error", { sessionId, error: error.message });
+      return;
+    }
+
+    session.serialPort.drain((drainError) => {
+      if (drainError) {
+        sendRendererEvent("serial-monitor:error", { sessionId, error: drainError.message });
+      }
+    });
+  });
+});
+
 app.whenReady().then(async () => {
   await initializeStores();
   createMainWindow();
@@ -5118,6 +6418,7 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   disposeAllTerminalSessions();
+  disposeAllSerialMonitorSessions();
 
   if (rendererServer) {
     rendererServer.close();

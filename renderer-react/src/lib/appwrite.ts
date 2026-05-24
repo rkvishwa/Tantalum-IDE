@@ -30,6 +30,12 @@ function getDesktopCloudApi() {
   return desktopApi.cloud;
 }
 
+type ListDocumentsOptions = {
+  cacheTtlMs?: number;
+  cacheKey?: string;
+  bypassCache?: boolean;
+};
+
 export const account = {
   async get() {
     const result = unwrapResult(await getDesktopCloudApi().auth.getCurrentUser());
@@ -60,11 +66,14 @@ export const account = {
 };
 
 export const databases = {
-  async listDocuments<T>(databaseId: string, collectionId: string, queries?: string[]) {
+  async listDocuments<T>(databaseId: string, collectionId: string, queries?: string[], options: ListDocumentsOptions = {}) {
     const result = unwrapResult(await getDesktopCloudApi().databases.listDocuments({
       databaseId,
       collectionId,
       queries,
+      cacheTtlMs: options.cacheTtlMs,
+      cacheKey: options.cacheKey,
+      bypassCache: options.bypassCache,
     }));
 
     return {
@@ -116,7 +125,7 @@ export const databases = {
 };
 
 export const storage = {
-  async createFile(bucketId: string, fileId: string, file: File, permissions?: string[]) {
+  async createFile(bucketId: string, fileId: string, file: File, permissions?: string[], progressId?: string) {
     const arrayBuffer = await file.arrayBuffer();
     const base64 = arrayBufferToBase64(arrayBuffer);
 
@@ -127,6 +136,7 @@ export const storage = {
       base64,
       contentType: file.type || 'application/octet-stream',
       permissions,
+      progressId,
     }));
 
     return result.file as Models.File;

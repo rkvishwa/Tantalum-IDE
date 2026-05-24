@@ -82,7 +82,8 @@ class FirmwareService {
                 collections.firmwares,
                 [
                     Query.equal('boardId', firmware.boardId),
-                    Query.equal('deployed', true)
+                    Query.equal('deployed', true),
+                    Query.limit(100)
                 ]
             );
 
@@ -103,12 +104,17 @@ class FirmwareService {
                 { deployed: true }
             );
 
-            // Update board firmware version
+            // Queue desired firmware; the device gateway updates firmwareVersion only after OTA success.
             await databases.updateDocument(
                 databaseId,
                 collections.boards,
                 firmware.boardId,
-                { firmwareVersion: firmware.version }
+                {
+                    desiredFirmwareId: firmware.$id,
+                    desiredVersion: firmware.version,
+                    desiredDeploymentId: `dep_${crypto.randomBytes(12).toString('hex')}`,
+                    otaStatus: 'pending'
+                }
             );
 
             return { success: true, firmware };
@@ -130,7 +136,9 @@ class FirmwareService {
                 collections.firmwares,
                 [
                     Query.equal('boardId', boardId),
-                    Query.equal('deployed', true)
+                    Query.equal('deployed', true),
+                    Query.orderDesc('uploadedAt'),
+                    Query.limit(1)
                 ]
             );
 
@@ -172,7 +180,8 @@ class FirmwareService {
                 collections.firmwares,
                 [
                     Query.equal('boardId', boardId),
-                    Query.orderDesc('uploadedAt')
+                    Query.orderDesc('uploadedAt'),
+                    Query.limit(50)
                 ]
             );
 

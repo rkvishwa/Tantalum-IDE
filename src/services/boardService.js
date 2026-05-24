@@ -29,9 +29,18 @@ class BoardService {
                     name: boardData.name,
                     boardType: boardData.boardType,
                     apiToken,
-                    wifiSSID: boardData.wifiSSID || '',
-                    wifiPassword: boardData.wifiPassword || '',
                     firmwareVersion: '0.0.0',
+                    desiredFirmwareId: '',
+                    desiredVersion: '',
+                    desiredDeploymentId: '',
+                    lastAppliedDeploymentId: '',
+                    runtimeVersion: '',
+                    lastUpdateCheckAt: null,
+                    otaStatus: 'idle',
+                    provisioningStatus: 'pending',
+                    provisioningRequestedAt: null,
+                    provisioningMode: '',
+                    lastOtaError: '',
                     lastSeen: null,
                     status: 'pending',
                     createdAt: new Date().toISOString()
@@ -55,7 +64,11 @@ class BoardService {
             const response = await databases.listDocuments(
                 databaseId,
                 collections.boards,
-                [Query.equal('userId', userId)]
+                [
+                    Query.equal('userId', userId),
+                    Query.orderDesc('createdAt'),
+                    Query.limit(100)
+                ]
             );
 
             return { success: true, boards: response.documents };
@@ -94,7 +107,7 @@ class BoardService {
     async updateBoard(boardId, updates) {
         try {
             // Prevent updating sensitive fields
-            const allowedFields = ['name', 'wifiSSID', 'wifiPassword', 'status', 'lastSeen', 'firmwareVersion'];
+            const allowedFields = ['name', 'status', 'lastSeen', 'firmwareVersion', 'desiredFirmwareId', 'desiredVersion', 'desiredDeploymentId', 'lastAppliedDeploymentId', 'runtimeVersion', 'lastUpdateCheckAt', 'otaStatus', 'provisioningStatus', 'provisioningRequestedAt', 'provisioningMode', 'lastOtaError'];
             const safeUpdates = {};
 
             for (const key of allowedFields) {
@@ -218,8 +231,9 @@ class BoardService {
         const now = new Date();
         const diffMinutes = (now - lastSeen) / (1000 * 60);
 
-        // Consider offline if no heartbeat in 2 minutes
-        return diffMinutes < 2 ? 'online' : 'offline';
+        // Match the renderer grace period so transient WiFi or gateway delays do not
+        // make the same board disagree between local services and the UI.
+        return diffMinutes <= 5 ? 'online' : 'offline';
     }
 }
 

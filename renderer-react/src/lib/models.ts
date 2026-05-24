@@ -5,10 +5,21 @@ export type BoardDocument = Models.Document & {
   name: string;
   boardType: string;
   apiToken?: string;
-  wifiSSID: string;
-  wifiPassword?: string;
   tokenHash: string;
   tokenPreview: string;
+  desiredFirmwareId?: string;
+  desiredVersion?: string;
+  desiredDeploymentId?: string;
+  lastAppliedDeploymentId?: string;
+  runtimeVersion?: string;
+  lastUpdateCheckAt?: string | null;
+  otaStatus?: string;
+  provisioningStatus?: string;
+  provisioningRequestedAt?: string | null;
+  provisioningMode?: string;
+  provisioningPop?: string;
+  mqttTopicSuffix?: string;
+  lastOtaError?: string;
   firmwareVersion: string;
   status: string;
   lastSeen: string | null;
@@ -33,13 +44,13 @@ export type FirmwareDocument = Models.Document & {
 export type BoardInput = {
   name: string;
   boardType: string;
-  wifiSSID: string;
-  wifiPassword: string;
 };
 
 export type BoardSecret = {
   apiToken: string;
-  wifiPassword: string;
+  commandSecret?: string;
+  mqttTopic?: string;
+  provisioningPop?: string;
   updatedAt?: string;
 };
 

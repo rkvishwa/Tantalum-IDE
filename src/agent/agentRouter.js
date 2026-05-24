@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const { canonicalizeCommandVerbsInText } = require("./commandCanonicalizer");
+const { normalizeToolRequest } = require("./toolRegistry");
 
 const LOCAL_ENGINE = "local";
 const DIRECT_LLM_ENGINE = "direct_llm";
@@ -131,6 +132,8 @@ function normalizePendingAction(value) {
     return null;
   }
 
+  const toolRequest = normalizeToolRequest(value.toolRequest);
+
   return {
     id,
     threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
@@ -141,6 +144,7 @@ function normalizePendingAction(value) {
     reason: String(value.reason || "pending_action"),
     createdAt: String(value.createdAt || new Date().toISOString()),
     status: String(value.status || "pending"),
+    ...(toolRequest ? { toolRequest } : {}),
   };
 }
 

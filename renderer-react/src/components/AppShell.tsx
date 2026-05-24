@@ -940,6 +940,7 @@ void loop() {
         { id: 'toggle-bottom-panel', label: bottomPanelOpen ? 'Hide Bottom Panel' : 'Show Bottom Panel', onSelect: onToggleBottomPanel },
         { id: 'show-output', label: 'Output', action: { type: 'show-output' } },
         { id: 'show-terminal', label: 'Terminal', shortcut: 'Ctrl Shift M', action: { type: 'toggle-terminal' } },
+        { id: 'show-serial-monitor', label: 'Serial Monitor', action: { type: 'show-serial-monitor' } },
         { id: 'show-my-projects', label: 'My Projects', action: { type: 'show-my-projects' } },
         { id: 'view-settings-separator', type: 'separator' },
         { id: 'settings', label: 'Settings', onSelect: onOpenSettings },

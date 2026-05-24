@@ -29,6 +29,12 @@ export const appwriteConfig = {
   agentSettingsFunctionId: readConfig('VITE_APPWRITE_AGENT_SETTINGS_FUNCTION_ID', desktopCloudConfig.agentSettingsFunctionId ?? ''),
   agentGatewayFunctionId: readConfig('VITE_APPWRITE_AGENT_GATEWAY_FUNCTION_ID', desktopCloudConfig.agentGatewayFunctionId ?? ''),
   boardDetectionFunctionId: readConfig('VITE_APPWRITE_BOARD_DETECTION_FUNCTION_ID', desktopCloudConfig.boardDetectionFunctionId ?? ''),
+  mqttHost: readConfig('VITE_TANTALUM_MQTT_HOST', desktopCloudConfig.mqttHost ? String(desktopCloudConfig.mqttHost) : ''),
+  mqttPort: readConfig('VITE_TANTALUM_MQTT_PORT', desktopCloudConfig.mqttPort ? String(desktopCloudConfig.mqttPort) : ''),
+  mqttUsername: readConfig('VITE_TANTALUM_MQTT_DEVICE_USERNAME', desktopCloudConfig.mqttUsername ?? ''),
+  mqttPassword: readConfig('VITE_TANTALUM_MQTT_DEVICE_PASSWORD', desktopCloudConfig.mqttPassword ?? ''),
+  mqttCaCert: readConfig('VITE_TANTALUM_MQTT_CA_CERT', desktopCloudConfig.mqttCaCert ?? ''),
+  tlsCaCert: readConfig('VITE_TANTALUM_TLS_CA_CERT', desktopCloudConfig.tlsCaCert ?? ''),
 };
 
 export function hasRequiredCloudConfiguration() {

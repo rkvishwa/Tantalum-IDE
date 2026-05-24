@@ -1,7 +1,8 @@
 import type { Models } from 'appwrite';
 
-import { ID, Permission, Query, Role, databases, storage } from './appwrite';
-import { appwriteConfig } from './config';
+import { Permission, Query, Role, databases, storage } from './appwrite';
+import { appwriteConfig, hasBoardAdminFunction } from './config';
+import { executeFunction } from './functions';
 import type { BoardDocument, FirmwareDocument } from './models';
 
 function firmwarePermissions(userId: string) {
@@ -26,19 +27,65 @@ function base64ToFile(base64: string, filename: string) {
   return new File([bytes], filename, { type: 'application/octet-stream' });
 }
 
+const FIRMWARE_HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
+const FIRMWARE_HISTORY_LIMIT = 50;
+const FIRMWARE_SELECT_FIELDS = [
+  '$id',
+  'userId',
+  'boardId',
+  'version',
+  'fileId',
+  'filename',
+  'size',
+  'checksum',
+  'uploadedAt',
+  'deployed',
+  'notes',
+];
+
 export async function listFirmwareHistory(boardId: string) {
   const response = await databases.listDocuments<FirmwareDocument>(
     appwriteConfig.databaseId,
     appwriteConfig.firmwareCollectionId,
-    [Query.equal('boardId', boardId)],
+    [
+      Query.equal('boardId', boardId),
+      Query.orderDesc('uploadedAt'),
+      Query.limit(FIRMWARE_HISTORY_LIMIT),
+      Query.select(FIRMWARE_SELECT_FIELDS),
+    ],
+    {
+      cacheTtlMs: FIRMWARE_HISTORY_CACHE_TTL_MS,
+      cacheKey: `firmware:history:${boardId}`,
+    },
   );
 
-  return response.documents.sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt));
+  return response.documents;
+}
+
+async function listDeployedFirmware(boardId: string) {
+  const response = await databases.listDocuments<FirmwareDocument>(
+    appwriteConfig.databaseId,
+    appwriteConfig.firmwareCollectionId,
+    [
+      Query.equal('boardId', boardId),
+      Query.equal('deployed', true),
+      Query.limit(FIRMWARE_HISTORY_LIMIT),
+      Query.select(FIRMWARE_SELECT_FIELDS),
+    ],
+    {
+      cacheTtlMs: 0,
+      cacheKey: `firmware:deployed:${boardId}`,
+    },
+  );
+
+  return response.documents;
 }
 
 export async function uploadFirmwareRelease(payload: {
   user: Models.User<Models.Preferences>;
   board: BoardDocument;
+  firmwareId: string;
+  deploymentId: string;
   version: string;
   compileResult: {
     filename: string;
@@ -47,20 +94,21 @@ export async function uploadFirmwareRelease(payload: {
   };
   checksum: string;
   notes?: string;
+  progressId?: string;
 }) {
   const file = await storage.createFile(
     appwriteConfig.firmwareBucketId,
-    ID.unique(),
+    payload.firmwareId,
     base64ToFile(payload.compileResult.binData, payload.compileResult.filename),
     firmwareFilePermissions(payload.user.$id),
+    payload.progressId,
   );
 
   const now = new Date().toISOString();
-  const existing = await listFirmwareHistory(payload.board.$id);
+  const existing = await listDeployedFirmware(payload.board.$id);
 
   await Promise.all(
     existing
-      .filter((firmware) => firmware.deployed)
       .map((firmware) =>
         databases.updateDocument<FirmwareDocument>(
           appwriteConfig.databaseId,
@@ -74,7 +122,7 @@ export async function uploadFirmwareRelease(payload: {
   const firmware = await databases.createDocument<FirmwareDocument>(
     appwriteConfig.databaseId,
     appwriteConfig.firmwareCollectionId,
-    ID.unique(),
+    payload.firmwareId,
     {
       userId: payload.user.$id,
       boardId: payload.board.$id,
@@ -90,42 +138,45 @@ export async function uploadFirmwareRelease(payload: {
     firmwarePermissions(payload.user.$id),
   );
 
-  await databases.updateDocument<BoardDocument>(
-    appwriteConfig.databaseId,
-    appwriteConfig.boardsCollectionId,
-    payload.board.$id,
-    {
-      firmwareVersion: payload.version,
-      updatedAt: now,
-    },
-  );
+  await deployFirmwareToBoard(payload.board.$id, payload.firmwareId, payload.deploymentId);
 
   return firmware;
 }
 
-export async function markFirmwareAsCurrent(board: BoardDocument, firmware: FirmwareDocument) {
-  const history = await listFirmwareHistory(board.$id);
+async function deployFirmwareToBoard(boardId: string, firmwareId: string, deploymentId: string) {
+  if (hasBoardAdminFunction()) {
+    return executeFunction<{ boardId: string; firmwareId: string; deploymentId: string }, { board: BoardDocument; firmware: FirmwareDocument; mqtt?: { published: boolean; reason?: string } }>(
+      appwriteConfig.boardAdminFunctionId,
+      { boardId, firmwareId, deploymentId },
+      '/deploy-firmware',
+    );
+  }
 
-  await Promise.all(
-    history.map((entry) =>
-      databases.updateDocument<FirmwareDocument>(
-        appwriteConfig.databaseId,
-        appwriteConfig.firmwareCollectionId,
-        entry.$id,
-        { deployed: entry.$id === firmware.$id },
-      ),
-    ),
-  );
+  const firmware = (await listFirmwareHistory(boardId)).find((entry) => entry.$id === firmwareId);
+  if (!firmware) {
+    throw new Error('Firmware release was not found.');
+  }
 
   await databases.updateDocument<BoardDocument>(
     appwriteConfig.databaseId,
     appwriteConfig.boardsCollectionId,
-    board.$id,
+    boardId,
     {
-      firmwareVersion: firmware.version,
+      desiredFirmwareId: firmwareId,
+      desiredVersion: firmware.version,
+      desiredDeploymentId: deploymentId,
+      otaStatus: 'pending',
+      lastOtaError: '',
       updatedAt: new Date().toISOString(),
     },
   );
+
+  return { firmware };
+}
+
+export async function markFirmwareAsCurrent(board: BoardDocument, firmware: FirmwareDocument) {
+  const deploymentId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+  await deployFirmwareToBoard(board.$id, firmware.$id, deploymentId);
 }
 
 export async function deleteFirmwareRelease(firmware: FirmwareDocument) {

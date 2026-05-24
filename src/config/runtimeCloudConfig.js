@@ -53,6 +53,12 @@ function getRendererCloudConfig() {
     agentSettingsFunctionId: deriveFunctionId(appwriteManifest, 'agent-settings'),
     agentGatewayFunctionId: deriveFunctionId(appwriteManifest, 'agent-gateway'),
     boardDetectionFunctionId: deriveFunctionId(appwriteManifest, 'board-detection'),
+    mqttHost: process.env.TANTALUM_MQTT_HOST || appwriteManifest.mqttHost || '',
+    mqttPort: process.env.TANTALUM_MQTT_PORT || appwriteManifest.mqttPort || '',
+    mqttUsername: process.env.TANTALUM_MQTT_DEVICE_USERNAME || '',
+    mqttPassword: process.env.TANTALUM_MQTT_DEVICE_PASSWORD || '',
+    mqttCaCert: process.env.TANTALUM_MQTT_CA_CERT || '',
+    tlsCaCert: process.env.TANTALUM_TLS_CA_CERT || '',
   };
 }
 

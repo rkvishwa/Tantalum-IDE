@@ -35,6 +35,8 @@ const BOARD_OPTIONS = [
   { value: 'arduino:avr:uno', label: 'Arduino Uno' },
 ];
 
+const CLOUD_BOARD_OPTIONS = BOARD_OPTIONS.filter((option) => option.value.startsWith('esp32:') || option.value.startsWith('esp8266:'));
+
 const EMPTY_GIT_CONFIGURATION: GitConfiguration = {
   defaultProvider: 'github',
   githubUsername: '',
@@ -74,8 +76,6 @@ export function SettingsPage({
   const [boardForm, setBoardForm] = useState<BoardInput>({
     name: '',
     boardType: 'esp32:esp32:esp32',
-    wifiSSID: '',
-    wifiPassword: '',
   });
 
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
@@ -107,7 +107,7 @@ export function SettingsPage({
       return;
     }
     try {
-      const nextBoards = await listBoards();
+      const nextBoards = await listBoards({ bypassCache: true });
       setBoards(nextBoards);
       if (!selectedBoardId && nextBoards.length > 0) {
         setSelectedBoardId(nextBoards[0].$id);
@@ -314,15 +314,15 @@ export function SettingsPage({
     try {
       const result = await createBoard(boardForm, user);
       const doc = result.board;
-      if (boardForm.wifiSSID || boardForm.wifiPassword) {
-        await window.tantalum.secrets.setBoardSecrets({
-          boardId: doc.$id,
-          apiToken: result.apiToken || doc.tokenPreview || '',
-          wifiPassword: boardForm.wifiPassword,
-        });
-      }
+      await window.tantalum.secrets.setBoardSecrets({
+        boardId: doc.$id,
+        apiToken: result.apiToken || doc.tokenPreview || '',
+        commandSecret: result.commandSecret ?? '',
+        mqttTopic: result.mqttTopic ?? '',
+        provisioningPop: result.provisioningPop ?? '',
+      });
       setBoardModalOpen(false);
-      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32', wifiSSID: '', wifiPassword: '' });
+      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32' });
       await refreshBoardsList();
     } catch (error) {
       console.error(error);
@@ -368,14 +368,25 @@ export function SettingsPage({
           </div>
           <dl className="detail-grid">
             <div>
-              <dt>WiFi network</dt>
-              <dd>{selectedBoard.wifiSSID}</dd>
+              <dt>Provisioning</dt>
+              <dd>{selectedBoard.provisioningStatus || 'pending'}</dd>
             </div>
             <div>
-              <dt>Current version</dt>
-              <dd>{selectedBoard.firmwareVersion || '1.0.0'}</dd>
+              <dt>Actual version</dt>
+              <dd>{selectedBoard.firmwareVersion || '0.0.0'}</dd>
+            </div>
+            <div>
+              <dt>Desired version</dt>
+              <dd>{selectedBoard.desiredVersion || 'No deployment'}</dd>
+            </div>
+            <div>
+              <dt>WiFi credentials</dt>
+              <dd>Stored only on board</dd>
             </div>
           </dl>
+          <div className="inline-banner">
+            Your WiFi name and password are sent directly to the board. They are not uploaded to Tantalum Cloud and are not stored by the IDE.
+          </div>
           <div className="action-row">
             <button className="danger-button" type="button" onClick={() => void handleDeleteBoard()} disabled={busyAction === 'delete-board'}>
               Delete board
@@ -913,8 +924,8 @@ export function SettingsPage({
                 <h2>Devices</h2>
                 <p className="text-muted">Manage your cloud boards and hardware devices.</p>
               </div>
-              <button className="primary-button compact" type="button" onClick={() => setBoardModalOpen(true)}>
-                <Plus size={16} /> Add board
+              <button className="primary-button compact" type="button" disabled title="Connect and save a local ESP32/ESP8266 board in the IDE, then choose Enable Tantalum Cloud.">
+                <Plus size={16} /> Use local board
               </button>
             </div>
             <div className="boards-split-view">
@@ -945,36 +956,28 @@ export function SettingsPage({
         )}
       </div>
 
-      <Modal open={boardModalOpen} title="Add board" subtitle="WiFi secrets stay local to this computer." onClose={() => setBoardModalOpen(false)}>
+      <Modal open={boardModalOpen} title="Enable Tantalum Cloud from a local board" subtitle="Connect and save a local ESP32/ESP8266 board in the IDE, then choose Enable Tantalum Cloud from the local board card." onClose={() => setBoardModalOpen(false)}>
         <form className="modal-form" onSubmit={handleCreateBoard}>
           <label>
             Board name
-            <input value={boardForm.name} onChange={(event) => setBoardForm((current) => ({ ...current, name: event.target.value }))} placeholder="Living room ESP32" />
+            <input value={boardForm.name} onChange={(event) => setBoardForm((current) => ({ ...current, name: event.target.value }))} placeholder="Living room ESP32" disabled />
           </label>
           <label>
             Board type
-            <select value={boardForm.boardType} onChange={(event) => setBoardForm((current) => ({ ...current, boardType: event.target.value }))}>
-              {BOARD_OPTIONS.map((option) => (
+            <select value={boardForm.boardType} onChange={(event) => setBoardForm((current) => ({ ...current, boardType: event.target.value }))} disabled>
+              {CLOUD_BOARD_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
             </select>
           </label>
-          <label>
-            WiFi SSID
-            <input value={boardForm.wifiSSID} onChange={(event) => setBoardForm((current) => ({ ...current, wifiSSID: event.target.value }))} placeholder="Office WiFi" />
-          </label>
-          <label>
-            WiFi password
-            <input type="password" value={boardForm.wifiPassword} onChange={(event) => setBoardForm((current) => ({ ...current, wifiPassword: event.target.value }))} placeholder="••••••••" />
-          </label>
           <div className="form-actions">
             <button className="secondary-button" type="button" onClick={() => setBoardModalOpen(false)}>
               Cancel
             </button>
-            <button className="primary-button" type="submit" disabled={busyAction === 'create-board'}>
-              {busyAction === 'create-board' ? 'Creating...' : 'Create board'}
+            <button className="primary-button" type="submit" disabled>
+              Use Local boards
             </button>
           </div>
         </form>

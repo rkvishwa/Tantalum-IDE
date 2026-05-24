@@ -55,6 +55,7 @@ import {
   testCustomCredential,
   updateCustomCredential,
   type AgentCredentialInput,
+  type AgentCreditAccount,
   type AgentCustomCredential,
   type AgentPreferences,
   type AgentSettingsState,
@@ -78,6 +79,9 @@ import type {
   AgentTaskStatus,
   AgentThreadFileReference,
   AgentThreadMemory,
+  AgentToolDescriptor,
+  AgentToolRequest,
+  AgentToolSettingsResponse,
   PendingAgentAction,
   PendingAgentActionStatus,
 } from '@/types/electron';
@@ -122,8 +126,21 @@ type AgentPanelProps = {
   } | null;
   activeSelection?: AgentEditorSelectionContext | null;
   boardContext?: {
+    id?: string;
     name: string;
     fqbn: string;
+  } | null;
+  localBoardContext?: {
+    profileId?: string;
+    name: string;
+    fqbn: string;
+    port: string;
+    boardLabel?: string;
+    connected?: boolean;
+  } | null;
+  arduinoPreferences?: {
+    verifyBeforeUpload: boolean;
+    nextReleaseVersion?: string;
   } | null;
   pushConsole: (message: string, level?: 'info' | 'success' | 'error') => void;
   pushToast: (
@@ -218,6 +235,27 @@ function formatRelativeTime(value: string | null | undefined) {
 
 function formatCredits(value: number) {
   return Number.isFinite(value) ? value.toLocaleString() : '0';
+}
+
+function normalizeCreditNumber(value: number | null | undefined) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function getCreditBalance(account: AgentCreditAccount) {
+  const monthlyAllowance = Math.max(0, normalizeCreditNumber(account.monthlyAllowance));
+  const usedCredits = Math.max(0, normalizeCreditNumber(account.usedCredits));
+  const remainingCredits = Math.max(0, monthlyAllowance - usedCredits);
+
+  return {
+    monthlyAllowance,
+    usedCredits,
+    remainingCredits,
+  };
+}
+
+function formatCreditBalance(remainingCredits: number, monthlyAllowance: number) {
+  return `${formatCredits(remainingCredits)}/${formatCredits(monthlyAllowance)}`;
 }
 
 function formatDetailedDate(value: string | null | undefined) {
@@ -1064,6 +1102,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function asAgentToolRequest(value: unknown): AgentToolRequest | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const requestId = typeof value.requestId === 'string' ? value.requestId.trim() : '';
+  const toolId = typeof value.toolId === 'string' ? value.toolId.trim() : '';
+  const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+  if (!toolId || !summary) {
+    return undefined;
+  }
+
+  return {
+    requestId: requestId || `${toolId}:${Date.now()}`,
+    toolId,
+    summary,
+    risk: typeof value.risk === 'string' ? value.risk : 'medium',
+    origin: typeof value.origin === 'string' ? value.origin : 'user',
+    arguments: isRecord(value.arguments) ? value.arguments : {},
+    approvalReason: typeof value.approvalReason === 'string' && value.approvalReason.trim() ? value.approvalReason.trim() : undefined,
+  };
+}
+
 function asPendingAgentAction(value: unknown): PendingAgentAction | null {
   if (!isRecord(value)) {
     return null;
@@ -1085,6 +1146,7 @@ function asPendingAgentAction(value: unknown): PendingAgentAction | null {
     reason: typeof value.reason === 'string' ? value.reason : 'pending_action',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
     status: isPendingAgentActionStatus(value.status) ? value.status : 'pending',
+    toolRequest: asAgentToolRequest(value.toolRequest),
   };
 }
 
@@ -1837,6 +1899,8 @@ export function AgentPanel({
   activeTab,
   activeSelection = null,
   boardContext = null,
+  localBoardContext = null,
+  arduinoPreferences = null,
   pushConsole,
   pushToast,
   pendingReview = null,
@@ -1895,6 +1959,8 @@ export function AgentPanel({
   const [composerReviewOpen, setComposerReviewOpen] = useState(true);
   const [composerTasksOpen, setComposerTasksOpen] = useState(false);
   const [credentialForm, setCredentialForm] = useState<CredentialFormState>(EMPTY_CREDENTIAL_FORM);
+  const [agentToolSettings, setAgentToolSettings] = useState<AgentToolSettingsResponse | null>(null);
+  const [savingAgentToolId, setSavingAgentToolId] = useState<string | null>(null);
 
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -2021,6 +2087,40 @@ export function AgentPanel({
 
     return offProgress;
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadToolSettings() {
+      const result = await window.tantalum.agent.tools.listSettings();
+      if (cancelled) {
+        return;
+      }
+
+      if (result.success) {
+        setAgentToolSettings({
+          descriptors: result.descriptors,
+          settings: result.settings,
+          categories: result.categories,
+        });
+      } else {
+        pushConsole(result.error || 'Unable to load agent tool settings.', 'error');
+      }
+    }
+
+    void loadToolSettings();
+    const offSettings = window.tantalum.agent.tools.onSettingsChanged((settings) => {
+      if (!cancelled) {
+        setAgentToolSettings(settings);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      offSettings();
+    };
+  }, [pushConsole]);
+
   const hasCloudAgent = hasAgentCloudConfiguration();
   const preferences = settings.preferences;
   const metadata = settings.managedModelMetadata;
@@ -2077,7 +2177,16 @@ export function AgentPanel({
   }, [contextItems, draftPrompt, isReplyingToThread, messages]);
   const contextPercent = contextWindow > 0 ? Math.min(100, (estimatedContextTokens / contextWindow) * 100) : 0;
 
-  const canUseManaged = settings.managedAvailable && settings.creditAccount.remainingCredits > 0;
+  const creditBalance = getCreditBalance(settings.creditAccount);
+  const managedHasCredits = creditBalance.remainingCredits > 0;
+  const canUseManaged = settings.managedAvailable && managedHasCredits;
+  const managedUnavailableMessage = !settings.managedAvailable
+    ? 'Managed agent access is unavailable until a pool key is assigned.'
+    : !managedHasCredits
+      ? `Managed agent credit limit reached. ${formatCreditBalance(creditBalance.remainingCredits, creditBalance.monthlyAllowance)} credits remain${
+          settings.creditAccount.resetAt ? ` until ${formatDetailedDate(settings.creditAccount.resetAt)}` : ''
+        }.`
+      : null;
   const canUseCustom = Boolean(selectedCredential && selectedModel);
   const showInitialAgentLoading = loadingSettings && !settingsBootstrapped;
   const canSend =
@@ -2856,6 +2965,8 @@ export function AgentPanel({
         activeTab: activeTabContext,
         contextItems,
         boardContext,
+        localBoardContext,
+        arduinoPreferences,
         pendingAction: approvedAction,
         taskList,
         completedTaskReferences,
@@ -2907,6 +3018,30 @@ export function AgentPanel({
         metadata: assistantMetadata,
       });
       setMessages((current) => [...current, assistantMetadata ? { ...assistantMessage, metadata: assistantMetadata } : assistantMessage]);
+
+      const recommendedToolAction = Array.isArray(result.meta?.recommendedToolActions)
+        ? result.meta.recommendedToolActions.map(asPendingAgentAction).find(Boolean) ?? null
+        : null;
+      if (recommendedToolAction) {
+        const pendingAction: PendingAgentAction = {
+          ...recommendedToolAction,
+          threadId,
+          status: 'pending',
+        };
+        const toolRequest = pendingAction.toolRequest;
+        const permissionMessage = toolRequest?.approvalReason || toolRequest?.summary || 'Approve this IDE tool action to run it, or skip it.';
+        const pendingMessage = await createAgentThreadMessage({
+          threadId,
+          role: 'assistant',
+          content: permissionMessage,
+          metadata: {
+            pendingAction,
+          },
+        });
+        setMessages((current) => [...current, { ...pendingMessage, metadata: { pendingAction } }]);
+        setThreadWaitingForApproval(threadId, true);
+        pushConsole('Waiting for approval before installing an Arduino dependency suggested from generated code.', 'info');
+      }
 
       const skippedFiles = Array.isArray(result.skippedFiles) ? result.skippedFiles : [];
       if (skippedFiles.length > 0) {
@@ -3083,6 +3218,8 @@ export function AgentPanel({
         activeTab: activeTabContext,
         contextItems: initialRunContext.contextItems,
         boardContext,
+        localBoardContext,
+        arduinoPreferences,
         pendingAction: latestPendingAction,
         taskList: latestTaskList,
         completedTaskReferences,
@@ -3192,7 +3329,7 @@ export function AgentPanel({
         return;
       }
 
-      const approvedAction = routed.reason === 'approved_pending_action'
+      const approvedAction = routed.reason === 'approved_pending_action' || routed.reason === 'approved_tool_action'
         ? asPendingAgentAction(routed.pendingAction) ?? latestPendingAction
         : null;
       const runTaskList = approvedAction
@@ -3621,9 +3758,9 @@ export function AgentPanel({
   }
 
   function renderBottomStatusBar() {
-    const remainingCredits = settings.creditAccount.remainingCredits;
-    const monthlyAllowance = settings.creditAccount.monthlyAllowance;
-    const creditPercent = monthlyAllowance > 0 ? Math.max(0, Math.min(100, (remainingCredits / monthlyAllowance) * 100)) : 100;
+    const { remainingCredits, monthlyAllowance } = creditBalance;
+    const creditPercent = monthlyAllowance > 0 ? Math.max(0, Math.min(100, (remainingCredits / monthlyAllowance) * 100)) : 0;
+    const creditsExhausted = remainingCredits <= 0;
     const radius = 5.5;
     const strokeWidth = 1.6;
     const circ = 2 * Math.PI * radius; // ~34.55
@@ -3664,8 +3801,8 @@ export function AgentPanel({
             <em>{formatCompactTokens(contextWindow)}</em>
           </div>
           <div
-            className="tantalum-ai-credit-badge"
-            title={`Remaining credits: ${formatCredits(remainingCredits)} / ${formatCredits(monthlyAllowance)} (${creditPercent.toFixed(0)}% left)`}
+            className={`tantalum-ai-credit-badge ${creditsExhausted ? 'exhausted' : ''}`}
+            title={`Remaining credits: ${formatCreditBalance(remainingCredits, monthlyAllowance)} (${creditPercent.toFixed(0)}% left)`}
           >
             <svg className="tantalum-ai-svg-loader" width="14" height="14" viewBox="0 0 14 14">
               <circle
@@ -3691,7 +3828,7 @@ export function AgentPanel({
                 transform="rotate(-90 7 7)"
               />
             </svg>
-            <span className="credits-amount">{formatCredits(remainingCredits)}</span>
+            <span className="credits-amount">{formatCreditBalance(remainingCredits, monthlyAllowance)}</span>
           </div>
         </div>
       </div>
@@ -4295,6 +4432,8 @@ export function AgentPanel({
     const effectiveStatus: PendingAgentActionStatus =
       actionStatus === 'pending' && latestPendingAction && latestPendingAction.id !== action.id ? 'expired' : actionStatus;
     const taskList = liveTaskLists.get(`action:${action.id}`) ?? asAgentTaskList(message.metadata?.taskList) ?? findLatestTaskList(messages, action.id);
+    const toolRequest = action.toolRequest;
+    const isToolAction = action.kind === 'tool' && Boolean(toolRequest);
     const pendingFileChanges =
       taskList?.items.reduce<Array<{ key: string; action: string; filePath: string; label: string }>>((changes, item) => {
         const filePath = taskTargetPath(item);
@@ -4322,27 +4461,45 @@ export function AgentPanel({
     const isSkippedState = effectiveStatus === 'skipped';
     const buttonsDisabled = !isWaiting || busy || activeThreadIsRunning;
     const approvalStateLabel = isSkippedState ? 'skipped' : isApprovedState ? 'approved' : effectiveStatus === 'expired' ? 'unavailable' : 'pending approval';
-    const plannedChangeLabel = pendingFileChanges.length
-      ? `${pendingFileChanges.length} ${pendingFileChanges.length === 1 ? 'file' : 'files'} ${approvalStateLabel}`
-      : taskList?.items.length
-        ? `${taskList.items.length} planned ${taskList.items.length === 1 ? 'update' : 'updates'} ${approvalStateLabel}`
-      : `${action.riskLevel || 'workspace'} risk workspace change`;
+    const plannedChangeLabel = isToolAction && toolRequest
+      ? `${toolRequest.toolId} / ${toolRequest.risk || action.riskLevel || 'medium'} risk / ${approvalStateLabel}`
+      : pendingFileChanges.length
+        ? `${pendingFileChanges.length} ${pendingFileChanges.length === 1 ? 'file' : 'files'} ${approvalStateLabel}`
+        : taskList?.items.length
+          ? `${taskList.items.length} planned ${taskList.items.length === 1 ? 'update' : 'updates'} ${approvalStateLabel}`
+          : `${action.riskLevel || 'workspace'} risk workspace change`;
     const permissionCopy =
-      effectiveStatus === 'executed'
-        ? 'This workspace change was approved and applied.'
-        : effectiveStatus === 'skipped'
-          ? 'This workspace change was skipped.'
-          : effectiveStatus === 'expired'
-            ? 'A newer permission request replaced this one.'
-            : effectiveStatus === 'blocked'
-              ? 'Tantalum AI needs approval again before it can continue.'
-              : 'Tantalum AI needs permission before it can make changes in this workspace.';
+      isToolAction
+        ? effectiveStatus === 'executed'
+          ? 'This IDE tool action was approved and completed.'
+          : effectiveStatus === 'skipped'
+            ? 'This IDE tool action was skipped.'
+            : effectiveStatus === 'expired'
+              ? 'A newer permission request replaced this one.'
+              : effectiveStatus === 'blocked'
+                ? 'Tantalum AI needs approval again before it can continue.'
+                : 'Tantalum AI needs permission before it can run this IDE tool.'
+        : effectiveStatus === 'executed'
+          ? 'This workspace change was approved and applied.'
+          : effectiveStatus === 'skipped'
+            ? 'This workspace change was skipped.'
+            : effectiveStatus === 'expired'
+              ? 'A newer permission request replaced this one.'
+              : effectiveStatus === 'blocked'
+                ? 'Tantalum AI needs approval again before it can continue.'
+                : 'Tantalum AI needs permission before it can make changes in this workspace.';
 
     return (
       <div className={`pending-agent-action-card pending-agent-action-card-${effectiveStatus}`}>
         <div className="pending-agent-action-main">
-          <h4>Permission Request</h4>
+          <h4>{isToolAction ? 'IDE Tool Request' : 'Permission Request'}</h4>
           <p>{permissionCopy}</p>
+          {isToolAction && toolRequest ? (
+            <div className="pending-agent-tool-summary">
+              <strong>{toolRequest.summary}</strong>
+              {toolRequest.approvalReason ? <span>{toolRequest.approvalReason}</span> : null}
+            </div>
+          ) : null}
           {pendingFileChanges.length ? (
             <div className="pending-agent-file-list" aria-label="Files pending approval">
               <span className="pending-agent-file-list-title">Files to change</span>
@@ -4381,7 +4538,7 @@ export function AgentPanel({
           </div>
         </div>
         <div className="pending-agent-action-meta-row">
-          <FileText size={13} />
+          {isToolAction ? <Wrench size={13} /> : <FileText size={13} />}
           <span>{plannedChangeLabel}</span>
         </div>
       </div>
@@ -4744,9 +4901,9 @@ export function AgentPanel({
           </div>
         ) : null}
 
-        {!showInitialAgentLoading && preferences.selectedSource === 'managed' && !canUseManaged ? (
+        {!showInitialAgentLoading && preferences.selectedSource === 'managed' && managedUnavailableMessage ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
-            Managed agent access is unavailable until a pool key is assigned and credits remain.
+            {managedUnavailableMessage}
           </div>
         ) : null}
 
@@ -4762,6 +4919,90 @@ export function AgentPanel({
         {isViewingHistory && sessionSearchOpen ? null : renderComposer()}
         {renderBottomStatusBar()}
       </div>
+    );
+  }
+
+  async function handleAgentToolToggle(descriptor: AgentToolDescriptor, enabled: boolean) {
+    setSavingAgentToolId(descriptor.id);
+    try {
+      const result = await window.tantalum.agent.tools.updateSettings({
+        tools: {
+          [descriptor.id]: { enabled },
+        },
+      });
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+      setAgentToolSettings({
+        descriptors: result.descriptors,
+        settings: result.settings,
+        categories: result.categories,
+      });
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to update agent tool settings.', 'error');
+    } finally {
+      setSavingAgentToolId((current) => (current === descriptor.id ? null : current));
+    }
+  }
+
+  function renderAgentToolSettingsSection() {
+    const descriptors = agentToolSettings?.descriptors ?? [];
+    const categories = agentToolSettings?.categories ?? {};
+    const grouped = descriptors.reduce<Record<string, AgentToolDescriptor[]>>((groups, descriptor) => {
+      const key = descriptor.category || 'other';
+      groups[key] = [...(groups[key] ?? []), descriptor];
+      return groups;
+    }, {});
+
+    return (
+      <section className="tantalum-ai-settings-card agent-tools-settings-card">
+        <div className="card-header agent-tools-card-header">
+          <div>
+            <Wrench size={14} className="text-accent" />
+            <h3>Agent Tools</h3>
+          </div>
+          <span>Local IDE actions available to Tantalum AI</span>
+        </div>
+        {!agentToolSettings ? (
+          <div className="agent-loading-state compact" role="status">
+            <LoaderCircle size={16} className="spin" />
+            <span>Loading tools...</span>
+          </div>
+        ) : (
+          <div className="agent-tool-settings-groups">
+            {Object.entries(grouped).map(([category, tools]) => (
+              <div key={category} className="agent-tool-settings-group">
+                <h4>{categories[category] || category}</h4>
+                <div className="agent-tool-settings-list">
+                  {tools.map((descriptor) => {
+                    const enabled = agentToolSettings.settings.tools[descriptor.id]?.enabled !== false;
+                    const disabled = !descriptor.available || savingAgentToolId === descriptor.id;
+                    return (
+                      <article key={descriptor.id} className={`agent-tool-row ${descriptor.available ? '' : 'agent-tool-row-unavailable'}`}>
+                        <div>
+                          <strong>{descriptor.label}</strong>
+                          <span>{descriptor.description}</span>
+                          <code>{descriptor.id}</code>
+                          {descriptor.unavailableReason ? <small>{descriptor.unavailableReason}</small> : null}
+                        </div>
+                        <label className="agent-tool-toggle">
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            disabled={disabled}
+                            onChange={(event) => void handleAgentToolToggle(descriptor, event.target.checked)}
+                          />
+                          <span>{enabled ? 'Enabled' : 'Disabled'}</span>
+                        </label>
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     );
   }
 
@@ -4849,6 +5090,7 @@ export function AgentPanel({
         </div>
 
         {renderAgentUsageSection()}
+        {renderAgentToolSettingsSection()}
 
         {/* Existing credential creation/edit form */}
         <form className="agent-settings-card" onSubmit={(event) => void handleCredentialSubmit(event)}>
@@ -4967,9 +5209,7 @@ export function AgentPanel({
 
   function renderAgentUsageSection() {
     const creditAccount = settings.creditAccount;
-    const monthlyAllowance = creditAccount.monthlyAllowance;
-    const usedCredits = creditAccount.usedCredits;
-    const remainingCredits = creditAccount.remainingCredits;
+    const { monthlyAllowance, usedCredits, remainingCredits } = creditBalance;
     const usedPercent = monthlyAllowance > 0 ? (usedCredits / monthlyAllowance) * 100 : 0;
     const recentUsage = settings.recentUsage;
     const recentTotalTokens = recentUsage.reduce((total, event) => total + event.totalTokens, 0);

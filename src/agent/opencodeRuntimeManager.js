@@ -17,6 +17,16 @@ const {
   routeAgentPrompt,
 } = require("./agentRouter");
 const { canonicalizeCommandVerbsInText } = require("./commandCanonicalizer");
+const {
+  AGENT_TOOL_ENGINE,
+  createToolPendingAction,
+  createToolRequest,
+  createToolTaskList,
+  detectAgentToolRequest,
+  normalizeToolRequest,
+  taskListWithStatus,
+} = require("./toolRegistry");
+const { recommendMissingArduinoLibraries } = require("./toolExecutor");
 
 const DEFAULT_EXCLUDED_NAMES = new Set([
   ".aider.chat.history.md",
@@ -2596,24 +2606,6 @@ function looksLikeUncertainWorkspaceAction(prompt) {
   );
 }
 
-function shouldRunFastIntentRouterBeforeDirect(prompt) {
-  const normalized = normalizePrompt(prompt).toLowerCase();
-  if (!normalized || isRetryPrompt(normalized) || isContinuationPrompt(normalized)) {
-    return false;
-  }
-
-  const canonical = canonicalizeCommandVerbsInText(normalized);
-  const workspaceSignal =
-    /\b(files?|folders?|directories|sketch(?:es)?|workspace|project|repo|repository|codebase|structure|strucure|markdown|md|ino)\b|\.(?:ino|c|cc|cpp|cxx|h|hh|hpp|hxx|md|js|ts|tsx|jsx|json|css|html|txt|yml|yaml|toml|py)\b/i.test(
-      normalized,
-    );
-  const taskSignal =
-    /\b(create|delete|remove|move|rename|edit|update|change|fix|write|make|replace|add|put|place|transfer|scaffold|generate)\b/i.test(canonical) ||
-    /\b(?:cre+a+te|de+le+te|re+na?me|mo+ve|u?pda?te|edi?t|wri?te|ma+ke|pla?ce|tra?nsfer|sca?ffold|genera?te)\b/i.test(normalized);
-
-  return workspaceSignal || taskSignal;
-}
-
 function compactThreadMessagesForIntentRouter(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -2729,6 +2721,10 @@ class AgentRuntimeManager {
     this.securityManager = options.securityManager;
     this.markWorkspaceDirty = options.markWorkspaceDirty;
     this.addRecentFile = options.addRecentFile;
+    this.toolRegistry = options.toolRegistry || null;
+    this.toolExecutor = options.toolExecutor || null;
+    this.getAgentToolSettings = typeof options.getAgentToolSettings === "function" ? options.getAgentToolSettings : () => ({});
+    this.listInstalledLibraries = typeof options.listInstalledLibraries === "function" ? options.listInstalledLibraries : null;
     this.emitProgress = typeof options.emitProgress === "function" ? options.emitProgress : () => {};
     this.activeRuns = new Map();
   }
@@ -3594,18 +3590,14 @@ class AgentRuntimeManager {
     }
 
     const uncertainWorkspaceAction = looksLikeUncertainWorkspaceAction(prompt);
-    const fastIntentRouterCandidate = !uncertainWorkspaceAction && shouldRunFastIntentRouterBeforeDirect(prompt);
-    if (!uncertainWorkspaceAction && !fastIntentRouterCandidate) {
-      return null;
-    }
 
     return this.#repairWorkspaceAction({
       route,
       prompt,
       workspaceRoot,
       payload,
-      reason: uncertainWorkspaceAction ? "uncertain_workspace_action_repair" : "fast_intent_router",
-      forceClassifier: fastIntentRouterCandidate,
+      reason: uncertainWorkspaceAction ? "uncertain_workspace_action_repair" : "direct_intent_inquiry",
+      forceClassifier: true,
       allowImmediateLowRisk: true,
     });
   }
@@ -3629,6 +3621,99 @@ class AgentRuntimeManager {
     });
   }
 
+  #toolSettings() {
+    return this.toolRegistry?.normalizeSettings(this.getAgentToolSettings()) || {};
+  }
+
+  #disabledToolRoute(prompt, toolRequest) {
+    return {
+      engine: LOCAL_ENGINE,
+      reason: "agent_tool_disabled",
+      confidence: 0.96,
+      persistThread: true,
+      titleSuggestion: titleFromPrompt(prompt),
+      userMessage: `${toolRequest.toolId} is disabled in Agent Tools settings.`,
+      requiresUserDecision: false,
+      decisionKind: "none",
+      toolRequest,
+    };
+  }
+
+  #toolClarificationRoute(prompt, message) {
+    return {
+      engine: LOCAL_ENGINE,
+      reason: "agent_tool_clarification",
+      confidence: 0.94,
+      persistThread: true,
+      titleSuggestion: titleFromPrompt(prompt),
+      userMessage: message,
+      requiresUserDecision: true,
+      decisionKind: "clarify",
+    };
+  }
+
+  #routeToolIntent({ prompt, workspaceRoot, payload }) {
+    if (!this.toolRegistry || !this.toolExecutor) {
+      return null;
+    }
+
+    const existingPendingAction = normalizePendingAction(payload.pendingAction);
+    if (existingPendingAction?.kind === "tool" && existingPendingAction.toolRequest && (isContinuationPrompt(prompt) || payload.approvedActionId)) {
+      const taskList = normalizeTaskList(payload.taskList) || createToolTaskList(existingPendingAction.toolRequest, existingPendingAction.id);
+      return {
+        engine: AGENT_TOOL_ENGINE,
+        reason: "approved_tool_action",
+        confidence: 0.98,
+        persistThread: true,
+        titleSuggestion: titleFromPrompt(existingPendingAction.originalPrompt),
+        pendingAction: existingPendingAction,
+        toolRequest: existingPendingAction.toolRequest,
+        requiresUserDecision: false,
+        decisionKind: "none",
+        taskList,
+      };
+    }
+
+    const detected = detectAgentToolRequest(prompt, payload, workspaceRoot);
+    if (!detected) {
+      return null;
+    }
+
+    if (detected.clarification) {
+      return this.#toolClarificationRoute(prompt, detected.clarification);
+    }
+
+    const toolRequest = normalizeToolRequest(detected.request);
+    if (!toolRequest) {
+      return null;
+    }
+
+    const settings = this.#toolSettings();
+    if (!this.toolRegistry.isEnabled(toolRequest.toolId, settings)) {
+      return this.#disabledToolRoute(prompt, toolRequest);
+    }
+
+    const requiresApproval = this.toolRegistry.shouldRequireApproval(toolRequest, settings, payload.permissionMode);
+    const pendingAction = requiresApproval ? createToolPendingAction(toolRequest, prompt) : null;
+    const taskList = createToolTaskList(toolRequest, pendingAction?.id || null);
+
+    return {
+      engine: AGENT_TOOL_ENGINE,
+      reason: requiresApproval ? "agent_tool_requires_approval" : "agent_tool",
+      confidence: 0.94,
+      persistThread: true,
+      titleSuggestion: titleFromPrompt(prompt),
+      userMessage: requiresApproval
+        ? `${toolRequest.summary}. Approve this IDE tool action to run it, or skip it.`
+        : undefined,
+      pendingAction: pendingAction || undefined,
+      toolRequest,
+      requiresUserDecision: requiresApproval,
+      decisionKind: requiresApproval ? "approve_skip" : "none",
+      taskList,
+    };
+  }
+
   async route(payload = {}) {
     const retryResolution = retryPromptFromHistory(payload.prompt, payload.threadMessages);
     const prompt = retryResolution.prompt;
@@ -3649,6 +3734,11 @@ class AgentRuntimeManager {
     const payloadPendingAction = normalizePendingAction(payload.pendingAction);
     const providedTaskList = normalizeTaskList(payload.taskList);
     const providedBlockedTask = !payloadPendingAction ? providedTaskList?.items.find((item) => item.status === "blocked") : null;
+    const toolRoute = this.#routeToolIntent({ prompt, workspaceRoot, payload });
+    if (toolRoute) {
+      return toolRoute;
+    }
+
     const route = routeAgentPrompt({ ...payload, prompt });
     if (providedBlockedTask && looksLikeClarificationSelection(prompt)) {
       const repairedRoute = await this.#repairWorkspaceAction({
@@ -3882,6 +3972,20 @@ class AgentRuntimeManager {
         return await this.#runDirectLlm({ ...payload, prompt }, route, signal);
       }
 
+      if (route.engine === AGENT_TOOL_ENGINE) {
+        emitActivity("running", "Running IDE tool", route.toolRequest?.summary || "Executing the approved IDE tool action.");
+        return await this.#runAgentTool({
+          payload,
+          prompt,
+          route,
+          taskList,
+          approvedPendingAction,
+          signal,
+          threadId,
+          actionId: approvedPendingAction?.id || route.pendingAction?.id || taskList?.actionId || null,
+        });
+      }
+
       emitActivity("running", "Preparing sandbox", "Copying the workspace into an isolated temporary directory.");
       sandboxParent = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tantalum-opencode-"));
       const sandboxRoot = path.join(sandboxParent, "workspace");
@@ -4073,6 +4177,7 @@ class AgentRuntimeManager {
       const applied = await this.#applyChanges(workspaceRoot, changes);
       emitActivity("completed", "Changes applied", `${applied.length} file${applied.length === 1 ? "" : "s"} live-applied for review.`);
       throwIfAgentStopped(signal);
+      const recommendedToolActions = await this.#recommendToolActionsForChanges(workspaceRoot, changes, prompt).catch(() => []);
 
       return {
         output,
@@ -4101,6 +4206,7 @@ class AgentRuntimeManager {
           action: "opencode_live_preview",
           files: applied,
           revision: this.markWorkspaceDirty(workspaceRoot),
+          ...(recommendedToolActions.length > 0 ? { recommendedToolActions } : {}),
         },
       };
     } catch (error) {
@@ -4143,6 +4249,99 @@ class AgentRuntimeManager {
 
   async resolveApproval(requestId, approved) {
     return this.securityManager.resolveApproval(requestId, approved);
+  }
+
+  async #recommendToolActionsForChanges(workspaceRoot, changes, prompt) {
+    if (!this.toolRegistry || !this.listInstalledLibraries) {
+      return [];
+    }
+
+    const settings = this.#toolSettings();
+    if (!this.toolRegistry.isEnabled("arduino.library.install", settings)) {
+      return [];
+    }
+
+    const installed = await this.listInstalledLibraries();
+    if (!installed?.success || !Array.isArray(installed.libraries)) {
+      return [];
+    }
+
+    const recommendations = await recommendMissingArduinoLibraries({
+      workspaceRoot,
+      changes,
+      installedLibraries: installed.libraries,
+    });
+
+    return recommendations.slice(0, 5).map((recommendation) => {
+      const toolRequest = createToolRequest(
+        "arduino.library.install",
+        `Install Arduino library ${recommendation.libraryName}`,
+        {
+          name: recommendation.libraryName,
+          version: "latest",
+          includeName: recommendation.includeName,
+          sourcePath: recommendation.sourcePath,
+        },
+        {
+          origin: "agent",
+          risk: "medium",
+          approvalReason: `Generated code includes ${recommendation.includeName}, but that header was not found in installed Arduino libraries or this workspace.`,
+        },
+      );
+      return createToolPendingAction(toolRequest, prompt);
+    });
+  }
+
+  async #runAgentTool({ payload, prompt, route, taskList, approvedPendingAction, signal, threadId, actionId }) {
+    if (!this.toolExecutor) {
+      throw new Error("Agent tools are not available.");
+    }
+
+    const toolRequest = normalizeToolRequest(approvedPendingAction?.toolRequest || route.toolRequest);
+    if (!toolRequest) {
+      throw new Error("A valid tool request is required.");
+    }
+
+    const activeTaskList = {
+      ...(normalizeTaskList(taskList) || createToolTaskList(toolRequest, actionId || null)),
+      actionId: actionId || approvedPendingAction?.id || route.pendingAction?.id || null,
+    };
+    const runningTaskList = taskListWithStatus(activeTaskList, "running");
+    this.#emitAgentProgress(threadId, runningTaskList.actionId, runningTaskList, "running");
+
+    const result = await this.toolExecutor.execute(toolRequest, {
+      signal,
+      activeTab: payload.activeTab || null,
+      threadId,
+      actionId: runningTaskList.actionId,
+    });
+
+    const completedTaskList = taskListWithStatus(runningTaskList, "completed", {
+      result: result.output || `${toolRequest.toolId} completed.`,
+    });
+    this.#emitAgentProgress(threadId, completedTaskList.actionId, completedTaskList, "completed");
+
+    return {
+      output: result.output || `${toolRequest.summary} completed.`,
+      changedFiles: [],
+      requiresApproval: false,
+      route,
+      engine: AGENT_TOOL_ENGINE,
+      diagnostics: [],
+      skippedFiles: [],
+      reviewMode: "none",
+      taskList: completedTaskList,
+      actionStatus: "executed",
+      stages: [
+        { name: "routing", status: "completed", message: route.reason },
+        { name: "running_tool", status: "completed", message: toolRequest.toolId },
+      ],
+      meta: {
+        action: "agent_tool",
+        toolRequest,
+        ...(result.meta && typeof result.meta === "object" ? result.meta : {}),
+      },
+    };
   }
 
   #activeRunKey(workspaceRoot, threadId) {

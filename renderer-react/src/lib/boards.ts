@@ -1,6 +1,6 @@
 import type { Models } from 'appwrite';
 
-import { ID, Permission, Role, databases } from './appwrite';
+import { ID, Permission, Query, Role, databases } from './appwrite';
 import { appwriteConfig, hasBoardAdminFunction } from './config';
 import { executeFunction } from './functions';
 import type { BoardDocument, BoardInput } from './models';
@@ -17,15 +17,58 @@ function boardPermissions(userId: string) {
 type BoardFunctionPayload = {
   board: BoardDocument;
   apiToken: string;
+  commandSecret?: string;
+  mqttTopic?: string;
+  provisioningPop?: string;
 };
 
-export async function listBoards() {
+const BOARD_LIST_CACHE_TTL_MS = 2 * 60 * 1000;
+const BOARD_LIST_LIMIT = 100;
+const BOARD_SELECT_FIELDS = [
+  '$id',
+  'userId',
+  'name',
+  'boardType',
+  'tokenHash',
+  'tokenPreview',
+  'desiredFirmwareId',
+  'desiredVersion',
+  'desiredDeploymentId',
+  'lastAppliedDeploymentId',
+  'runtimeVersion',
+  'lastUpdateCheckAt',
+  'otaStatus',
+  'provisioningStatus',
+  'provisioningRequestedAt',
+  'provisioningMode',
+  'provisioningPop',
+  'mqttTopicSuffix',
+  'lastOtaError',
+  'firmwareVersion',
+  'status',
+  'lastSeen',
+  'lastProvisionedAt',
+  'createdAt',
+  'updatedAt',
+];
+
+export async function listBoards(options: { bypassCache?: boolean } = {}) {
   const response = await databases.listDocuments<BoardDocument>(
     appwriteConfig.databaseId,
     appwriteConfig.boardsCollectionId,
+    [
+      Query.orderDesc('createdAt'),
+      Query.limit(BOARD_LIST_LIMIT),
+      Query.select(BOARD_SELECT_FIELDS),
+    ],
+    {
+      cacheTtlMs: BOARD_LIST_CACHE_TTL_MS,
+      cacheKey: 'boards:list',
+      bypassCache: options.bypassCache,
+    },
   );
 
-  return response.documents.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return response.documents;
 }
 
 export async function createBoard(input: BoardInput, user: Models.User<Models.Preferences>) {
@@ -46,11 +89,20 @@ export async function createBoard(input: BoardInput, user: Models.User<Models.Pr
       name: input.name,
       boardType: input.boardType,
       apiToken: '',
-      wifiSSID: input.wifiSSID,
-      wifiPassword: '',
       tokenHash,
       tokenPreview: apiToken.slice(-6),
-      firmwareVersion: '1.0.0',
+      firmwareVersion: '0.0.0',
+      desiredFirmwareId: '',
+      desiredVersion: '',
+      desiredDeploymentId: '',
+      lastAppliedDeploymentId: '',
+      runtimeVersion: '',
+      lastUpdateCheckAt: null,
+      otaStatus: 'idle',
+      provisioningStatus: 'pending',
+      provisioningRequestedAt: null,
+      provisioningMode: '',
+      lastOtaError: '',
       status: 'pending',
       lastSeen: null,
       lastProvisionedAt: null,
@@ -60,7 +112,7 @@ export async function createBoard(input: BoardInput, user: Models.User<Models.Pr
     boardPermissions(user.$id),
   );
 
-  return { board, apiToken };
+  return { board, apiToken } as BoardFunctionPayload;
 }
 
 export async function updateBoard(boardId: string, updates: Partial<BoardDocument>) {
@@ -70,16 +122,26 @@ export async function updateBoard(boardId: string, updates: Partial<BoardDocumen
         value !== undefined &&
         [
           'name',
-          'wifiSSID',
           'status',
           'lastSeen',
           'lastProvisionedAt',
           'firmwareVersion',
+          'desiredFirmwareId',
+          'desiredVersion',
+          'desiredDeploymentId',
+          'lastAppliedDeploymentId',
+          'runtimeVersion',
+          'lastUpdateCheckAt',
+          'otaStatus',
+          'provisioningStatus',
+          'provisioningRequestedAt',
+          'provisioningMode',
+          'lastOtaError',
           'updatedAt',
         ].includes(key)
       );
     }),
-  );
+  ) as Record<string, unknown>;
 
   return databases.updateDocument<BoardDocument>(
     appwriteConfig.databaseId,
@@ -112,5 +174,17 @@ export async function rotateBoardToken(boardId: string) {
     },
   );
 
-  return { board, apiToken };
+  return { board, apiToken } as BoardFunctionPayload;
+}
+
+export async function startBoardProvisioning(boardId: string, mode = 'auto') {
+  if (!hasBoardAdminFunction()) {
+    throw new Error('Board admin function is required to request remote provisioning.');
+  }
+
+  return executeFunction<{ boardId: string; mode: string }, { board: BoardDocument; mqtt?: { published: boolean; reason?: string }; provisioning?: { serviceName: string; pop: string; mode: string } }>(
+    appwriteConfig.boardAdminFunctionId,
+    { boardId, mode },
+    '/start-provisioning',
+  );
 }

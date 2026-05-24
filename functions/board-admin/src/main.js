@@ -1,12 +1,21 @@
 import crypto from 'node:crypto';
 
-import { Account, Client, Databases, ID, Permission, Role } from 'node-appwrite';
+import mqtt from 'mqtt';
+import { Account, Client, Databases, ID, Permission, Query, Role } from 'node-appwrite';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
   APPWRITE_FUNCTION_PROJECT_ID,
   APPWRITE_DATABASE_ID,
   APPWRITE_BOARDS_COLLECTION_ID,
+  APPWRITE_FIRMWARE_COLLECTION_ID,
+  TANTALUM_BOARD_SECRET_KEK_V1,
+  TANTALUM_MQTT_URL,
+  TANTALUM_MQTT_HOST,
+  TANTALUM_MQTT_PORT,
+  TANTALUM_MQTT_PUBLISHER_USERNAME,
+  TANTALUM_MQTT_PUBLISHER_PASSWORD,
+  TANTALUM_MQTT_CA_CERT,
 } = process.env;
 
 function createAdminClient(req) {
@@ -52,6 +61,18 @@ function generateToken() {
   return `board_${crypto.randomBytes(32).toString('hex')}`;
 }
 
+function generateDocumentId(prefix) {
+  return `${prefix}_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function generateSecret(bytes = 32) {
+  return crypto.randomBytes(bytes).toString('hex');
+}
+
+function generateProvisioningPop() {
+  return crypto.randomBytes(6).toString('hex');
+}
+
 function hashToken(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -70,32 +91,225 @@ async function resolveUser(req) {
   return account.get();
 }
 
+function getEnvelopeKey() {
+  if (!TANTALUM_BOARD_SECRET_KEK_V1) {
+    return null;
+  }
+
+  const trimmed = TANTALUM_BOARD_SECRET_KEK_V1.trim();
+  const base64 = Buffer.from(trimmed, 'base64');
+  if (base64.length === 32) {
+    return base64;
+  }
+
+  const hex = Buffer.from(trimmed, 'hex');
+  if (hex.length === 32) {
+    return hex;
+  }
+
+  return crypto.createHash('sha256').update(trimmed).digest();
+}
+
+function encryptSecret(secret) {
+  const key = getEnvelopeKey();
+  if (!key) {
+    return '';
+  }
+
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return JSON.stringify({
+    v: 1,
+    alg: 'A256GCM',
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    data: encrypted.toString('base64'),
+  });
+}
+
+function decryptSecret(envelope) {
+  if (!envelope) {
+    return '';
+  }
+
+  const key = getEnvelopeKey();
+  if (!key) {
+    return '';
+  }
+
+  const parsed = JSON.parse(envelope);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(parsed.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(parsed.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(parsed.data, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+}
+
+function commandTopic(boardId, topicSuffix) {
+  return `tantalum/boards/${boardId}/${topicSuffix}/cmd`;
+}
+
+function normalizePem(value) {
+  return String(value || '').replace(/\\n/g, '\n').trim();
+}
+
+function mqttConnectionUrl() {
+  const configuredUrl = String(TANTALUM_MQTT_URL || '').trim();
+  if (configuredUrl) {
+    return configuredUrl;
+  }
+
+  const host = String(TANTALUM_MQTT_HOST || '').trim();
+  if (!host) {
+    return '';
+  }
+
+  const port = Number.parseInt(TANTALUM_MQTT_PORT || '8883', 10) || 8883;
+  return `mqtts://${host}:${port}`;
+}
+
+function validateMqttPublisherConfig(url) {
+  if (!url) {
+    return 'MQTT broker is not configured; heartbeat fallback remains active.';
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'mqtts:') {
+      return 'MQTT must use mqtts:// with a TLS CA certificate; heartbeat fallback remains active.';
+    }
+  } catch {
+    return 'MQTT broker URL is invalid; heartbeat fallback remains active.';
+  }
+
+  if (!normalizePem(TANTALUM_MQTT_CA_CERT)) {
+    return 'MQTT TLS CA certificate is missing; heartbeat fallback remains active.';
+  }
+
+  if (!TANTALUM_MQTT_PUBLISHER_USERNAME || !TANTALUM_MQTT_PUBLISHER_PASSWORD) {
+    return 'MQTT publisher credentials are missing; heartbeat fallback remains active.';
+  }
+
+  return '';
+}
+
+function signCommand(secret, action, deploymentId, nonce, issuedAt) {
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`${action}\n${deploymentId || ''}\n${nonce}\n${issuedAt}`)
+    .digest('hex');
+}
+
+async function publishBoardCommand(board, action, deploymentId = '') {
+  const url = mqttConnectionUrl();
+  const commandSecret = decryptSecret(board.commandSecretEnvelope);
+
+  if (!url || !board.mqttTopicSuffix || !commandSecret) {
+    return { published: false, reason: 'MQTT is not fully configured; heartbeat fallback remains active.' };
+  }
+
+  const mqttConfigError = validateMqttPublisherConfig(url);
+  if (mqttConfigError) {
+    return { published: false, reason: mqttConfigError };
+  }
+
+  const nonce = crypto.randomBytes(12).toString('hex');
+  const issuedAt = new Date().toISOString();
+  const payload = {
+    action,
+    deploymentId,
+    nonce,
+    issuedAt,
+    signature: signCommand(commandSecret, action, deploymentId, nonce, issuedAt),
+  };
+
+  const client = mqtt.connect(url, {
+    username: TANTALUM_MQTT_PUBLISHER_USERNAME,
+    password: TANTALUM_MQTT_PUBLISHER_PASSWORD,
+    ca: normalizePem(TANTALUM_MQTT_CA_CERT),
+    rejectUnauthorized: true,
+    reconnectPeriod: 0,
+    connectTimeout: 5000,
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      client.once('connect', resolve);
+      client.once('error', reject);
+    });
+
+    await new Promise((resolve, reject) => {
+      client.publish(commandTopic(board.$id, board.mqttTopicSuffix), JSON.stringify(payload), { qos: 1 }, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  } finally {
+    client.end(true);
+  }
+
+  return { published: true };
+}
+
+async function ensureUserCanAccessBoard(req, boardId) {
+  const user = await resolveUser(req);
+  const userDatabases = new Databases(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const board = await userDatabases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, boardId);
+  if (board.userId !== user.$id) {
+    throw new Error('Board does not belong to the current user.');
+  }
+  return { user, board };
+}
+
 async function createBoard(req, res) {
   const payload = req.bodyJson || {};
   const user = await resolveUser(req);
   const databases = new Databases(createAdminClient(req));
 
-  if (!payload.name || !payload.boardType || !payload.wifiSSID) {
-    return fail(res, 400, 'Board name, type, and WiFi SSID are required.');
+  if (!payload.name || !payload.boardType) {
+    return fail(res, 400, 'Board name and type are required.');
   }
 
   const apiToken = generateToken();
+  const commandSecret = generateSecret();
+  const topicSuffix = generateSecret(12);
+  const provisioningPop = generateProvisioningPop();
+  const boardId = generateDocumentId('bd');
   const now = new Date().toISOString();
 
   const board = await databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_BOARDS_COLLECTION_ID,
-    ID.unique(),
+    boardId,
     {
       userId: user.$id,
       name: payload.name,
       boardType: payload.boardType,
       apiToken: '',
-      wifiSSID: payload.wifiSSID,
-      wifiPassword: '',
       tokenHash: hashToken(apiToken),
       tokenPreview: apiToken.slice(-6),
-      firmwareVersion: '1.0.0',
+      commandSecretEnvelope: encryptSecret(commandSecret),
+      mqttTopicSuffix: topicSuffix,
+      provisioningPop,
+      firmwareVersion: '0.0.0',
+      desiredFirmwareId: '',
+      desiredVersion: '',
+      desiredDeploymentId: '',
+      lastAppliedDeploymentId: '',
+      runtimeVersion: '',
+      lastUpdateCheckAt: null,
+      otaStatus: 'idle',
+      provisioningStatus: 'pending',
+      provisioningRequestedAt: null,
+      provisioningMode: '',
+      lastOtaError: '',
       status: 'pending',
       lastSeen: null,
       lastProvisionedAt: null,
@@ -105,7 +319,13 @@ async function createBoard(req, res) {
     boardPermissions(user.$id),
   );
 
-  return ok(res, { board, apiToken }, 201);
+  return ok(res, {
+    board,
+    apiToken,
+    commandSecret,
+    mqttTopic: commandTopic(board.$id, topicSuffix),
+    provisioningPop,
+  }, 201);
 }
 
 async function rotateToken(req, res) {
@@ -114,12 +334,13 @@ async function rotateToken(req, res) {
     return fail(res, 400, 'boardId is required.');
   }
 
-  const user = await resolveUser(req);
-  const userDatabases = new Databases(createUserClient(req.headers['x-appwrite-user-jwt']));
-  await userDatabases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, payload.boardId);
-
+  const { user } = await ensureUserCanAccessBoard(req, payload.boardId);
   const databases = new Databases(createAdminClient(req));
   const apiToken = generateToken();
+  const commandSecret = generateSecret();
+  const topicSuffix = generateSecret(12);
+  const provisioningPop = generateProvisioningPop();
+
   const board = await databases.updateDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_BOARDS_COLLECTION_ID,
@@ -128,12 +349,114 @@ async function rotateToken(req, res) {
       apiToken: '',
       tokenHash: hashToken(apiToken),
       tokenPreview: apiToken.slice(-6),
+      commandSecretEnvelope: encryptSecret(commandSecret),
+      mqttTopicSuffix: topicSuffix,
+      provisioningPop,
       updatedAt: new Date().toISOString(),
     },
     boardPermissions(user.$id),
   );
 
-  return ok(res, { board, apiToken });
+  return ok(res, {
+    board,
+    apiToken,
+    commandSecret,
+    mqttTopic: commandTopic(board.$id, topicSuffix),
+    provisioningPop,
+  });
+}
+
+async function deployFirmware(req, res) {
+  const payload = req.bodyJson || {};
+  if (!payload.boardId || !payload.firmwareId || !payload.deploymentId) {
+    return fail(res, 400, 'boardId, firmwareId, and deploymentId are required.');
+  }
+
+  const { user } = await ensureUserCanAccessBoard(req, payload.boardId);
+  const userDatabases = new Databases(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const firmware = await userDatabases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_FIRMWARE_COLLECTION_ID, payload.firmwareId);
+  if (firmware.boardId !== payload.boardId || firmware.userId !== user.$id) {
+    return fail(res, 403, 'Firmware does not belong to this board.');
+  }
+
+  const databases = new Databases(createAdminClient(req));
+  const history = await databases.listDocuments(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_FIRMWARE_COLLECTION_ID,
+    [
+      Query.equal('boardId', payload.boardId),
+      Query.equal('deployed', true),
+      Query.limit(100),
+    ],
+  );
+
+  await Promise.all(history.documents.map((entry) =>
+    databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_FIRMWARE_COLLECTION_ID, entry.$id, {
+      deployed: entry.$id === payload.firmwareId,
+    }),
+  ));
+
+  const board = await databases.updateDocument(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_BOARDS_COLLECTION_ID,
+    payload.boardId,
+    {
+      desiredFirmwareId: firmware.$id,
+      desiredVersion: firmware.version,
+      desiredDeploymentId: payload.deploymentId,
+      otaStatus: 'pending',
+      lastOtaError: '',
+      updatedAt: new Date().toISOString(),
+    },
+  );
+
+  let mqttResult;
+  try {
+    mqttResult = await publishBoardCommand(board, 'check-update', payload.deploymentId);
+  } catch (error) {
+    mqttResult = { published: false, reason: error instanceof Error ? error.message : 'MQTT publish failed.' };
+  }
+
+  return ok(res, { board, firmware, mqtt: mqttResult });
+}
+
+async function startProvisioning(req, res) {
+  const payload = req.bodyJson || {};
+  if (!payload.boardId) {
+    return fail(res, 400, 'boardId is required.');
+  }
+
+  await ensureUserCanAccessBoard(req, payload.boardId);
+  const databases = new Databases(createAdminClient(req));
+  const now = new Date().toISOString();
+  const board = await databases.updateDocument(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_BOARDS_COLLECTION_ID,
+    payload.boardId,
+    {
+      provisioningStatus: 'requested',
+      provisioningRequestedAt: now,
+      provisioningMode: payload.mode || 'auto',
+      updatedAt: now,
+    },
+  );
+
+  let mqttResult;
+  try {
+    mqttResult = await publishBoardCommand(board, 'start-provisioning');
+  } catch (error) {
+    mqttResult = { published: false, reason: error instanceof Error ? error.message : 'MQTT publish failed.' };
+  }
+
+  return ok(res, {
+    board,
+    mqtt: mqttResult,
+    provisioning: {
+      serviceName: `Tantalum-${String(board.$id).slice(-8)}`,
+      pop: board.provisioningPop || '',
+      mode: payload.mode || 'auto',
+    },
+  });
 }
 
 export default async function ({ req, res, error }) {
@@ -144,6 +467,17 @@ export default async function ({ req, res, error }) {
 
     if (req.path === '/rotate-token') {
       return await rotateToken(req, res);
+    }
+
+    if (req.path === '/deploy-firmware') {
+      if (!APPWRITE_FIRMWARE_COLLECTION_ID) {
+        return fail(res, 500, 'Firmware collection configuration is incomplete.');
+      }
+      return await deployFirmware(req, res);
+    }
+
+    if (req.path === '/start-provisioning') {
+      return await startProvisioning(req, res);
     }
 
     return await createBoard(req, res);

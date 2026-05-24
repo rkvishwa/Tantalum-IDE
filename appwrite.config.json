@@ -69,6 +69,10 @@
                 {
                     "key": "APPWRITE_BOARDS_COLLECTION_ID",
                     "value": "boards"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_COLLECTION_ID",
+                    "value": "firmwares"
                 }
             ]
         },
@@ -350,24 +354,6 @@
                     "encrypt": false
                 },
                 {
-                    "key": "wifiSSID",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 255,
-                    "default": "\"\"",
-                    "encrypt": false
-                },
-                {
-                    "key": "wifiPassword",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 255,
-                    "default": "\"\"",
-                    "encrypt": false
-                },
-                {
                     "key": "firmwareVersion",
                     "type": "string",
                     "required": false,
@@ -437,6 +423,132 @@
                     "size": 64,
                     "default": null,
                     "encrypt": false
+                },
+                {
+                    "key": "commandSecretEnvelope",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 2048,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "mqttTopicSuffix",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 128,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "provisioningPop",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "desiredFirmwareId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "desiredVersion",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "desiredDeploymentId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "lastAppliedDeploymentId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "runtimeVersion",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "lastUpdateCheckAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "otaStatus",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "idle",
+                    "encrypt": false
+                },
+                {
+                    "key": "provisioningStatus",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "pending",
+                    "encrypt": false
+                },
+                {
+                    "key": "provisioningRequestedAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "provisioningMode",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "\"\"",
+                    "encrypt": false
+                },
+                {
+                    "key": "lastOtaError",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1024,
+                    "default": "\"\"",
+                    "encrypt": false
                 }
             ],
             "indexes": [
@@ -448,12 +560,25 @@
                         "userId"
                     ],
                     "orders": []
+                },
+                {
+                    "key": "boards_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
                 }
             ]
         },
         {
             "$id": "firmwares",
-            "$permissions": [],
+            "$permissions": [
+                "create(\"users\")"
+            ],
             "databaseId": "697b8f660033fffde4be",
             "name": "Firmwares",
             "enabled": true,
@@ -555,6 +680,34 @@
                         "boardId"
                     ],
                     "orders": []
+                },
+                {
+                    "key": "firmwares_board_uploaded",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "boardId",
+                        "uploadedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "firmwares_board_deployed_uploaded",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "boardId",
+                        "deployed",
+                        "uploadedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
                 }
             ]
         },
@@ -969,6 +1122,19 @@
                     "orders": []
                 },
                 {
+                    "key": "agent_user_managed_user_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "status"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
+                },
+                {
                     "key": "agent_user_managed_pool",
                     "type": "key",
                     "status": "available",
@@ -1276,6 +1442,19 @@
                         "periodKey"
                     ],
                     "orders": []
+                },
+                {
+                    "key": "agent_credits_user_period",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "periodKey"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
                 }
             ]
         },
@@ -1419,6 +1598,19 @@
                         "requestId"
                     ],
                     "orders": []
+                },
+                {
+                    "key": "agent_usage_user_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
                 }
             ]
         },
@@ -1666,6 +1858,19 @@
                         "createdAt"
                     ],
                     "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "key": "agent_messages_thread_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "threadId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
                         "ASC"
                     ]
                 }
@@ -1972,7 +2177,9 @@
     "buckets": [
         {
             "$id": "firmware_bucket",
-            "$permissions": [],
+            "$permissions": [
+                "create(\"users\")"
+            ],
             "fileSecurity": true,
             "name": "Firmware Bucket",
             "enabled": true,
