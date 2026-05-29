@@ -10,8 +10,8 @@ This setup keeps production on self-hosted Appwrite while using Azure only as th
 - VM: `Standard_B2s_v2` by default for the MVP.
 - Disk: 64 GB OS disk plus a 256 GB attached data disk mounted at `/srv/tantalum`.
 - Network: SSH restricted to your current public IP or an explicit CIDR; ports 80 and 443 open.
-- Backup: daily local archive timer plus manual download/upload scripts.
-- Scale path: resize VM first, then split storage/database, then move Appwrite behind a load balancer only after real usage proves it is needed.
+- Backup: daily local archive timer plus managed-identity Azure Blob upload.
+- Scale path: use one-command vertical resize modes first, then split storage/database, then move Appwrite behind a load balancer only after real usage proves it is needed.
 
 The default VM is intentionally a single-node budget setup. It is not highly available. It is the right first commercial staging/early-production step when cost matters and you want portability.
 
@@ -224,7 +224,39 @@ The seed script never prints raw provider keys.
 
 ## 9. Backups
 
-The VM installs a daily `tantalum-appwrite-backup.timer`. Manual backup:
+The VM installs a daily `tantalum-appwrite-backup.timer`. In the hardened production setup this timer runs `/srv/tantalum/bin/backup-upload-azure-blob.sh`, which creates a local archive and uploads it to Azure Blob with the VM's system-assigned managed identity. No storage account key or SAS token is stored on the VM.
+
+For scheduled off-VM backups, enable the VM identity and grant it container-scoped Blob write access:
+
+```bash
+az vm identity assign \
+  --resource-group rg-tantalum-appwrite-prod \
+  --name vm-tantalum-appwrite-prod
+
+principal_id="$(az vm show \
+  --resource-group rg-tantalum-appwrite-prod \
+  --name vm-tantalum-appwrite-prod \
+  --query identity.principalId \
+  --output tsv)"
+
+container_scope="/subscriptions/<subscription-id>/resourceGroups/rg-tantalum-appwrite-prod/providers/Microsoft.Storage/storageAccounts/<storage-account>/blobServices/default/containers/appwrite-backups"
+
+az role assignment create \
+  --assignee "$principal_id" \
+  --role "Storage Blob Data Contributor" \
+  --scope "$container_scope"
+```
+
+Create `/etc/tantalum/backup-upload.env` on the VM:
+
+```bash
+AZURE_STORAGE_ACCOUNT=<storage-account>
+AZURE_STORAGE_CONTAINER=appwrite-backups
+AZURE_STORAGE_BLOB_PREFIX=scheduled
+TANTALUM_BACKUP_STATE_DIR=/var/lib/tantalum/backup
+```
+
+Manual backup from your laptop:
 
 ```bash
 pwsh ./infra/azure/backup-now.ps1 \
@@ -259,7 +291,32 @@ pwsh ./infra/azure/restore-to-vm.ps1 \
 
 Test restore before depending on backups.
 
-## 10. Health Checks
+## 10. Production Hardening
+
+Keep Docker and containerd runtime data on the data disk by bind-mounting the moved directories:
+
+```text
+/srv/tantalum/docker /var/lib/docker none bind,nofail,x-systemd.requires-mounts-for=/srv/tantalum 0 0
+/srv/tantalum/containerd /var/lib/containerd none bind,nofail,x-systemd.requires-mounts-for=/srv/tantalum 0 0
+```
+
+After changing `/etc/fstab`, validate with:
+
+```bash
+df -h /srv/tantalum /var/lib/docker /var/lib/containerd
+docker info --format 'DockerRootDir={{.DockerRootDir}}'
+```
+
+For MongoDB, do not publish the database on all interfaces. In `/srv/tantalum/appwrite/docker-compose.yml`, bind the host port to localhost only:
+
+```yaml
+ports:
+  - "127.0.0.1:27017:27017"
+```
+
+The local monitor script `/srv/tantalum/bin/tantalum-monitor.sh` should run every 5 minutes by systemd timer. It logs stable syslog fields for disk, memory, container health, and backup age. Azure Monitor Agent can forward those entries to a Log Analytics workspace through a syslog Data Collection Rule, and scheduled-query alerts should notify the production action group when any monitor metric logs `status=fail`. On Ubuntu, confirm rsyslog is forwarding to AMA after the DCR lands; if needed, link the generated AMA forwarding config from `/etc/opt/microsoft/azuremonitoragent/syslog/rsyslogconf/` into `/etc/rsyslog.d/` and restart `rsyslog`.
+
+## 11. Health Checks
 
 From your Mac:
 
@@ -286,13 +343,61 @@ Manual workflows to verify:
 - Agent bootstrap loads once and managed/custom AI calls work.
 - Board detection works or returns a clean unconfigured response.
 
-## 11. Scale And Portability Plan
+## 12. Scale And Portability Plan
 
-For the first 1000 registered users, keep this as one VM until monitoring shows real pressure. Most early projects are limited by active users, firmware file size, and AI provider cost rather than registered user count.
+For the first 1000 registered users, keep this as one VM until monitoring shows real pressure. Most early projects are limited by active users, firmware file size, function load, and AI provider cost rather than registered user count.
+
+Use always-on vertical scaling for the current single-node Appwrite deployment. Azure VM resize is simple, but it can restart the VM for a few minutes, so run it during a quiet maintenance window.
+
+Cost-aware modes:
+
+| Mode | Azure size | CPU / RAM | Estimated compute |
+| --- | --- | --- | --- |
+| Cost | `Standard_B2ls_v2` | 2 vCPU / 4 GB | about `$38.54/mo` |
+| Baseline | `Standard_B2s_v2` | 2 vCPU / 8 GB | about `$77.38/mo` |
+| Growth | `Standard_B4s_v2` | 4 vCPU / 16 GB | about `$154.03/mo` |
+| Surge | `Standard_B8s_v2` | 8 vCPU / 32 GB | about `$308.06/mo` |
+
+Do not use `B1ms` or `B2ts_v2` for Appwrite production. They are below the practical self-host floor of 2 CPU cores and 4 GB RAM.
 
 Scale sequence:
 
-1. Resize VM with `pwsh ./infra/azure/resize-vm.ps1 -Size Standard_B4s_v2`.
+1. Ask the advisor for a non-mutating recommendation:
+   ```bash
+   pwsh ./infra/azure/resize-vm.ps1 -Recommend
+   ```
+2. Dry-run the resize checks:
+   ```bash
+   pwsh ./infra/azure/resize-vm.ps1 -Mode Cost -PlanOnly
+   ```
+3. Resize in a maintenance window:
+   ```bash
+   pwsh ./infra/azure/resize-vm.ps1 -Mode Cost -Yes
+   ```
+4. Roll back or scale up with the same script:
+   ```bash
+   pwsh ./infra/azure/resize-vm.ps1 -Mode Baseline -Yes
+   pwsh ./infra/azure/resize-vm.ps1 -Mode Growth -Yes
+   ```
+5. Increase the attached data disk if `/srv/tantalum` approaches 70%.
+6. Split database/storage from the VM only after CPU/RAM/disk metrics prove it is needed.
+7. Add a second Appwrite node and load balancer only after you have an external database/storage plan.
+
+Operating rules:
+
+1. Start on `Cost` while traffic is low and monitor rows stay green.
+2. Move to `Baseline` if memory stays around 70-75%, functions feel slow, or container health alerts appear.
+3. Move to `Growth` if average CPU stays above 60% or memory stays above 75% during real traffic.
+4. Use `Surge` for sustained launch traffic or a temporary high-load event.
+5. Treat disk separately; VM size changes do not increase the 256 GB data disk.
+
+The resize script checks target-size availability, recent Blob backup age, Appwrite health, current DNS, and post-resize recovery. After Azure resizes the VM, it uses Azure VM Run Command to run `docker compose up -d` in `/srv/tantalum/appwrite`, so it does not depend on SSH access from your current IP. If the VM public IP ever changes, the script prints the exact DNS action for `api.metl.run`.
+
+If Azure introduces a better size later, use `-Size <AzureVmSize>` as an explicit override. The script will still run the same safety checks, but the embedded monthly estimate is available only for the named modes.
+
+Longer-term scale sequence:
+
+1. Stay with one VM while the app is early and traffic is modest.
 2. Increase the attached data disk if storage grows.
 3. Move large backups to Azure Blob or another S3-compatible store.
 4. Split database/storage from the VM only after CPU/RAM/disk metrics prove it is needed.

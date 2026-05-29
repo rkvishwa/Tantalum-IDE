@@ -1,7 +1,7 @@
 {
     "projectId": "tantalum",
     "projectName": "Tantalum",
-    "endpoint": "https://fra.cloud.appwrite.io/v1",
+    "endpoint": "https://api.metl.run/v1",
     "settings": {
         "services": {
             "account": true,

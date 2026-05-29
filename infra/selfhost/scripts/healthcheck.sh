@@ -23,7 +23,16 @@ if [[ "$base" != */v1 ]]; then
 fi
 
 echo "Endpoint: $base"
-curl --fail --show-error --silent "$base/health" | jq . || curl --fail --show-error --silent "$base/health"
+
+curl_args=(--fail --show-error --silent)
+if [[ -n "${APPWRITE_PROJECT_ID:-}" ]]; then
+  curl_args+=(-H "X-Appwrite-Project: ${APPWRITE_PROJECT_ID}")
+fi
+if [[ -n "${APPWRITE_API_KEY:-}" ]]; then
+  curl_args+=(-H "X-Appwrite-Key: ${APPWRITE_API_KEY}")
+fi
+
+curl "${curl_args[@]}" "$base/health" | jq . || curl "${curl_args[@]}" "$base/health"
 
 if command -v docker >/dev/null 2>&1; then
   echo ""
