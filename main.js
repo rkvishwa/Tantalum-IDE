@@ -3597,12 +3597,16 @@ async function deployCloudFirmwareFromAgent(cloudConfig, boardId, firmwareId, de
       },
     });
 
-    const parsed = safeJsonParse(execution.responseBody || '{"ok":false,"error":"Function returned an empty response."}', {
+    const responseBody = functionExecutionResponseBody(execution);
+    const parsed = safeJsonParse(responseBody || JSON.stringify({
+      ok: false,
+      error: functionExecutionDiagnostic(execution) || "Function returned an empty response.",
+    }), {
       ok: false,
       error: "Function returned an unreadable response.",
     });
-    if (Number(execution.responseStatusCode || 0) >= 400 || !parsed?.ok || !parsed?.data) {
-      throw new Error(parsed?.error || execution.responseBody || execution.errors || "Function execution failed.");
+    if (functionExecutionResponseStatusCode(execution) >= 400 || !parsed?.ok || parsed?.data === undefined || parsed?.data === null) {
+      throw new Error(parsed?.error || responseBody || functionExecutionDiagnostic(execution) || "Function execution failed.");
     }
     return parsed.data;
   }
@@ -3859,6 +3863,85 @@ function safeJsonParse(value, fallback) {
   }
 }
 
+function functionExecutionResponseBody(execution) {
+  if (typeof execution?.responseBody === "string") {
+    if (execution.responseBody.length > 0 || typeof execution.response !== "string") {
+      return execution.responseBody;
+    }
+  }
+
+  if (typeof execution?.response === "string") {
+    return execution.response;
+  }
+
+  return typeof execution?.responseBody === "string" ? execution.responseBody : "";
+}
+
+function functionExecutionResponseStatusCode(execution) {
+  const statusCode = Number(execution?.responseStatusCode ?? execution?.statusCode ?? 0);
+  return Number.isFinite(statusCode) ? statusCode : 0;
+}
+
+function cleanFunctionExecutionText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function functionExecutionDiagnostic(execution) {
+  return [
+    cleanFunctionExecutionText(execution?.errors),
+    cleanFunctionExecutionText(execution?.stderr),
+    cleanFunctionExecutionText(execution?.logs),
+    cleanFunctionExecutionText(execution?.stdout),
+  ].find(Boolean) || "";
+}
+
+function normalizeFunctionExecutionShape(execution) {
+  if (!execution || typeof execution !== "object") {
+    return execution;
+  }
+
+  const responseBody = functionExecutionResponseBody(execution);
+  const responseStatusCode = functionExecutionResponseStatusCode(execution);
+  const normalized = { ...execution };
+
+  if (typeof normalized.responseBody !== "string" && typeof responseBody === "string") {
+    normalized.responseBody = responseBody;
+  }
+
+  if (!Number.isFinite(Number(normalized.responseStatusCode)) && Number.isFinite(responseStatusCode)) {
+    normalized.responseStatusCode = responseStatusCode;
+  }
+
+  if (typeof normalized.errors !== "string" && typeof execution.stderr === "string") {
+    normalized.errors = execution.stderr;
+  }
+
+  if (typeof normalized.logs !== "string" && typeof execution.stdout === "string") {
+    normalized.logs = execution.stdout;
+  }
+
+  return normalized;
+}
+
+function functionExecutionIsUncacheable(execution) {
+  const status = String(execution?.status || "").toLowerCase();
+  if (status === "failed" || status === "timeout") {
+    return true;
+  }
+
+  if (functionExecutionResponseStatusCode(execution) >= 400) {
+    return true;
+  }
+
+  const responseBody = functionExecutionResponseBody(execution).trim();
+  if (!responseBody) {
+    return true;
+  }
+
+  const parsed = safeJsonParse(responseBody, null);
+  return Boolean(parsed && typeof parsed === "object" && parsed.ok === false);
+}
+
 async function executeAgentGatewayRequest(body) {
   const cloudConfig = getRendererCloudConfig();
   if (!cloudConfig.agentGatewayFunctionId) {
@@ -3876,10 +3959,14 @@ async function executeAgentGatewayRequest(body) {
       headers: { "content-type": "application/json" },
     },
   });
-  const parsed = safeJsonParse(execution.responseBody || "{}", { ok: false, error: "Agent gateway returned an unreadable response." });
+  const responseBody = functionExecutionResponseBody(execution);
+  const parsed = safeJsonParse(responseBody || "{}", {
+    ok: false,
+    error: functionExecutionDiagnostic(execution) || "Agent gateway returned an empty response.",
+  });
 
-  if (execution.responseStatusCode >= 400 || !parsed.ok) {
-    throw new Error(parsed.error || execution.responseBody || execution.errors || "Agent gateway execution failed.");
+  if (functionExecutionResponseStatusCode(execution) >= 400 || !parsed.ok) {
+    throw new Error(parsed.error || responseBody || functionExecutionDiagnostic(execution) || "Agent gateway execution failed.");
   }
 
   return parsed.data;
@@ -3924,10 +4011,14 @@ async function executeBoardDetectionAi(candidate) {
       headers: { "content-type": "application/json" },
     },
   });
-  const parsed = safeJsonParse(execution.responseBody || "{}", { ok: false, error: "Board detection AI returned an unreadable response." });
+  const responseBody = functionExecutionResponseBody(execution);
+  const parsed = safeJsonParse(responseBody || "{}", {
+    ok: false,
+    error: functionExecutionDiagnostic(execution) || "Board detection AI returned an empty response.",
+  });
 
-  if (execution.responseStatusCode >= 400 || !parsed.ok) {
-    throw new Error(parsed.error || execution.responseBody || execution.errors || "Board detection AI failed.");
+  if (functionExecutionResponseStatusCode(execution) >= 400 || !parsed.ok) {
+    throw new Error(parsed.error || responseBody || functionExecutionDiagnostic(execution) || "Board detection AI failed.");
   }
 
   return parsed.data || null;
@@ -5272,12 +5363,15 @@ ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
           bypassCache: Boolean(payload.bypassCache),
         })
       : await appwriteRequest(request);
+    const normalizedExecution = normalizeFunctionExecutionShape(execution);
 
     if (cacheTtlMs <= 0) {
       clearAppwriteReadCache();
+    } else if (functionExecutionIsUncacheable(normalizedExecution)) {
+      clearAppwriteReadCache();
     }
 
-    return { success: true, execution };
+    return { success: true, execution: normalizedExecution };
   } catch (error) {
     return toErrorResult(error);
   }

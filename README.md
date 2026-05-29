@@ -99,7 +99,7 @@ Function variables:
 - `device-gateway`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`, `APPWRITE_FIRMWARE_BUCKET_ID`
 - `agent-settings`: `APPWRITE_DATABASE_ID` plus agent collection IDs and `AGENT_DEFAULT_MONTHLY_CREDITS`
 - `agent-gateway`: `APPWRITE_DATABASE_ID` plus agent collection IDs and `AGENT_DEFAULT_MONTHLY_CREDITS`
-- `board-detection`: `APPWRITE_DATABASE_ID` plus board-detection collection IDs
+- `board-detection`: `APPWRITE_DATABASE_ID`, `APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID`, and board-detection cache/usage collection IDs
 - MQTT command variables for `board-admin`: `TANTALUM_MQTT_URL` or `TANTALUM_MQTT_HOST`/`TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_PUBLISHER_USERNAME`, `TANTALUM_MQTT_PUBLISHER_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`. MQTT requires `mqtts://` plus a CA certificate; if these are missing, HTTPS heartbeat fallback remains active.
 - MQTT device subscribe variables for desktop/runtime builds: `TANTALUM_MQTT_HOST`, `TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_DEVICE_USERNAME`, `TANTALUM_MQTT_DEVICE_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
 - Set `TANTALUM_BOARD_SECRET_KEK_V1` on `board-admin` to encrypt per-board MQTT command secrets. Generate it with the same 32-byte base64 command shown below.
@@ -126,7 +126,9 @@ Then run the write migration with `APPWRITE_API_KEY` and the same `TANTALUM_SECR
 npm run migrate:api-key-envelopes -- --apply
 ```
 
-For new managed-pool or board-detection provider keys without an admin UI, generate an encrypted document fragment with:
+The API-key envelope migration also copies any legacy `board_detection_model_config` rows into `utility_ai_model_pool` with `taskTags: ["board-detection"]`; it does not delete the legacy collection.
+
+For new managed-pool or utility AI model pool provider keys without an admin UI, generate an encrypted document fragment with:
 
 ```bash
 npm run secret:encrypt-api-key

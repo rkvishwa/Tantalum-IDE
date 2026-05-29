@@ -39,6 +39,8 @@ const endpoint = String(process.env.APPWRITE_ENDPOINT || manifest.endpoint || ''
 const projectId = String(process.env.APPWRITE_PROJECT_ID || manifest.projectId || '').trim();
 const databaseId = String(process.env.APPWRITE_DATABASE_ID || manifest.tablesDB?.[0]?.$id || '').trim();
 const appwriteApiKey = String(process.env.APPWRITE_API_KEY || '').trim();
+const legacyBoardDetectionCollectionId = 'board_detection_model_config';
+const utilityAiModelPoolCollectionId = 'utility_ai_model_pool';
 
 const collections = [
   {
@@ -52,8 +54,8 @@ const collections = [
     hasApiKeyPreview: true,
   },
   {
-    id: 'board_detection_model_config',
-    label: 'Board detection model config',
+    id: utilityAiModelPoolCollectionId,
+    label: 'Utility AI model pool',
     hasApiKeyPreview: false,
   },
 ];
@@ -84,7 +86,7 @@ function redactSecret(value) {
   return `****${secret.slice(-4)}`;
 }
 
-async function appwriteRequest(method, pathName, body) {
+async function appwriteRequest(method, pathName, body, options = {}) {
   const response = await fetch(`${endpoint}${pathName}`, {
     method,
     headers: {
@@ -103,6 +105,10 @@ async function appwriteRequest(method, pathName, body) {
     payload = { rawText: text };
   }
 
+  if (options.allow404 && response.status === 404) {
+    return null;
+  }
+
   if (!response.ok) {
     throw new Error(`${method} ${pathName} failed with ${response.status}: ${payload.message || text}`);
   }
@@ -114,7 +120,11 @@ function documentPath(collectionId, documentId) {
   return `/databases/${encodeURIComponent(databaseId)}/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}`;
 }
 
-async function listDocuments(collectionId) {
+async function getDocument(collectionId, documentId) {
+  return appwriteRequest('GET', documentPath(collectionId, documentId), null, { allow404: true });
+}
+
+async function listDocuments(collectionId, options = {}) {
   const documents = [];
   let offset = 0;
   const limit = 100;
@@ -128,7 +138,12 @@ async function listDocuments(collectionId) {
       'GET',
       `/databases/${encodeURIComponent(databaseId)}/collections/${encodeURIComponent(collectionId)}/documents?${searchParams}`,
       null,
+      { allow404: Boolean(options.allowMissing) },
     );
+    if (!payload) {
+      return documents;
+    }
+
     const batch = Array.isArray(payload.documents) ? payload.documents : [];
     documents.push(...batch);
 
@@ -140,6 +155,81 @@ async function listDocuments(collectionId) {
   }
 
   return documents;
+}
+
+function ensureTaskTags(value) {
+  const tags = Array.isArray(value)
+    ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
+    : String(value || '')
+      .split(/[\n,]/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+  return tags.includes('board-detection') ? tags : [...tags, 'board-detection'];
+}
+
+function utilityModelPriority(value) {
+  if (value === null || value === undefined || value === '') {
+    return 100;
+  }
+
+  const priority = Number(value);
+  return Number.isFinite(priority) ? priority : 100;
+}
+
+function copyableUtilityAiPoolData(document, now) {
+  const rawKey = String(document.apiKey || '').trim();
+  return {
+    providerLabel: String(document.providerLabel || 'OpenAI-compatible').trim(),
+    baseUrl: String(document.baseUrl || '').trim().replace(/\/+$/, ''),
+    apiKey: rawKey || LEGACY_RAW_KEY_SENTINEL,
+    apiKeyEnvelope: String(document.apiKeyEnvelope || '').trim() || null,
+    model: String(document.model || '').trim(),
+    enabled: Boolean(document.enabled),
+    taskTags: ensureTaskTags(document.taskTags),
+    priority: utilityModelPriority(document.priority),
+    createdAt: String(document.createdAt || document.$createdAt || now),
+    updatedAt: String(document.updatedAt || document.$updatedAt || now),
+  };
+}
+
+async function copyLegacyBoardDetectionModelConfigs() {
+  const legacyDocuments = await listDocuments(legacyBoardDetectionCollectionId, { allowMissing: true });
+  const summary = {
+    checked: legacyDocuments.length,
+    wouldCreate: 0,
+    created: 0,
+    skipped: 0,
+    warnings: 0,
+  };
+  const now = new Date().toISOString();
+
+  for (const document of legacyDocuments) {
+    const existing = await getDocument(utilityAiModelPoolCollectionId, document.$id);
+    if (existing) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const data = copyableUtilityAiPoolData(document, now);
+    if (!data.baseUrl || !data.model) {
+      summary.warnings += 1;
+      console.warn(`[warn] Legacy board detection document ${document.$id} is missing baseUrl or model and was not copied.`);
+      continue;
+    }
+
+    summary.wouldCreate += 1;
+    if (applyChanges) {
+      await appwriteRequest('POST', `/databases/${encodeURIComponent(databaseId)}/collections/${encodeURIComponent(utilityAiModelPoolCollectionId)}/documents`, {
+        documentId: document.$id,
+        data,
+        permissions: [],
+      });
+      summary.created += 1;
+    }
+  }
+
+  return summary;
 }
 
 async function migrateCollection(collection) {
@@ -197,6 +287,13 @@ console.log(`API key envelope migration running in ${applyChanges ? 'APPLY' : 'D
 if (!applyChanges) {
   console.log('Pass --apply to write encrypted envelopes and replace legacy raw apiKey values.');
 }
+
+const copySummary = await copyLegacyBoardDetectionModelConfigs();
+console.log(
+  `Legacy board detection config copy: checked ${copySummary.checked}, ${applyChanges ? 'created' : 'would create'} ${
+    applyChanges ? copySummary.created : copySummary.wouldCreate
+  }, skipped ${copySummary.skipped}, warnings ${copySummary.warnings}`,
+);
 
 for (const collection of collections) {
   const summary = await migrateCollection(collection);

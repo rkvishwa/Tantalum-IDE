@@ -32,7 +32,7 @@ Required only when writing encrypted provider keys:
 Optional documents seeded when matching env vars are present:
   AGENT_OUTPUT_STYLE
   TANTALUM_MANAGED_API_KEY plus TANTALUM_MANAGED_BASE_URL
-  TANTALUM_BOARD_DETECTION_API_KEY
+  TANTALUM_UTILITY_AI_API_KEY
 
 Default mode is dry-run. Pass --yes to create or update documents.
 `);
@@ -48,7 +48,7 @@ const appwriteApiKey = String(process.env.APPWRITE_API_KEY || '').trim();
 const collectionIds = {
   appSettings: process.env.APPWRITE_APP_SETTINGS_COLLECTION_ID || 'app_settings',
   managedPool: process.env.APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID || 'agent_managed_key_pool',
-  boardDetection: process.env.APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID || 'board_detection_model_config',
+  utilityAiModelPool: process.env.APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID || 'utility_ai_model_pool',
 };
 
 function env(name, fallback = '') {
@@ -78,6 +78,13 @@ function boolEnv(name, fallback) {
   return ['1', 'true', 'yes', 'on'].includes(value);
 }
 
+function listEnv(name, fallback = '') {
+  return env(name, fallback)
+    .split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function redactSecret(value) {
   const secret = String(value || '').trim();
   if (secret.length <= 4) {
@@ -96,7 +103,7 @@ function assertReady() {
   if (applyChanges) {
     const createsEncryptedSecret =
       envFirst(['TANTALUM_MANAGED_API_KEY', 'MANAGED_MODEL_API_KEY']) ||
-      envFirst(['TANTALUM_BOARD_DETECTION_API_KEY', 'BOARD_DETECTION_API_KEY']);
+      env('TANTALUM_UTILITY_AI_API_KEY');
     if (createsEncryptedSecret && !process.env.TANTALUM_SECRET_KEK_V1) {
       missing.push('TANTALUM_SECRET_KEK_V1');
     }
@@ -239,25 +246,27 @@ function buildSeedItems() {
     });
   }
 
-  const boardDetectionApiKey = envFirst(['TANTALUM_BOARD_DETECTION_API_KEY', 'BOARD_DETECTION_API_KEY']);
-  if (boardDetectionApiKey) {
+  const utilityAiApiKey = env('TANTALUM_UTILITY_AI_API_KEY');
+  if (utilityAiApiKey) {
     items.push({
-      label: 'Board detection model key',
-      collectionId: collectionIds.boardDetection,
-      documentId: env('TANTALUM_BOARD_DETECTION_DOCUMENT_ID', 'board_detection_primary'),
+      label: 'Utility AI model pool key',
+      collectionId: collectionIds.utilityAiModelPool,
+      documentId: env('TANTALUM_UTILITY_AI_DOCUMENT_ID', 'utility_ai_board_detection_primary'),
       permissions: [],
       data: {
-        providerLabel: env('TANTALUM_BOARD_DETECTION_PROVIDER_LABEL', 'OpenAI-compatible'),
-        baseUrl: env('TANTALUM_BOARD_DETECTION_BASE_URL', 'https://api.openai.com/v1').replace(/\/+$/, ''),
+        providerLabel: env('TANTALUM_UTILITY_AI_PROVIDER_LABEL', 'OpenAI-compatible'),
+        baseUrl: env('TANTALUM_UTILITY_AI_BASE_URL', 'https://api.openai.com/v1').replace(/\/+$/, ''),
         apiKey: LEGACY_RAW_KEY_SENTINEL,
-        apiKeyEnvelope: applyChanges ? encryptSecret(boardDetectionApiKey) : '<encrypted-on-apply>',
-        model: env('TANTALUM_BOARD_DETECTION_MODEL', 'gpt-4.1-mini'),
-        enabled: boolEnv('TANTALUM_BOARD_DETECTION_ENABLED', true),
+        apiKeyEnvelope: applyChanges ? encryptSecret(utilityAiApiKey) : '<encrypted-on-apply>',
+        model: env('TANTALUM_UTILITY_AI_MODEL', 'gpt-4.1-mini'),
+        enabled: boolEnv('TANTALUM_UTILITY_AI_ENABLED', true),
+        taskTags: listEnv('TANTALUM_UTILITY_AI_TASK_TAGS', 'board-detection'),
+        priority: intEnv('TANTALUM_UTILITY_AI_PRIORITY', 100),
         createdAt: now,
         updatedAt: now,
       },
       safeDetails: {
-        apiKeyPreview: redactSecret(boardDetectionApiKey),
+        apiKeyPreview: redactSecret(utilityAiApiKey),
       },
     });
   }

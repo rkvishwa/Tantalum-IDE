@@ -3485,7 +3485,6 @@ class AgentRuntimeManager {
           userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply workspace changes.",
           requiresUserDecision: false,
           decisionKind: "none",
-          taskList: fallbackTaskList || undefined,
         };
       }
       return null;
@@ -3505,7 +3504,6 @@ class AgentRuntimeManager {
         userMessage: plannerClarification || blockedTask?.error || "I could not confidently understand that workspace action. Please name the operation and file path.",
         requiresUserDecision: true,
         decisionKind: "clarify",
-        taskList: fallbackTaskList || undefined,
       };
     }
 
@@ -3519,7 +3517,6 @@ class AgentRuntimeManager {
             userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer prior workspace change before changing files.",
             requiresUserDecision: true,
             decisionKind: "clarify",
-            taskList: fallbackTaskList || undefined,
           }
         : null;
     }
@@ -3533,7 +3530,6 @@ class AgentRuntimeManager {
         userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer workspace action before changing files.",
         requiresUserDecision: true,
         decisionKind: "clarify",
-        taskList: fallbackTaskList || undefined,
       };
     }
 
@@ -3551,7 +3547,6 @@ class AgentRuntimeManager {
         userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
-        taskList: fallbackTaskList || undefined,
       };
     }
 
@@ -3566,7 +3561,6 @@ class AgentRuntimeManager {
         userMessage: resolvedBlockedTask.error || classifier.clarification || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
-        taskList: checkedTaskList,
       };
     }
 
@@ -3835,7 +3829,6 @@ class AgentRuntimeManager {
             userMessage: planner.clarification,
             requiresUserDecision: true,
             decisionKind: "clarify",
-            taskList: planner.taskList || undefined,
           };
         }
       }
@@ -3869,7 +3862,6 @@ class AgentRuntimeManager {
         userMessage: blockedTask.error || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
-        taskList: checkedTaskList,
       };
     }
 
@@ -3910,7 +3902,9 @@ class AgentRuntimeManager {
     const taskList =
       reusableTaskList ||
       routeTaskList ||
-      this.#deterministicTaskList(prompt, approvedPendingAction?.id || route.pendingAction?.id || null, workspaceRoot, payload);
+      (route.engine === OPENCODE_EDIT_ENGINE || route.engine === OPENCODE_ASK_ENGINE
+        ? this.#deterministicTaskList(prompt, approvedPendingAction?.id || route.pendingAction?.id || null, workspaceRoot, payload)
+        : null);
     if (route.engine === LOCAL_ENGINE) {
       return {
         output: route.userMessage || "Tell me what you want to inspect, explain, or change.",
@@ -3921,7 +3915,7 @@ class AgentRuntimeManager {
         diagnostics: [],
         skippedFiles: [],
         reviewMode: "none",
-        taskList: route.taskList || taskList,
+        taskList: routeTaskList || undefined,
         stages: [{ name: "routing", status: "completed", message: route.reason }],
       };
     }
@@ -4003,11 +3997,14 @@ class AgentRuntimeManager {
       throwIfAgentStopped(signal);
 
       const intent = route.engine === OPENCODE_ASK_ENGINE ? "ask" : "agent";
+      const exposeTaskList = intent !== "ask";
       let activeTaskList = await this.#resolveTaskTargets(workspaceRoot, cloneTaskList(taskList), payload.threadMemory);
       const actionId = approvedPendingAction?.id || route.pendingAction?.id || activeTaskList.actionId || null;
       currentActionId = actionId;
       activeTaskList = { ...activeTaskList, actionId };
-      this.#emitAgentProgress(threadId, actionId, activeTaskList, "running");
+      if (exposeTaskList) {
+        this.#emitAgentProgress(threadId, actionId, activeTaskList, "running");
+      }
 
       let output = "";
       let changes = [];
@@ -4035,7 +4032,9 @@ class AgentRuntimeManager {
         changes = await this.#collectChanges(workspaceRoot, sandboxRoot, skippedPaths, activeSnapshotBaselines);
       } else {
         activeTaskList = this.#markFirstRunnableTask(activeTaskList, "running");
-        this.#emitAgentProgress(threadId, actionId, activeTaskList, "running");
+        if (exposeTaskList) {
+          this.#emitAgentProgress(threadId, actionId, activeTaskList, "running");
+        }
 
         const source = payload.source === "custom" ? "custom" : "managed";
         const mode = normalizeAgentMode(payload.mode);
@@ -4142,7 +4141,7 @@ class AgentRuntimeManager {
           diagnostics: [],
           skippedFiles: copyResult.skippedFiles,
           reviewMode: "none",
-          taskList: activeTaskList,
+          taskList: exposeTaskList ? activeTaskList : undefined,
           actionStatus: "blocked",
           stages: [
             { name: "routing", status: "completed", message: route.reason },
@@ -4163,7 +4162,7 @@ class AgentRuntimeManager {
           diagnostics: [],
           skippedFiles: copyResult.skippedFiles,
           reviewMode: "none",
-          taskList: activeTaskList,
+          taskList: exposeTaskList ? activeTaskList : undefined,
           actionStatus,
           stages: [
             { name: "routing", status: "completed", message: route.reason },
@@ -4194,7 +4193,7 @@ class AgentRuntimeManager {
         diagnostics: [],
         skippedFiles: copyResult.skippedFiles,
         reviewMode: "live-applied",
-        taskList: activeTaskList,
+        taskList: exposeTaskList ? activeTaskList : undefined,
         actionStatus: "executed",
         stages: [
           { name: "routing", status: "completed", message: route.reason },

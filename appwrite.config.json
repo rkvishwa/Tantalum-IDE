@@ -271,8 +271,8 @@
                     "value": "697b8f660033fffde4be"
                 },
                 {
-                    "key": "APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID",
-                    "value": "board_detection_model_config"
+                    "key": "APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID",
+                    "value": "utility_ai_model_pool"
                 },
                 {
                     "key": "APPWRITE_BOARD_DETECTION_CACHE_COLLECTION_ID",
@@ -1875,10 +1875,10 @@
             ]
         },
         {
-            "$id": "board_detection_model_config",
+            "$id": "utility_ai_model_pool",
             "$permissions": [],
             "databaseId": "697b8f660033fffde4be",
-            "name": "Board Detection Model Config",
+            "name": "Utility AI Model Pool",
             "enabled": true,
             "rowSecurity": true,
             "columns": [
@@ -1935,6 +1935,22 @@
                     "default": false
                 },
                 {
+                    "key": "taskTags",
+                    "type": "string",
+                    "required": false,
+                    "array": true,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "priority",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 100
+                },
+                {
                     "key": "createdAt",
                     "type": "string",
                     "required": true,
@@ -1955,7 +1971,7 @@
             ],
             "indexes": [
                 {
-                    "key": "board_detection_model_enabled",
+                    "key": "utility_ai_model_pool_enabled",
                     "type": "key",
                     "status": "available",
                     "columns": [

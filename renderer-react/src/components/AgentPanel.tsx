@@ -1584,13 +1584,14 @@ function liveWorkPhaseLabel({
   const runningTask = taskList?.items.find((item) => item.status === 'running');
   const runningTaskKind = runningTask?.kind.toLowerCase() ?? '';
   const runningTaskText = `${runningTaskKind} ${runningTask?.title ?? ''}`.toLowerCase();
+  const hasPlannedTasks = Boolean(taskList?.items.length);
 
   if (runningTask && /\b(create|delete|edit|file|rename|update|write)\b/.test(runningTaskText)) {
     return 'Editing';
   }
 
   if (!activity) {
-    return isPreparing ? 'Planning' : 'Working';
+    return isPreparing ? 'Thinking' : 'Working';
   }
 
   const title = activity.title.toLowerCase();
@@ -1613,7 +1614,7 @@ function liveWorkPhaseLabel({
     return 'Using Tools';
   }
   if (/\b(plan|planning|todo|task)\b/.test(text)) {
-    return 'Planning';
+    return hasPlannedTasks ? 'Planning' : 'Thinking';
   }
   if (/\b(preparing|copying|copied|sandbox|snapshot|baseline|bridge|session|starting|started)\b/.test(text)) {
     return 'Preparing';
@@ -2979,7 +2980,8 @@ export function AgentPanel({
       }
 
       pushConsole(result.output, 'info');
-      const resultTaskList = asAgentTaskList(result.taskList) ?? taskList;
+      const resultRoute = isRecord(result.route) ? result.route : null;
+      const resultTaskList = resultRoute?.decisionKind === 'clarify' ? null : asAgentTaskList(result.taskList) ?? taskList;
       if (resultTaskList) {
         setLiveTaskLists((current) => {
           const next = new Map(current);
@@ -3299,7 +3301,6 @@ export function AgentPanel({
           role: 'assistant',
           content: routed.userMessage || 'I need a clearer target before changing the workspace.',
           tone: 'warning',
-          metadata: routedTaskList ? { taskList: routedTaskList } : undefined,
         });
         setMessages((current) => [...current, assistantMessage]);
         await refreshThreads();

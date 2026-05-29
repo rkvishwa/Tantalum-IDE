@@ -18,7 +18,7 @@ Required environment:
 Optional environment:
   TANTALUM_SECRET_ACTIVE_KEK_VERSION Defaults to v1.
 
-The raw key is never printed. The output fields can be pasted into managed key or board detection documents.
+The raw key is never printed. The output fields can be pasted into managed key or utility AI model pool documents.
 `);
   process.exit(0);
 }

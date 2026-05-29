@@ -7,12 +7,18 @@ const {
   APPWRITE_FUNCTION_API_ENDPOINT,
   APPWRITE_FUNCTION_PROJECT_ID,
   APPWRITE_DATABASE_ID,
-  APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID = 'board_detection_model_config',
+  APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID,
+  APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID,
   APPWRITE_BOARD_DETECTION_CACHE_COLLECTION_ID = 'board_detection_cache',
   APPWRITE_BOARD_DETECTION_USAGE_COLLECTION_ID = 'board_detection_usage',
 } = process.env;
 
 const MAX_PROMPT_BYTES = 12000;
+const BOARD_DETECTION_TASK_TAG = 'board-detection';
+const UTILITY_AI_MODEL_POOL_COLLECTION_ID =
+  APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID ||
+  APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID ||
+  'utility_ai_model_pool';
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -114,10 +120,55 @@ async function findDocument(databases, collectionId, queries) {
   return response.documents[0] || null;
 }
 
-async function getActiveModelConfig(databases) {
-  return findDocument(databases, APPWRITE_BOARD_DETECTION_MODEL_CONFIG_COLLECTION_ID, [
+function normalizeTaskTags(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeText(entry, 64).toLowerCase()).filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]/)
+      .map((entry) => normalizeText(entry, 64).toLowerCase())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function supportsBoardDetection(config) {
+  const taskTags = normalizeTaskTags(config.taskTags);
+  return taskTags.length === 0 || taskTags.includes(BOARD_DETECTION_TASK_TAG);
+}
+
+function utilityModelPriority(value) {
+  if (value === null || value === undefined || value === '') {
+    return 100;
+  }
+
+  const priority = Number(value);
+  return Number.isFinite(priority) ? priority : 100;
+}
+
+function sortUtilityModels(left, right) {
+  const priorityDelta = utilityModelPriority(left.priority) - utilityModelPriority(right.priority);
+  if (priorityDelta) {
+    return priorityDelta;
+  }
+
+  const createdDelta = normalizeText(left.createdAt, 64).localeCompare(normalizeText(right.createdAt, 64));
+  if (createdDelta) {
+    return createdDelta;
+  }
+
+  return normalizeText(left.$id, 64).localeCompare(normalizeText(right.$id, 64));
+}
+
+async function listActiveUtilityModelConfigs(databases) {
+  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, UTILITY_AI_MODEL_POOL_COLLECTION_ID, [
     Query.equal('enabled', true),
+    Query.limit(100),
   ]);
+  return response.documents.filter(supportsBoardDetection).sort(sortUtilityModels);
 }
 
 function buildPrompt(candidate) {
@@ -162,12 +213,13 @@ async function callModel(config, candidate) {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   const model = normalizeText(config.model, 255);
   if (!baseUrl || !model) {
-    throw new Error('Board detection model config is incomplete.');
+    throw new Error('Utility AI model pool entry is incomplete.');
   }
-  const apiKey = resolveStoredApiKey(config, 'Board detection model');
+  const apiKey = resolveStoredApiKey(config, 'Utility AI model');
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
+    redirect: 'manual',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
@@ -190,12 +242,33 @@ async function callModel(config, candidate) {
   });
 
   const payload = await response.json().catch(() => ({}));
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error('Utility AI model request was redirected.');
+  }
+
   if (!response.ok) {
-    throw new Error(payload?.error?.message || payload?.message || 'Board detection model request failed.');
+    throw new Error(payload?.error?.message || payload?.message || 'Utility AI model request failed.');
   }
 
   const content = payload?.choices?.[0]?.message?.content || '';
   return parseSuggestion(content, model);
+}
+
+async function callUtilityModelPool(configs, candidate) {
+  const failures = [];
+
+  for (const config of configs) {
+    try {
+      return await callModel(config, candidate);
+    } catch (error) {
+      const provider = normalizeText(config.providerLabel, 120) || normalizeText(config.$id, 120) || 'Utility AI model';
+      const model = normalizeText(config.model, 255);
+      const message = error instanceof Error ? error.message : 'Utility AI model request failed.';
+      failures.push(`${provider}${model ? `/${model}` : ''}: ${message}`);
+    }
+  }
+
+  throw new Error(`All utility AI model pool entries failed. ${failures.join(' | ')}`);
 }
 
 async function cacheSuggestion(databases, fingerprint, suggestion) {
@@ -230,7 +303,7 @@ async function recordUsage(databases, event) {
     fqbn: event.fqbn || '',
     confidence: Number(event.confidence || 0),
     model: event.model || '',
-    errorMessage: event.errorMessage || null,
+    errorMessage: event.errorMessage ? normalizeText(event.errorMessage, 1024) : null,
     createdAt: new Date().toISOString(),
   });
 }
@@ -264,19 +337,24 @@ async function detect(req, res) {
     });
   }
 
-  const config = await getActiveModelConfig(databases);
-  if (!config) {
+  const configs = await listActiveUtilityModelConfigs(databases);
+  if (configs.length === 0) {
     await recordUsage(databases, {
       userId: user.$id,
       fingerprint,
       status: 'unconfigured',
-      errorMessage: 'No active board detection model config.',
+      errorMessage: 'No eligible utility AI model pool entry is configured for board detection.',
     });
-    return ok(res, { fqbn: '', confidence: 0, reason: 'No active board detection model config.', model: null });
+    return ok(res, {
+      fqbn: '',
+      confidence: 0,
+      reason: 'No eligible utility AI model pool entry is configured for board detection.',
+      model: null,
+    });
   }
 
   try {
-    const suggestion = await callModel(config, candidate);
+    const suggestion = await callUtilityModelPool(configs, candidate);
     await cacheSuggestion(databases, fingerprint, suggestion);
     await recordUsage(databases, {
       userId: user.$id,

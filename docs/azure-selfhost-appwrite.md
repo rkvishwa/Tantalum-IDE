@@ -185,7 +185,7 @@ User history and old testing boards are not required. For a clean commercial tes
 
 - `app_settings`: `agent.outputStyle` if you want non-default agent output policy.
 - `agent_managed_key_pool`: one managed model provider key if the app should offer managed AI.
-- `board_detection_model_config`: one board detection provider key if board AI detection should be enabled.
+- `utility_ai_model_pool`: one or more small-task AI provider keys, tagged with `board-detection` when used for board AI detection.
 
 Set environment variables in the current macOS shell. Example:
 
@@ -203,9 +203,11 @@ export TANTALUM_MANAGED_API_KEY="<provider-key>"
 export TANTALUM_MANAGED_FAST_MODEL="gpt-4.1"
 export TANTALUM_MANAGED_POWER_MODEL="gpt-5.5"
 
-export TANTALUM_BOARD_DETECTION_BASE_URL="https://api.openai.com/v1"
-export TANTALUM_BOARD_DETECTION_API_KEY="<provider-key>"
-export TANTALUM_BOARD_DETECTION_MODEL="gpt-4.1-mini"
+export TANTALUM_UTILITY_AI_BASE_URL="https://api.openai.com/v1"
+export TANTALUM_UTILITY_AI_API_KEY="<provider-key>"
+export TANTALUM_UTILITY_AI_MODEL="gpt-4.1-mini"
+export TANTALUM_UTILITY_AI_TASK_TAGS="board-detection"
+export TANTALUM_UTILITY_AI_PRIORITY="100"
 ```
 
 Dry-run first:
@@ -221,6 +223,8 @@ npm run selfhost:seed -- --yes
 ```
 
 The seed script never prints raw provider keys.
+
+If you are upgrading an environment that already has `board_detection_model_config` rows, run `npm run migrate:api-key-envelopes` first as a dry-run and then `npm run migrate:api-key-envelopes -- --apply`. The migration copies those rows into `utility_ai_model_pool` and keeps the legacy table in place for manual cleanup after verification.
 
 ## 9. Backups
 
