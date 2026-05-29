@@ -39,6 +39,10 @@ export type FirmwareDocument = Models.Document & {
   uploadedAt: string;
   deployed: boolean;
   notes?: string;
+  sourceSnapshotFileId?: string;
+  sourceSnapshotChecksum?: string;
+  sourceSnapshotManifest?: string | null;
+  sourceSnapshotCreatedAt?: string;
 };
 
 export type BoardInput = {

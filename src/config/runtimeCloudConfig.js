@@ -31,6 +31,15 @@ function deriveFirmwareBucketId(config) {
   return buckets.find((bucket) => bucket.$id === 'firmware_bucket')?.$id || buckets[0]?.$id || '';
 }
 
+function deriveFirmwareSourceBucketId(config) {
+  if (typeof config.firmwareSourceBucketId === 'string' && config.firmwareSourceBucketId.length > 0) {
+    return config.firmwareSourceBucketId;
+  }
+
+  const buckets = Array.isArray(config.buckets) ? config.buckets : [];
+  return buckets.find((bucket) => bucket.$id === 'firmware_source_bucket')?.$id || '';
+}
+
 function deriveFunctionId(config, preferredId) {
   const functions = Array.isArray(config.functions) ? config.functions : [];
   const match = functions.find((entry) => entry?.$id === preferredId || entry?.name === preferredId);
@@ -48,11 +57,13 @@ function getRendererCloudConfig() {
     firmwareCollectionId: String(collections.firmwares || '').trim(),
     sketchesCollectionId: String(collections.sketches || '').trim(),
     firmwareBucketId: deriveFirmwareBucketId(appwriteManifest),
+    firmwareSourceBucketId: deriveFirmwareSourceBucketId(appwriteManifest),
     boardAdminFunctionId: deriveFunctionId(appwriteManifest, 'board-admin'),
     deviceGatewayFunctionId: deriveFunctionId(appwriteManifest, 'device-gateway'),
     agentSettingsFunctionId: deriveFunctionId(appwriteManifest, 'agent-settings'),
     agentGatewayFunctionId: deriveFunctionId(appwriteManifest, 'agent-gateway'),
     boardDetectionFunctionId: deriveFunctionId(appwriteManifest, 'board-detection'),
+    codeExtractFunctionId: deriveFunctionId(appwriteManifest, 'code-extract'),
     mqttHost: process.env.TANTALUM_MQTT_HOST || appwriteManifest.mqttHost || '',
     mqttPort: process.env.TANTALUM_MQTT_PORT || appwriteManifest.mqttPort || '',
     mqttUsername: process.env.TANTALUM_MQTT_DEVICE_USERNAME || '',
@@ -66,6 +77,7 @@ module.exports = {
   deriveCollections,
   deriveDatabaseId,
   deriveFirmwareBucketId,
+  deriveFirmwareSourceBucketId,
   deriveFunctionId,
   getRendererCloudConfig,
 };

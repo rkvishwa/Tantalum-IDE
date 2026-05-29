@@ -41,6 +41,10 @@ const FIRMWARE_SELECT_FIELDS = [
   'uploadedAt',
   'deployed',
   'notes',
+  'sourceSnapshotFileId',
+  'sourceSnapshotChecksum',
+  'sourceSnapshotManifest',
+  'sourceSnapshotCreatedAt',
 ];
 
 export async function listFirmwareHistory(boardId: string) {
@@ -95,6 +99,12 @@ export async function uploadFirmwareRelease(payload: {
   checksum: string;
   notes?: string;
   progressId?: string;
+  sourceSnapshot?: {
+    fileId: string;
+    checksum: string;
+    manifest: Record<string, unknown>;
+    createdAt: string;
+  } | null;
 }) {
   const file = await storage.createFile(
     appwriteConfig.firmwareBucketId,
@@ -134,6 +144,10 @@ export async function uploadFirmwareRelease(payload: {
       uploadedAt: now,
       deployed: true,
       notes: payload.notes ?? '',
+      sourceSnapshotFileId: payload.sourceSnapshot?.fileId ?? '',
+      sourceSnapshotChecksum: payload.sourceSnapshot?.checksum ?? '',
+      sourceSnapshotManifest: payload.sourceSnapshot ? JSON.stringify(payload.sourceSnapshot.manifest) : '',
+      sourceSnapshotCreatedAt: payload.sourceSnapshot?.createdAt ?? '',
     },
     firmwarePermissions(payload.user.$id),
   );
@@ -181,5 +195,8 @@ export async function markFirmwareAsCurrent(board: BoardDocument, firmware: Firm
 
 export async function deleteFirmwareRelease(firmware: FirmwareDocument) {
   await storage.deleteFile(appwriteConfig.firmwareBucketId, firmware.fileId);
+  if (firmware.sourceSnapshotFileId && appwriteConfig.firmwareSourceBucketId) {
+    await storage.deleteFile(appwriteConfig.firmwareSourceBucketId, firmware.sourceSnapshotFileId).catch(() => undefined);
+  }
   await databases.deleteDocument(appwriteConfig.databaseId, appwriteConfig.firmwareCollectionId, firmware.$id);
 }

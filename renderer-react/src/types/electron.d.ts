@@ -24,6 +24,38 @@ export type UsbUploadProgressEvent = {
   progress: number | null;
 };
 
+export type BoardCodeProgressEvent = {
+  requestId: string;
+  phase: string;
+  message: string;
+  progress: number | null;
+};
+
+export type BoardCodeSourceFile = {
+  path: string;
+  content: string;
+};
+
+export type BoardCodeSourceSnapshotInput = {
+  name?: string;
+  files: BoardCodeSourceFile[];
+  metadata?: Record<string, unknown>;
+};
+
+export type BoardCodeViewSource = 'snapshot' | 'local-history' | 'hardware-ai' | 'hardware-binary' | 'unavailable';
+
+export type BoardCodeViewResult = {
+  source: BoardCodeViewSource;
+  workspacePath: string;
+  outputPath?: string;
+  files: Array<{ path: string; relativePath: string }>;
+  warnings: string[];
+  model?: string | null;
+  confidence?: number | null;
+  artifacts: Array<{ path: string; relativePath: string; type: string }>;
+  primaryFile?: { path: string; relativePath: string } | null;
+};
+
 export type CompileProgressEvent = {
   compileId: string;
   stream: 'stdout' | 'stderr' | string;
@@ -103,6 +135,7 @@ export type ToolchainNotificationKind =
   | 'usb-upload'
   | 'firmware-upload'
   | 'cloud-runtime-install'
+  | 'code-extraction'
   | 'toolchain-task';
 
 export type ToolchainNotificationMetadata = Record<string, string | number | boolean | null | undefined>;
@@ -405,11 +438,13 @@ export type CloudConfig = {
   firmwareCollectionId: string;
   sketchesCollectionId: string;
   firmwareBucketId: string;
+  firmwareSourceBucketId?: string;
   boardAdminFunctionId: string;
   deviceGatewayFunctionId: string;
   agentSettingsFunctionId: string;
   agentGatewayFunctionId: string;
   boardDetectionFunctionId?: string;
+  codeExtractFunctionId?: string;
   mqttHost?: string;
   mqttPort?: string | number;
   mqttUsername?: string;
@@ -982,7 +1017,13 @@ export type DesktopApi = {
     saveLocalBoardProfile: (payload: Partial<LocalBoardProfile>) => Promise<Result<{ profile: LocalBoardProfile }>>;
     deleteLocalBoardProfile: (profileId: string) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     replaceLocalBoardProfiles: (profiles: Array<Partial<LocalBoardProfile>>) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
-    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string; cloudRuntime?: Record<string, unknown> | null }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean }>>;
+    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string; cloudRuntime?: Record<string, unknown> | null; sourceSnapshot?: BoardCodeSourceSnapshotInput; sourceIdentity?: Record<string, unknown> }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean }>>;
+    createSourceSnapshot: (payload: { sourceSnapshot: BoardCodeSourceSnapshotInput; metadata?: Record<string, unknown> }) => Promise<Result<{ fileId: string; checksum: string; manifest: Record<string, unknown>; createdAt: string }>>;
+    viewBoardCode: (payload: {
+      requestId?: string;
+      destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
+      board: { id?: string; name?: string; fqbn: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string };
+    }) => Promise<Result<BoardCodeViewResult>>;
     provisionBoardWifiUsb: (payload: { boardId: string; port: string; ssid: string; password: string }) => Promise<Result<{ status?: string; message?: string; boardId: string; port: string }>>;
     installBoardPackage: (payload: { packageName: string; packageUrl?: string | null; installId?: string }) => Promise<Result<{ output?: string; installId?: string }>>;
     cancelBoardPackageInstall: (payload: { installId: string }) => Promise<Result<{ alreadyStopped?: boolean }>>;
@@ -1014,6 +1055,7 @@ export type DesktopApi = {
     onCompileProgress: (callback: (event: CompileProgressEvent) => void) => () => void;
     onInstallProgress: (callback: (chunk: string) => void) => () => void;
     onUsbUploadProgress: (callback: (event: UsbUploadProgressEvent) => void) => () => void;
+    onBoardCodeProgress: (callback: (event: BoardCodeProgressEvent) => void) => () => void;
     onLibraryInstallProgress: (callback: (event: LibraryInstallProgressEvent) => void) => () => void;
     onLibraryMigrationProgress: (callback: (event: LibraryMigrationProgressEvent) => void) => () => void;
   };

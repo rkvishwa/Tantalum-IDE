@@ -283,6 +283,42 @@
                     "value": "board_detection_usage"
                 }
             ]
+        },
+        {
+            "$id": "code-extract",
+            "name": "code-extract",
+            "runtime": "node-22",
+            "path": "functions/code-extract",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "users"
+            ],
+            "enabled": true,
+            "logging": true,
+            "events": [],
+            "schedule": "",
+            "timeout": 90,
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write",
+                "documents.read",
+                "documents.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID",
+                    "value": "utility_ai_model_pool"
+                },
+                {
+                    "key": "APPWRITE_CODE_EXTRACT_USAGE_COLLECTION_ID",
+                    "value": "code_extract_usage"
+                }
+            ]
         }
     ],
     "sites": [
@@ -666,6 +702,41 @@
                     "required": false,
                     "array": false,
                     "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotFileId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotChecksum",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotManifest",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotCreatedAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "",
                     "encrypt": false
                 }
             ],
@@ -2186,6 +2257,119 @@
                     ]
                 }
             ]
+        },
+        {
+            "$id": "code_extract_usage",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Code Extract Usage",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "boardId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 128,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "boardType",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "model",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "confidence",
+                    "type": "double",
+                    "required": false,
+                    "array": false,
+                    "min": 0,
+                    "max": 1,
+                    "default": 0
+                },
+                {
+                    "key": "errorMessage",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1024,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "code_extract_usage_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "code_extract_usage_board",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "boardId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "code_extract_usage_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
+                }
+            ]
         }
     ],
     "buckets": [
@@ -2204,6 +2388,22 @@
                 "uf2"
             ],
             "compression": "none",
+            "encryption": true,
+            "antivirus": true
+        },
+        {
+            "$id": "firmware_source_bucket",
+            "$permissions": [
+                "create(\"users\")"
+            ],
+            "fileSecurity": true,
+            "name": "Firmware Source Bucket",
+            "enabled": true,
+            "maximumFileSize": 10000000,
+            "allowedFileExtensions": [
+                "zip"
+            ],
+            "compression": "gzip",
             "encryption": true,
             "antivirus": true
         }

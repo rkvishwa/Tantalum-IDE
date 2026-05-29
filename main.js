@@ -69,6 +69,7 @@ const { AgentToolRegistry } = require("./src/agent/toolRegistry");
 const { AgentToolExecutor } = require("./src/agent/toolExecutor");
 const { deriveFunctionId, getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
+const boardCodeService = require("./src/services/boardCodeService");
 const { detectLocalBoardsDeterministic } = require("./src/services/localBoardService");
 const provisioningService = require("./src/services/provisioningService");
 const appwriteManifest = require("./appwrite.config.json");
@@ -91,6 +92,7 @@ const LOCAL_BOARD_PROFILES_KEY = "localBoardProfiles";
 const ARDUINO_STORAGE_ROOT_KEY = "arduinoStorageRoot";
 const AGENT_TOOL_SETTINGS_KEY = "agentToolSettings";
 const BOARD_DETECTION_FUNCTION_ID = deriveFunctionId(appwriteManifest, "board-detection");
+const CODE_EXTRACT_FUNCTION_ID = deriveFunctionId(appwriteManifest, "code-extract");
 const TOOLCHAIN_NOTIFICATIONS_KEY = "toolchainNotifications";
 const TOOLCHAIN_NOTIFICATIONS_LIMIT = 100;
 
@@ -109,6 +111,7 @@ const activeSerialMonitorPorts = new Map();
 const activeBoardPackageInstalls = new Map();
 const activeLibraryInstallOperations = new Map();
 const activeLocalUploadPorts = new Set();
+const activeBoardCodePorts = new Set();
 const workspaceScanner = new WorkspaceScanner();
 const securityManager = new SecurityManager();
 const agentToolRegistry = new AgentToolRegistry();
@@ -3323,6 +3326,12 @@ async function getCurrentAppwriteJwt() {
   return jwt;
 }
 
+function prewarmCurrentAppwriteJwt() {
+  void getCurrentAppwriteJwt().catch(() => {
+    // The first function execution will retry JWT creation if prewarming fails.
+  });
+}
+
 function appwriteCacheKeyForRequest(request, cacheKey) {
   return JSON.stringify({
     cacheKey: cacheKey || "",
@@ -3507,6 +3516,580 @@ function cloudFirmwareFilePermissions(userId) {
     Permission.update(Role.user(userId)),
     Permission.delete(Role.user(userId)),
   ];
+}
+
+function cloudFirmwareSourceFilePermissions(userId) {
+  return [
+    Permission.read(Role.user(userId)),
+    Permission.update(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
+}
+
+function requireCloudConfigForSourceSnapshots() {
+  const cloudConfig = requireCloudConfigForFirmware();
+  if (!cloudConfig.firmwareSourceBucketId) {
+    throw new Error("Cloud firmware source snapshot storage is not configured.");
+  }
+  return cloudConfig;
+}
+
+function sourceSnapshotManifestValue(manifest) {
+  if (!manifest) {
+    return "";
+  }
+  return typeof manifest === "string" ? manifest : JSON.stringify(manifest);
+}
+
+function parseSourceSnapshotManifest(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === "object") {
+    return value;
+  }
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return null;
+  }
+}
+
+async function createAndUploadSourceSnapshot(payload = {}) {
+  const cloudConfig = requireCloudConfigForSourceSnapshots();
+  const sourceSnapshot = payload.sourceSnapshot || {};
+  const user = await appwriteRequest({ pathName: "account" });
+  const fileId = payload.fileId || `source_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+  const { buffer, manifest, checksum } = await boardCodeService.createSourceSnapshotZipBuffer({
+    files: sourceSnapshot.files,
+    metadata: {
+      ...(sourceSnapshot.metadata || {}),
+      ...(payload.metadata || {}),
+    },
+  });
+
+  const multipart = buildMultipartBody({
+    fields: [
+      ["fileId", fileId],
+      ...cloudFirmwareSourceFilePermissions(user.$id).map((permission) => ["permissions[]", permission]),
+    ],
+    files: [
+      {
+        name: "file",
+        filename: `${fileId}.zip`,
+        contentType: "application/zip",
+        buffer,
+      },
+    ],
+  });
+
+  const file = await appwriteRawUploadRequest({
+    method: "POST",
+    pathName: `storage/buckets/${encodeURIComponent(cloudConfig.firmwareSourceBucketId)}/files`,
+    rawBody: multipart.body,
+    headers: multipart.headers,
+  });
+
+  return {
+    fileId: file.$id || fileId,
+    checksum,
+    manifest,
+    createdAt: manifest.createdAt || new Date().toISOString(),
+  };
+}
+
+async function downloadAppwriteFileBuffer(bucketId, fileId) {
+  if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
+    throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
+  }
+
+  const url = new URL(`${APPWRITE_ENDPOINT}/storage/buckets/${encodeURIComponent(bucketId)}/files/${encodeURIComponent(fileId)}/download`);
+  const response = await fetch(url, {
+    headers: {
+      "X-Appwrite-Project": APPWRITE_PROJECT_ID,
+      "X-Appwrite-Response-Format": "1.4.0",
+      ...getAppwriteSessionHeaders(),
+    },
+  });
+  storeAppwriteSession(response);
+
+  if (!response.ok) {
+    const payload = await readAppwritePayload(response).catch(() => null);
+    throw new Error(payload?.message || `Unable to download source snapshot ${fileId}.`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function firmwareSourceSnapshotFields(snapshot) {
+  return {
+    sourceSnapshotFileId: snapshot?.fileId || "",
+    sourceSnapshotChecksum: snapshot?.checksum || "",
+    sourceSnapshotManifest: sourceSnapshotManifestValue(snapshot?.manifest),
+    sourceSnapshotCreatedAt: snapshot?.createdAt || "",
+  };
+}
+
+async function fetchFirmwareForBoardCode(cloudConfig, boardId, firmwareId = "") {
+  const desiredFirmwareId = String(firmwareId || "").trim();
+  if (desiredFirmwareId) {
+    return await appwriteRequest({
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents/${encodeURIComponent(desiredFirmwareId)}`,
+    });
+  }
+
+  const deployed = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents`,
+    queries: [
+      Query.equal("boardId", boardId),
+      Query.equal("deployed", true),
+      Query.orderDesc("uploadedAt"),
+      Query.limit(1),
+    ],
+  });
+  return Array.isArray(deployed.documents) ? deployed.documents[0] || null : null;
+}
+
+async function restoreCloudSourceSnapshot(boardPayload = {}) {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.databaseId || !cloudConfig.boardsCollectionId || !cloudConfig.firmwareCollectionId || !cloudConfig.firmwareSourceBucketId) {
+    return null;
+  }
+
+  const boardId = String(boardPayload.id || boardPayload.cloudBoardId || "").trim();
+  if (!boardId) {
+    return null;
+  }
+
+  const board = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.boardsCollectionId)}/documents/${encodeURIComponent(boardId)}`,
+  });
+  const firmware = await fetchFirmwareForBoardCode(cloudConfig, boardId, board.desiredFirmwareId || boardPayload.firmwareId);
+  if (!firmware?.sourceSnapshotFileId) {
+    return null;
+  }
+
+  const snapshotBuffer = await downloadAppwriteFileBuffer(cloudConfig.firmwareSourceBucketId, firmware.sourceSnapshotFileId);
+  if (firmware.sourceSnapshotChecksum) {
+    const actualChecksum = crypto.createHash("sha256").update(snapshotBuffer).digest("hex");
+    if (actualChecksum !== firmware.sourceSnapshotChecksum) {
+      throw new Error("Saved source snapshot checksum does not match the firmware record.");
+    }
+  }
+
+  const restored = await boardCodeService.readZipEntriesFromBuffer(snapshotBuffer);
+  return {
+    files: restored.files,
+    manifest: restored.manifest || parseSourceSnapshotManifest(firmware.sourceSnapshotManifest),
+    board,
+    firmware,
+  };
+}
+
+async function executeCodeExtractAi(payload) {
+  if (!CODE_EXTRACT_FUNCTION_ID) {
+    return null;
+  }
+
+  const headers = { "content-type": "application/json" };
+  try {
+    const jwt = await getCurrentAppwriteJwt();
+    if (jwt) {
+      headers["X-Appwrite-JWT"] = jwt;
+    }
+  } catch {
+    // The function will reject the request if user context is required and unavailable.
+  }
+
+  const execution = await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(CODE_EXTRACT_FUNCTION_ID)}/executions`,
+    body: {
+      body: JSON.stringify(payload),
+      async: false,
+      path: "/",
+      method: "POST",
+      headers,
+    },
+  });
+  const responseBody = functionExecutionResponseBody(execution);
+  const parsed = safeJsonParse(responseBody || "{}", {
+    ok: false,
+    error: functionExecutionDiagnostic(execution) || "Code extraction AI returned an empty response.",
+  });
+
+  if (functionExecutionResponseStatusCode(execution) >= 400 || !parsed.ok) {
+    throw new Error(parsed.error || responseBody || functionExecutionDiagnostic(execution) || "Code extraction AI failed.");
+  }
+
+  return parsed.data || null;
+}
+
+async function resolveBoardCodeDestination(destination = {}, boardName = "board") {
+  const mode = destination.mode === "new" ? "new" : "current";
+  if (mode === "new") {
+    const folderPath = String(destination.folderPath || "").trim();
+    if (!folderPath) {
+      throw new Error("Choose a folder for the new workspace.");
+    }
+    const workspacePath = path.resolve(folderPath);
+    await fsPromises.mkdir(workspacePath, { recursive: true });
+    registerTrustedPath(workspacePath);
+    return {
+      mode,
+      workspacePath,
+      outputDir: workspacePath,
+    };
+  }
+
+  const rawWorkspacePath = String(destination.workspacePath || currentWorkspace || "").trim();
+  if (!rawWorkspacePath) {
+    throw new Error("Open a workspace before writing extracted code into the current workspace.");
+  }
+  const workspacePath = path.resolve(rawWorkspacePath);
+  const stats = await fsPromises.stat(workspacePath);
+  if (!stats.isDirectory()) {
+    throw new Error("Current workspace path is not a directory.");
+  }
+  const outputDir = path.join(workspacePath, "extracted-board-code", boardCodeService.defaultExtractionFolderName(boardName));
+  await fsPromises.mkdir(outputDir, { recursive: true });
+  return {
+    mode,
+    workspacePath,
+    outputDir,
+  };
+}
+
+function primaryBoardCodeFile(files = []) {
+  return files.find((file) => /\.(ino|cpp|c|h|hpp)$/i.test(file.relativePath || file.path || ""))
+    || files.find((file) => /readme\.md$/i.test(file.relativePath || file.path || ""))
+    || files[0]
+    || null;
+}
+
+async function writeBoardCodeOutput({
+  outputDir,
+  workspacePath,
+  boardName,
+  board,
+  source,
+  sourceFiles = [],
+  warnings = [],
+  model = null,
+  confidence = null,
+  notes = "",
+  limitations = "",
+  metadata = {},
+  rawArtifact = null,
+}) {
+  const readme = boardCodeService.createExtractionReadme({
+    boardName,
+    board,
+    source,
+    warnings,
+    notes,
+    limitations,
+    confidence,
+    model,
+  });
+  const normalizedSourceFiles = boardCodeService.normalizeGeneratedFiles(sourceFiles);
+  const hasReadme = normalizedSourceFiles.some((file) => /^readme\.md$/i.test(file.path));
+  const textFiles = [
+    ...(hasReadme ? [] : [{ path: "README.md", content: readme }]),
+    ...normalizedSourceFiles,
+    {
+      path: "EXTRACTION_NOTES.md",
+      content: readme,
+    },
+    {
+      path: "metadata.json",
+      content: JSON.stringify({
+        version: 1,
+        source,
+        boardName,
+        board,
+        warnings,
+        model,
+        confidence,
+        notes,
+        limitations,
+        createdAt: new Date().toISOString(),
+        ...metadata,
+      }, null, 2),
+    },
+  ];
+
+  const files = await boardCodeService.writeTextFiles(outputDir, textFiles);
+  const artifacts = [];
+  if (rawArtifact?.path) {
+    const artifact = await boardCodeService.copyArtifact(outputDir, rawArtifact.path, `artifacts/${rawArtifact.filename || path.basename(rawArtifact.path)}`);
+    artifacts.push({ ...artifact, type: rawArtifact.type || rawArtifact.format || "firmware-dump" });
+  }
+
+  return {
+    source,
+    workspacePath,
+    outputPath: outputDir,
+    files,
+    warnings,
+    model,
+    confidence,
+    artifacts,
+    primaryFile: primaryBoardCodeFile(files),
+  };
+}
+
+function normalizeBoardCodeIdentity(boardPayload = {}) {
+  return {
+    profileId: String(boardPayload.profileId || "").trim(),
+    fingerprint: String(boardPayload.fingerprint || "").trim(),
+    cloudBoardId: String(boardPayload.cloudBoardId || boardPayload.id || "").trim(),
+    port: String(boardPayload.port || "").trim(),
+    fqbn: String(boardPayload.fqbn || boardPayload.boardType || "").trim(),
+    boardName: String(boardPayload.name || boardPayload.boardLabel || boardPayload.fqbn || boardPayload.id || "board").trim(),
+  };
+}
+
+async function writeUnavailableBoardCodeResult(destination, boardPayload, warnings) {
+  const identity = normalizeBoardCodeIdentity(boardPayload);
+  return writeBoardCodeOutput({
+    outputDir: destination.outputDir,
+    workspacePath: destination.workspacePath,
+    boardName: identity.boardName,
+    board: identity.fqbn,
+    source: "unavailable",
+    warnings,
+    notes: "Tantalum could not find a saved source snapshot or local upload history, and hardware readback was not available for this board.",
+    limitations: "Exact source can only be restored from a saved source snapshot. Reconstructed code requires a readable firmware dump and a configured code-extract utility model.",
+    metadata: {
+      identity,
+    },
+  });
+}
+
+async function viewBoardCode(payload = {}, eventSender = null) {
+  const requestId = String(payload.requestId || `board-code:${crypto.randomUUID()}`);
+  const boardPayload = payload.board || {};
+  const identity = normalizeBoardCodeIdentity(boardPayload);
+  const boardName = identity.boardName || "board";
+  const warnings = [];
+  const destination = await resolveBoardCodeDestination(payload.destination, boardName);
+  const emitProgress = (patch = {}) => {
+    const event = {
+      requestId,
+      phase: patch.phase || "running",
+      message: patch.message || "Viewing board code...",
+      progress: patch.progress ?? null,
+    };
+    eventSender?.send?.("toolchain:board-code-progress", event);
+    upsertToolchainNotification({
+      id: requestId,
+      kind: "code-extraction",
+      title: patch.title || `Viewing code for ${boardName}`,
+      detail: event.message,
+      status: patch.status || "running",
+      phase: event.phase,
+      progress: event.progress,
+      name: boardName,
+      target: identity.port || identity.fqbn || boardName,
+      metadata: {
+        boardId: boardPayload.id || identity.cloudBoardId,
+        boardType: identity.fqbn,
+        port: identity.port,
+      },
+    });
+  };
+
+  emitProgress({ phase: "snapshot", message: "Checking saved source snapshots...", progress: 8 });
+  try {
+    const snapshot = await restoreCloudSourceSnapshot(boardPayload);
+    if (snapshot?.files?.length) {
+      const result = await writeBoardCodeOutput({
+        outputDir: destination.outputDir,
+        workspacePath: destination.workspacePath,
+        boardName: snapshot.board?.name || boardName,
+        board: snapshot.board?.boardType || identity.fqbn,
+        source: "snapshot",
+        sourceFiles: snapshot.files,
+        warnings,
+        notes: "Restored exact source from the firmware source snapshot stored with this release.",
+        metadata: {
+          identity,
+          sourceSnapshotManifest: snapshot.manifest,
+          firmware: snapshot.firmware
+            ? {
+                id: snapshot.firmware.$id,
+                version: snapshot.firmware.version,
+                fileId: snapshot.firmware.fileId,
+                sourceSnapshotFileId: snapshot.firmware.sourceSnapshotFileId,
+              }
+            : null,
+        },
+      });
+      emitProgress({ phase: "complete", message: "Source snapshot restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+      return result;
+    }
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : "Unable to restore the cloud source snapshot.");
+  }
+
+  emitProgress({ phase: "local-history", message: "Checking local upload history...", progress: 18 });
+  try {
+    const historyEntry = boardCodeService.findSourceHistoryEntry(preferenceStore, identity);
+    if (historyEntry) {
+      const history = await boardCodeService.readLocalSourceHistory(historyEntry);
+      if (history.files?.length) {
+        const result = await writeBoardCodeOutput({
+          outputDir: destination.outputDir,
+          workspacePath: destination.workspacePath,
+          boardName: historyEntry.boardName || boardName,
+          board: historyEntry.board || identity.fqbn,
+          source: "local-history",
+          sourceFiles: history.files,
+          warnings,
+          notes: "Restored exact source from this machine's last successful USB upload snapshot.",
+          metadata: {
+            identity,
+            sourceSnapshotManifest: history.manifest,
+            localHistory: {
+              id: historyEntry.id,
+              checksum: historyEntry.checksum,
+              createdAt: historyEntry.createdAt,
+            },
+          },
+        });
+        emitProgress({ phase: "complete", message: "Local source history restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+        return result;
+      }
+    }
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : "Unable to restore local source history.");
+  }
+
+  if (!identity.fqbn || !identity.port) {
+    warnings.push("Hardware readback requires a board FQBN and serial port.");
+    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings);
+    emitProgress({ phase: "complete", message: "Code extraction notes were written.", progress: 100, status: "success", title: `Code unavailable for ${boardName}` });
+    return result;
+  }
+
+  const portKey = identity.port.toLowerCase();
+  if (activeLocalUploadPorts.has(portKey)) {
+    throw new Error(`A USB upload is already running on ${identity.port}. Wait for it to finish before viewing code.`);
+  }
+  if (activeSerialMonitorPorts.has(portKey)) {
+    throw new Error(`Serial Monitor is open on ${identity.port}. Disconnect it before viewing code.`);
+  }
+  if (activeBoardCodePorts.has(portKey)) {
+    throw new Error(`Code extraction is already running on ${identity.port}.`);
+  }
+
+  const tempDir = boardCodeService.tempExtractionDir();
+  activeBoardCodePorts.add(portKey);
+  try {
+    emitProgress({ phase: "read-flash", message: "Reading firmware from the board...", progress: 25 });
+    const hardware = await boardCodeService.readHardwareFirmware({
+      board: identity.fqbn,
+      port: identity.port,
+      outputDir: tempDir,
+      onProgress: (progressEvent = {}) => emitProgress({
+        phase: progressEvent.phase || "read-flash",
+        message: progressEvent.message || "Reading firmware from the board...",
+        progress: progressEvent.progress ?? null,
+      }),
+    });
+    const hardwareTextFiles = [
+      {
+        path: "artifacts/strings.txt",
+        content: (hardware.strings || []).join("\n"),
+      },
+      {
+        path: "artifacts/board-details.json",
+        content: JSON.stringify(hardware.boardDetails || {}, null, 2),
+      },
+      {
+        path: "artifacts/readback-output.txt",
+        content: hardware.dump?.commandOutput || "",
+      },
+    ];
+
+    let aiResult = null;
+    emitProgress({ phase: "ai", message: "Reconstructing an approximate source project...", progress: 68 });
+    try {
+      aiResult = await executeCodeExtractAi({
+        board: {
+          id: boardPayload.id || identity.cloudBoardId,
+          name: boardName,
+          fqbn: identity.fqbn,
+          port: identity.port,
+          profileId: identity.profileId,
+          fingerprint: identity.fingerprint,
+        },
+        localBoard: identity,
+        firmware: {
+          format: hardware.dump?.format,
+          filename: hardware.dump?.filename,
+          size: hardware.dump?.size,
+          checksum: hardware.dump?.checksum,
+        },
+        metadata: {
+          sourceSnapshot: false,
+          boardFamily: hardware.boardDetails?.family,
+          readbackTool: hardware.boardDetails?.family === "esp" ? "esptool" : hardware.boardDetails?.family === "avr" ? "avrdude" : "unknown",
+        },
+        strings: hardware.strings,
+        notes: hardware.dump?.commandOutput ? hardware.dump.commandOutput.slice(0, 4000) : "",
+      });
+      if (!aiResult) {
+        warnings.push("code-extract function is not configured. Wrote firmware dump artifacts only.");
+      }
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : "Code extraction AI failed.");
+    }
+
+    const reconstructedFiles = boardCodeService.normalizeGeneratedFiles(aiResult?.files || []);
+    const source = reconstructedFiles.length > 0 ? "hardware-ai" : "hardware-binary";
+    const result = await writeBoardCodeOutput({
+      outputDir: destination.outputDir,
+      workspacePath: destination.workspacePath,
+      boardName,
+      board: identity.fqbn,
+      source,
+      sourceFiles: [...reconstructedFiles, ...hardwareTextFiles],
+      warnings,
+      model: aiResult?.model || null,
+      confidence: aiResult?.confidence ?? null,
+      notes: aiResult?.notes || "Firmware readback succeeded. Source reconstruction is approximate unless a saved source snapshot exists.",
+      limitations: aiResult?.limitations || "The firmware dump and printable strings are included for inspection. Exact source cannot be recovered from a binary dump.",
+      metadata: {
+        identity,
+        firmwareDump: {
+          format: hardware.dump?.format,
+          filename: hardware.dump?.filename,
+          size: hardware.dump?.size,
+          checksum: hardware.dump?.checksum,
+        },
+      },
+      rawArtifact: hardware.dump
+        ? {
+            path: hardware.dump.path,
+            filename: hardware.dump.filename,
+            type: "firmware-dump",
+            format: hardware.dump.format,
+          }
+        : null,
+    });
+    emitProgress({ phase: "complete", message: "Board code view is ready.", progress: 100, status: "success", title: `Viewed code for ${boardName}` });
+    return result;
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : "Hardware readback failed.");
+    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings);
+    emitProgress({ phase: "complete", message: "Code extraction notes were written.", progress: 100, status: "success", title: `Code unavailable for ${boardName}` });
+    return result;
+  } finally {
+    activeBoardCodePorts.delete(portKey);
+    fsPromises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function escapeMultipartValue(value) {
@@ -3773,6 +4356,42 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     });
   });
 
+  let sourceSnapshot = null;
+  let sourceSnapshotWarning = "";
+  if (cloudConfig.firmwareSourceBucketId) {
+    updateFirmwareNotification({
+      title: `Uploading ${boardName} ${version}`,
+      detail: "Saving firmware source snapshot...",
+      phase: "upload",
+      progress: 90,
+      filename: compileResult.filename,
+    });
+    try {
+      sourceSnapshot = await createAndUploadSourceSnapshot({
+        sourceSnapshot: payload.sourceSnapshot || {
+          name: boardName,
+          files: [
+            {
+              path: `${boardCodeService.sanitizeName(boardName || "sketch", "sketch")}.ino`,
+              content: String(payload.code || DEFAULT_EDITOR_CONTENT),
+            },
+          ],
+        },
+        metadata: {
+          boardId,
+          boardName,
+          boardType,
+          firmwareId,
+          version,
+          source: "agent-cloud-upload",
+        },
+      });
+    } catch (error) {
+      sourceSnapshotWarning = error instanceof Error ? error.message : "Unable to save source snapshot.";
+      console.warn("Unable to save cloud firmware source snapshot:", sourceSnapshotWarning);
+    }
+  }
+
   updateFirmwareNotification({
     title: `Uploading ${boardName} ${version}`,
     detail: "Updating firmware records...",
@@ -3823,6 +4442,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
         uploadedAt: new Date().toISOString(),
         deployed: true,
         notes: String(payload.notes || ""),
+        ...firmwareSourceSnapshotFields(sourceSnapshot),
       },
       permissions: cloudFirmwarePermissions(user.$id),
     },
@@ -3851,6 +4471,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     output: [
       compileResult.output || compileResult.message || "Compilation successful.",
       `Firmware ${version} uploaded to Appwrite storage and queued for OTA deployment.`,
+      sourceSnapshotWarning ? `Source snapshot warning: ${sourceSnapshotWarning}` : "",
     ].filter(Boolean).join("\n\n"),
   };
 }
@@ -5116,6 +5737,9 @@ ipcMain.handle("agent:tools:update-settings", async (_event, payload = {}) => {
 ipcMain.handle("cloud:auth:get-current-user", async () => {
   try {
     const user = await appwriteRequest({ pathName: "account" });
+    if (user) {
+      prewarmCurrentAppwriteJwt();
+    }
     return { success: true, user };
   } catch (error) {
     if (error?.status === 401) {
@@ -5140,6 +5764,7 @@ ipcMain.handle("cloud:auth:sign-in", async (_event, payload) => {
     });
 
     clearAppwriteReadCache();
+    prewarmCurrentAppwriteJwt();
     return { success: true, session };
   } catch (error) {
     return toErrorResult(error);
@@ -5563,7 +6188,7 @@ ipcMain.handle("projects:add", async (_event, projectPath) => {
 ipcMain.handle("projects:pick-folder", async () => {
   try {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openDirectory"]
+      properties: ["openDirectory", "createDirectory"]
     });
 
     if (result.canceled || result.filePaths.length === 0) {
@@ -6185,6 +6810,44 @@ ipcMain.handle("toolchain:replace-local-board-profiles", async (_event, profiles
   }
 });
 
+ipcMain.handle("toolchain:create-source-snapshot", async (_event, payload = {}) => {
+  try {
+    const snapshot = await createAndUploadSourceSnapshot(payload);
+    clearAppwriteReadCache();
+    return { success: true, ...snapshot };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:view-board-code", async (event, payload = {}) => {
+  try {
+    const result = await viewBoardCode(payload, event.sender);
+    return { success: true, ...result };
+  } catch (error) {
+    const requestId = String(payload.requestId || "");
+    if (requestId) {
+      upsertToolchainNotification({
+        id: requestId,
+        kind: "code-extraction",
+        title: "Board code view failed",
+        detail: error instanceof Error ? error.message : "Unable to view board code.",
+        status: "error",
+        phase: "error",
+        progress: null,
+        name: payload.board?.name || "",
+        target: payload.board?.port || payload.board?.fqbn || "",
+        metadata: {
+          boardId: payload.board?.id || payload.board?.cloudBoardId,
+          boardType: payload.board?.fqbn,
+          port: payload.board?.port,
+        },
+      });
+    }
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => {
   const port = String(payload.port || "").trim();
   const portKey = port.toLowerCase();
@@ -6207,7 +6870,7 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
   }
 
   try {
-    return await uploadLocalSketch(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board, port || payload.port, (chunk, stream) => {
+    const result = await uploadLocalSketch(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board, port || payload.port, (chunk, stream) => {
       const rawChunk = textFromToolchainProgressPayload(chunk);
       _event.sender.send("toolchain:usb-upload-progress", {
         uploadId,
@@ -6221,6 +6884,18 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
     }, {
       cloudRuntime: payload?.cloudRuntime || null
     });
+    if (result?.success && payload.sourceSnapshot) {
+      try {
+        await boardCodeService.saveLocalSourceHistory(preferenceStore, app.getPath("userData"), {
+          ...(payload.sourceIdentity || {}),
+          fqbn: payload.sourceIdentity?.fqbn || payload.board,
+          port: payload.sourceIdentity?.port || port || payload.port,
+        }, payload.sourceSnapshot);
+      } catch (error) {
+        console.warn("Unable to save local source history:", error instanceof Error ? error.message : error);
+      }
+    }
+    return result;
   } catch (error) {
     return toErrorResult(error);
   } finally {

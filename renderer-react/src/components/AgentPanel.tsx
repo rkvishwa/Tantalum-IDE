@@ -1977,6 +1977,7 @@ export function AgentPanel({
   const previousWorkspaceKeyRef = useRef<string | null>(workspaceKey);
   const threadRefreshRequestRef = useRef(0);
   const settingsRefreshRequestRef = useRef(0);
+  const settingsUsageLoadedRef = useRef(false);
   const messageLoadRequestRef = useRef(0);
   const deferredPrompt = useDeferredValue(draftPrompt);
 
@@ -2007,6 +2008,7 @@ export function AgentPanel({
     previousWorkspaceKeyRef.current = workspaceKey;
     threadRefreshRequestRef.current += 1;
     settingsRefreshRequestRef.current += 1;
+    settingsUsageLoadedRef.current = false;
     messageLoadRequestRef.current += 1;
     activeThreadIdRef.current = null;
     setActiveThreadId(null);
@@ -2189,10 +2191,11 @@ export function AgentPanel({
         }.`
       : null;
   const canUseCustom = Boolean(selectedCredential && selectedModel);
-  const showInitialAgentLoading = loadingSettings && !settingsBootstrapped;
+  const loadingInitialAgentData = loadingSettings && !settingsBootstrapped;
   const canSend =
     Boolean(workspacePath) &&
     hasCloudAgent &&
+    settingsBootstrapped &&
     !busy &&
     deferredPrompt.trim().length > 0 &&
     (preferences.selectedSource === 'managed' ? canUseManaged : canUseCustom);
@@ -2683,9 +2686,10 @@ export function AgentPanel({
     }
   }, [hasCloudAgent, pushToast, workspaceKey]);
 
-  const refreshAgentSettings = useCallback(async (showErrors = true) => {
+  const refreshAgentSettings = useCallback(async (showErrors = true, options: { includeUsage?: boolean } = {}) => {
     const targetWorkspaceKey = workspaceKey;
     const requestId = ++settingsRefreshRequestRef.current;
+    const includeUsage = options.includeUsage ?? settingsUsageLoadedRef.current;
 
     if (!hasCloudAgent) {
       setSettings(createDefaultAgentSettings());
@@ -2697,11 +2701,17 @@ export function AgentPanel({
 
     setLoadingSettings(true);
     try {
-      const nextSettings = await loadAgentSettings(targetWorkspaceKey);
+      const nextSettings = await loadAgentSettings(targetWorkspaceKey, { includeUsage });
       if (settingsRefreshRequestRef.current !== requestId || workspaceKeyRef.current !== targetWorkspaceKey) {
         return;
       }
-      setSettings(nextSettings);
+      if (includeUsage) {
+        settingsUsageLoadedRef.current = true;
+      }
+      setSettings((current) => ({
+        ...nextSettings,
+        recentUsage: includeUsage ? nextSettings.recentUsage : current.recentUsage,
+      }));
       const scopedThreads = threadsForWorkspace(nextSettings.recentThreads, targetWorkspaceKey);
       setThreadSummaries((current) => [
         ...current.filter((thread) => isLocalThreadId(thread.id) && !scopedThreads.some((entry) => entry.id === thread.id)),
@@ -3663,8 +3673,16 @@ export function AgentPanel({
   }
 
   useEffect(() => {
-    void refreshAgentSettings();
+    void refreshAgentSettings(true, { includeUsage: false });
   }, [refreshAgentSettings, user.$id]);
+
+  useEffect(() => {
+    if (view !== 'settings' || !settingsBootstrapped || settingsUsageLoadedRef.current) {
+      return;
+    }
+
+    void refreshAgentSettings(false, { includeUsage: true });
+  }, [refreshAgentSettings, settingsBootstrapped, view]);
 
   useEffect(() => {
     if (!messageListRef.current) {
@@ -4111,7 +4129,9 @@ export function AgentPanel({
           onKeyUp={updateContextMentionFromTextarea}
           onSelect={updateContextMentionFromTextarea}
           placeholder={
-            workspacePath
+            loadingInitialAgentData
+              ? 'Loading agent...'
+              : workspacePath
               ? isReplyingToThread && activeThread
                 ? 'Ask for follow-up changes'
                 : agentIntent === 'ask'
@@ -4226,7 +4246,7 @@ export function AgentPanel({
             <button
               className={`tantalum-ai-send-btn ${activeThreadIsRunning ? 'tantalum-ai-stop-btn' : ''}`}
               type="button"
-              title={activeThreadIsRunning ? 'Stop agent run' : 'Send message'}
+              title={activeThreadIsRunning ? 'Stop agent run' : loadingInitialAgentData ? 'Loading agent' : 'Send message'}
               disabled={activeThreadIsRunning ? isStoppingActiveThread : !canSend}
               onClick={() => {
                 if (activeThreadIsRunning) {
@@ -4258,6 +4278,7 @@ export function AgentPanel({
     const previewThreadSummaries = showFullThreadList ? visibleThreadSummaries : visibleThreadSummaries.slice(0, THREAD_HISTORY_PREVIEW_LIMIT);
     const overflowThreadSummaries = showFullThreadList ? [] : visibleThreadSummaries.slice(THREAD_HISTORY_PREVIEW_LIMIT);
     const hiddenThreadCount = Math.max(0, visibleThreadSummaries.length - THREAD_HISTORY_PREVIEW_LIMIT);
+    const showThreadListLoading = loadingThreads || (loadingInitialAgentData && threadSummaries.length === 0);
     const renderThreadItem = (thread: AgentThreadSummary) => {
       const isRunning = thread.id === runningThreadId;
       const isStopping = thread.id === stoppingThreadId;
@@ -4383,21 +4404,21 @@ export function AgentPanel({
         ) : null}
 
         <div className="tantalum-ai-threads-container">
-          {loadingThreads ? (
+          {showThreadListLoading ? (
             <div className="agent-empty-state">
               <LoaderCircle size={16} className="spin" />
               <span>Loading threads...</span>
             </div>
           ) : null}
 
-          {!loadingThreads && threadSummaries.length === 0 ? (
+          {!showThreadListLoading && threadSummaries.length === 0 ? (
             <div className="agent-empty-state tantalum-empty-state sessions-empty-state">
               <MessageSquare size={16} />
               <span>No active threads.</span>
             </div>
           ) : null}
 
-          {!loadingThreads && threadSummaries.length > 0 && visibleThreadSummaries.length === 0 ? (
+          {!showThreadListLoading && threadSummaries.length > 0 && visibleThreadSummaries.length === 0 ? (
             <div className="agent-empty-state tantalum-empty-state">
               <Search size={16} />
               <span>No matching threads.</span>
@@ -4896,25 +4917,20 @@ export function AgentPanel({
         onDragLeave={handleContextDragLeave}
         onDrop={handleContextDrop}
       >
-        {!showInitialAgentLoading && !hasCloudAgent ? (
+        {!loadingInitialAgentData && !hasCloudAgent ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
             Push the Tantalum AI Appwrite tables and functions before using managed models, custom credentials, or synced threads.
           </div>
         ) : null}
 
-        {!showInitialAgentLoading && preferences.selectedSource === 'managed' && managedUnavailableMessage ? (
+        {!loadingInitialAgentData && preferences.selectedSource === 'managed' && managedUnavailableMessage ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
             {managedUnavailableMessage}
           </div>
         ) : null}
 
         <div className="tantalum-ai-chat-content">
-          {showInitialAgentLoading ? (
-            <div className="agent-loading-state" role="status" aria-live="polite">
-              <LoaderCircle size={22} className="spin" />
-              <span>Loading agent...</span>
-            </div>
-          ) : isViewingHistory ? renderThreadList() : renderConversation()}
+          {isViewingHistory ? renderThreadList() : renderConversation()}
         </div>
 
         {isViewingHistory && sessionSearchOpen ? null : renderComposer()}

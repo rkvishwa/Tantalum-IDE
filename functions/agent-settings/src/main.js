@@ -750,12 +750,13 @@ async function bootstrap(req, res) {
   const payload = readPayload(req);
   const databases = new Databases(createAdminClient(req));
   const workspaceKey = String(payload.workspaceKey || '').trim() || null;
+  const includeUsage = payload.includeUsage !== false;
   const [assignment, preferences, creditAccount, customCredentials, recentUsage, recentThreads] = await Promise.all([
     ensureManagedAssignment(databases, user.$id),
     ensurePreferences(databases, user.$id),
     ensureCreditAccount(databases, user.$id),
     listCustomCredentials(databases, user.$id),
-    listRecentUsage(databases, user.$id),
+    includeUsage ? listRecentUsage(databases, user.$id) : Promise.resolve([]),
     listThreadDocuments(databases, user.$id, workspaceKey),
   ]);
   const managedModelMetadata = maskManagedModelMetadata(await getManagedPoolKey(databases, assignment));

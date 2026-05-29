@@ -61,6 +61,10 @@ type SaveAgentPreferencesOptions = {
   includeCustomModelName?: boolean;
 };
 
+type LoadAgentSettingsOptions = {
+  includeUsage?: boolean;
+};
+
 export type AgentCreditAccount = {
   id: string;
   periodKey: string;
@@ -238,11 +242,11 @@ export function createDefaultAgentSettings(): AgentSettingsState {
   };
 }
 
-export async function loadAgentSettings(workspaceKey?: string | null) {
+export async function loadAgentSettings(workspaceKey?: string | null, options: LoadAgentSettingsOptions = {}) {
   assertAgentSettingsFunction();
-  return executeFunction<{ workspaceKey?: string | null }, AgentSettingsState>(
+  return executeFunction<{ workspaceKey?: string | null; includeUsage?: boolean }, AgentSettingsState>(
     appwriteConfig.agentSettingsFunctionId,
-    { workspaceKey: workspaceKey ?? null },
+    { workspaceKey: workspaceKey ?? null, includeUsage: options.includeUsage !== false },
     '/bootstrap',
   );
 }

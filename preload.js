@@ -146,6 +146,8 @@ contextBridge.exposeInMainWorld("tantalum", {
     deleteLocalBoardProfile: (profileId) => ipcRenderer.invoke("toolchain:delete-local-board-profile", profileId),
     replaceLocalBoardProfiles: (profiles) => ipcRenderer.invoke("toolchain:replace-local-board-profiles", profiles),
     uploadLocalSketch: (payload) => ipcRenderer.invoke("toolchain:upload-local-sketch", payload),
+    createSourceSnapshot: (payload) => ipcRenderer.invoke("toolchain:create-source-snapshot", payload),
+    viewBoardCode: (payload) => ipcRenderer.invoke("toolchain:view-board-code", payload),
     installBoardPackage: (payload) => ipcRenderer.invoke("toolchain:install-board-package", payload),
     cancelBoardPackageInstall: (payload) => ipcRenderer.invoke("toolchain:cancel-board-package-install", payload),
     removeBoardPackage: (payload) => ipcRenderer.invoke("toolchain:remove-board-package", payload),
@@ -171,6 +173,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     onCompileProgress: (callback) => subscribe("toolchain:compile-progress", callback),
     onInstallProgress: (callback) => subscribe("toolchain:install-progress", callback),
     onUsbUploadProgress: (callback) => subscribe("toolchain:usb-upload-progress", callback),
+    onBoardCodeProgress: (callback) => subscribe("toolchain:board-code-progress", callback),
     onLibraryInstallProgress: (callback) => subscribe("toolchain:library-install-progress", callback),
     onLibraryMigrationProgress: (callback) => subscribe("toolchain:library-migration-progress", callback)
   },

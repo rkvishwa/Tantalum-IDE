@@ -36,6 +36,7 @@ import {
   Cpu,
   ExternalLink,
   FilePlus2,
+  FileCode2,
   FolderOpen,
   FolderPlus,
   GitBranch,
@@ -103,6 +104,9 @@ import type {
   UsbUploadProgressEvent,
   WorkspaceReplaceChangedFile,
   WorkspaceSearchResult,
+  BoardCodeProgressEvent,
+  BoardCodeSourceSnapshotInput,
+  BoardCodeViewResult,
 } from '@/types/electron';
 import type { AgentChangePreview } from '@/types/electron';
 
@@ -1497,6 +1501,32 @@ type LocalBoardOption = {
   label: string;
 };
 
+const SOURCE_SNAPSHOT_EXTENSIONS = new Set([
+  '.ino',
+  '.pde',
+  '.c',
+  '.cc',
+  '.cpp',
+  '.cxx',
+  '.h',
+  '.hh',
+  '.hpp',
+  '.hxx',
+  '.s',
+  '.asm',
+  '.json',
+  '.md',
+  '.txt',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.properties',
+]);
+const SOURCE_SNAPSHOT_MAX_FILES = 80;
+const SOURCE_SNAPSHOT_MAX_FILE_BYTES = 512 * 1024;
+const SOURCE_SNAPSHOT_MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+
 type LocalBoardRow = {
   key: string;
   profileId?: string;
@@ -1528,6 +1558,19 @@ type LocalBoardRow = {
   detectionSource?: string;
   matchingBoards?: Array<{ name: string; fqbn: string; isHidden?: boolean }>;
   ai?: LocalBoardDetection['ai'];
+};
+
+type BoardCodeTarget = {
+  label: string;
+  board: {
+    id?: string;
+    name?: string;
+    fqbn: string;
+    port?: string;
+    profileId?: string;
+    fingerprint?: string;
+    cloudBoardId?: string;
+  };
 };
 
 type LiveLocalBoardResolution = {
@@ -2622,6 +2665,7 @@ export function IDEWorkspace({
   const [boardModalOpen, setBoardModalOpen] = useState(false);
   const [provisionModalOpen, setProvisionModalOpen] = useState(false);
   const [releaseModalOpen, setReleaseModalOpen] = useState(false);
+  const [boardCodeDestinationRequest, setBoardCodeDestinationRequest] = useState<BoardCodeTarget | null>(null);
   const [boardForm, setBoardForm] = useState<BoardInput>({
     name: '',
     boardType: 'esp32:esp32:esp32',
@@ -2931,6 +2975,7 @@ export function IDEWorkspace({
   const toastCounterRef = useRef(1);
   const toastsRef = useRef<Toast[]>(toasts);
   const toolchainNotificationToastIdsRef = useRef(new Map<string, number>());
+  const boardCodeProgressToastIdsRef = useRef(new Map<string, number>());
   const libraryInstallToastIdsRef = useRef(new Map<string, number>());
   const libraryMigrationNotificationIdRef = useRef<string | null>(null);
   const libraryMigrationToastIdRef = useRef<number | null>(null);
@@ -3527,6 +3572,131 @@ export function IDEWorkspace({
     }
 
     return joinPath(destinationRoot, toHostSeparators(relativePath, destinationRoot));
+  }
+
+  function isSourceSnapshotFilePath(filePath: string) {
+    return SOURCE_SNAPSHOT_EXTENSIONS.has(`.${fileNameFromPath(filePath).split('.').pop()?.toLowerCase() || ''}`);
+  }
+
+  function sanitizeSourceSnapshotRelativePath(filePath: string, fallback = 'sketch.ino') {
+    const normalized = filePath.replace(/\\/g, '/');
+    const parts = normalized
+      .split('/')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => part !== '.' && part !== '..')
+      .map((part) => part.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '-').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'file');
+    return parts.join('/') || fallback;
+  }
+
+  function sourceSnapshotByteLength(content: string) {
+    return new TextEncoder().encode(content).byteLength;
+  }
+
+  function shouldSkipSourceSnapshotDirectory(name: string) {
+    return ['.git', '.tantalum-trash', 'node_modules', 'dist', 'build', '.next', '.vite'].includes(name.toLowerCase());
+  }
+
+  async function buildBoardCodeSourceSnapshot(boardName: string, metadata: Record<string, unknown> = {}): Promise<BoardCodeSourceSnapshotInput | null> {
+    const currentTab = activeTab;
+    if (!currentTab) {
+      return null;
+    }
+
+    const files = new Map<string, { path: string; content: string }>();
+    let totalBytes = 0;
+    const addFile = (relativePath: string, content: string) => {
+      const sanitizedPath = sanitizeSourceSnapshotRelativePath(relativePath);
+      if (!isSourceSnapshotFilePath(sanitizedPath)) {
+        return;
+      }
+      const bytes = sourceSnapshotByteLength(content);
+      const key = sanitizedPath.toLowerCase();
+      const existing = files.get(key);
+      const existingBytes = existing ? sourceSnapshotByteLength(existing.content) : 0;
+      if (bytes > SOURCE_SNAPSHOT_MAX_FILE_BYTES || totalBytes - existingBytes + bytes > SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
+        return;
+      }
+      if (!existing) {
+        totalBytes += bytes;
+      } else {
+        totalBytes -= existingBytes;
+        totalBytes += bytes;
+      }
+      files.set(key, { path: sanitizedPath, content });
+    };
+
+    const activeContent = editorValueRef.current;
+    if (isTemporaryFileTab(currentTab)) {
+      addFile(currentTab.name && isSourceSnapshotFilePath(currentTab.name) ? currentTab.name : 'sketch.ino', activeContent);
+    } else {
+      const sketchRoot = parentPath(currentTab.path);
+      const visitDirectory = async (dirPath: string) => {
+        if (files.size >= SOURCE_SNAPSHOT_MAX_FILES || totalBytes >= SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
+          return;
+        }
+        const directory = await window.tantalum.fs.readDirectory(dirPath);
+        if (!directory.success) {
+          return;
+        }
+
+        const sortedItems = [...directory.items].sort((left, right) => {
+          if (left.isDirectory !== right.isDirectory) {
+            return left.isDirectory ? -1 : 1;
+          }
+          return left.name.localeCompare(right.name);
+        });
+        for (const item of sortedItems) {
+          if (files.size >= SOURCE_SNAPSHOT_MAX_FILES || totalBytes >= SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
+            break;
+          }
+          if (item.isDirectory) {
+            if (!shouldSkipSourceSnapshotDirectory(item.name)) {
+              await visitDirectory(item.path);
+            }
+            continue;
+          }
+          if (!isSourceSnapshotFilePath(item.name)) {
+            continue;
+          }
+          const file = await window.tantalum.fs.readFile(item.path);
+          if (!file.success) {
+            continue;
+          }
+          const relativePath = relativePathFromRoot(item.path, sketchRoot) || item.name;
+          addFile(relativePath, file.content);
+        }
+      };
+
+      await visitDirectory(sketchRoot);
+      for (const tab of tabsRef.current.map(syncFileTabDirtyState)) {
+        if (isTemporaryFileTab(tab) || !isPathInsideRoot(tab.path, sketchRoot) || !isSourceSnapshotFilePath(tab.path)) {
+          continue;
+        }
+        const relativePath = relativePathFromRoot(tab.path, sketchRoot) || tab.name;
+        addFile(relativePath, tab.id === currentTab.id ? activeContent : tab.content);
+      }
+      const activeRelativePath = relativePathFromRoot(currentTab.path, sketchRoot) || currentTab.name;
+      addFile(activeRelativePath, activeContent);
+    }
+
+    const collectedFiles = Array.from(files.values());
+    if (collectedFiles.length === 0) {
+      return null;
+    }
+
+    return {
+      name: boardName || currentTab.name || 'sketch',
+      files: collectedFiles,
+      metadata: {
+        boardName,
+        workspacePath,
+        activeFile: isTemporaryFileTab(currentTab) ? currentTab.name : currentTab.path,
+        activeFileDirty: Boolean(currentTab.isDirty),
+        collectedAt: new Date().toISOString(),
+        ...metadata,
+      },
+    };
   }
 
   function mapDirectoryItemsToTreeNodes(items: Array<{ name: string; path: string; isDirectory: boolean; extension: string | null }>): FileTreeNode[] {
@@ -5042,6 +5212,203 @@ export function IDEWorkspace({
     }
   }
 
+  function localBoardCodeTarget(row: LocalBoardRow): BoardCodeTarget {
+    const label = localBoardDisplayName(row);
+    return {
+      label,
+      board: {
+        name: label,
+        fqbn: row.fqbn,
+        port: row.port,
+        profileId: row.profileId,
+        fingerprint: row.fingerprint,
+        cloudBoardId: row.cloudBoardId,
+      },
+    };
+  }
+
+  function localBoardSourceIdentity(row: LocalBoardRow) {
+    return {
+      boardName: localBoardDisplayName(row),
+      fqbn: row.fqbn,
+      port: row.port,
+      profileId: row.profileId,
+      fingerprint: row.fingerprint,
+      cloudBoardId: row.cloudBoardId,
+    };
+  }
+
+  function remoteBoardCodeTarget(board: BoardDocument, linkedLocalRow: LocalBoardRow | null = null): BoardCodeTarget {
+    return {
+      label: board.name,
+      board: {
+        id: board.$id,
+        name: board.name,
+        fqbn: board.boardType,
+        port: linkedLocalRow?.port || '',
+        profileId: linkedLocalRow?.profileId,
+        fingerprint: linkedLocalRow?.fingerprint,
+        cloudBoardId: board.$id,
+      },
+    };
+  }
+
+  function formatBoardCodeSource(source: BoardCodeViewResult['source']) {
+    switch (source) {
+      case 'snapshot':
+        return 'exact source snapshot';
+      case 'local-history':
+        return 'local upload source snapshot';
+      case 'hardware-ai':
+        return 'reconstructed source project';
+      case 'hardware-binary':
+        return 'firmware dump artifacts';
+      default:
+        return 'extraction notes';
+    }
+  }
+
+  function selectBoardCodePrimaryFile(result: BoardCodeViewResult) {
+    return result.primaryFile
+      ?? result.files.find((file) => /\.(ino|cpp|c|h|hpp)$/i.test(file.relativePath || file.path))
+      ?? result.files.find((file) => /readme\.md$/i.test(file.relativePath || file.path))
+      ?? result.files[0]
+      ?? null;
+  }
+
+  function handleBoardCodeProgress(event: BoardCodeProgressEvent) {
+    const toastId = boardCodeProgressToastIdsRef.current.get(event.requestId);
+    if (!toastId) {
+      return;
+    }
+    updateToast(toastId, {
+      message: event.message || 'Viewing board code...',
+      detail: event.phase,
+      progress: event.progress,
+      progressLabel: typeof event.progress === 'number' ? `${Math.round(event.progress)}%` : undefined,
+      persistent: true,
+      tone: 'info',
+    });
+  }
+
+  function openBoardCodeDestination(target: BoardCodeTarget) {
+    setBoardCodeDestinationRequest(target);
+  }
+
+  async function openBoardCodeResult(result: BoardCodeViewResult, mode: 'current' | 'new') {
+    if (mode === 'new') {
+      const opened = await openWorkspace(result.workspacePath);
+      if (!opened) {
+        return;
+      }
+    } else {
+      refreshFileTree();
+    }
+
+    const primaryFile = selectBoardCodePrimaryFile(result);
+    if (primaryFile?.path) {
+      await openFile(primaryFile.path, { preview: false });
+    }
+  }
+
+  async function handleViewBoardCodeDestination(mode: 'current' | 'new') {
+    const target = boardCodeDestinationRequest;
+    if (!target) {
+      return;
+    }
+
+    let destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
+    if (mode === 'current') {
+      if (!workspacePath) {
+        pushToast('Open a workspace before writing extracted code into it.', 'info');
+        return;
+      }
+      destination = { mode: 'current', workspacePath };
+    } else {
+      const folderResult = await window.tantalum.projects.pickFolder();
+      if (!folderResult.success) {
+        if (!folderResult.canceled) {
+          pushToast(folderResult.error, 'error');
+        }
+        return;
+      }
+      destination = { mode: 'new', folderPath: folderResult.path };
+    }
+
+    setBoardCodeDestinationRequest(null);
+    const requestId = createToolchainTaskId('code-extraction');
+    const toastId = pushToast(`Viewing code for ${target.label}`, 'info', undefined, {
+      detail: mode === 'new' ? 'Preparing a new workspace...' : 'Preparing extraction folder...',
+      persistent: true,
+      progress: null,
+      notificationId: requestId,
+    });
+    boardCodeProgressToastIdsRef.current.set(requestId, toastId);
+    persistToolchainNotification({
+      id: requestId,
+      kind: 'code-extraction',
+      title: `Viewing code for ${target.label}`,
+      detail: 'Checking source snapshots and board readback options...',
+      status: 'running',
+      phase: 'start',
+      progress: null,
+      name: target.label,
+      target: target.board.port || target.board.fqbn || target.label,
+      metadata: {
+        boardId: target.board.id || target.board.cloudBoardId,
+        boardType: target.board.fqbn,
+        port: target.board.port,
+      },
+    });
+
+    setBusyAction('view-code');
+    pauseLocalBoardMonitoring();
+    try {
+      const result = await window.tantalum.toolchain.viewBoardCode({
+        requestId,
+        destination,
+        board: target.board,
+      });
+      if (!result.success) {
+        finishToast(toastId, {
+          message: 'Unable to view board code',
+          detail: result.error,
+          tone: 'error',
+          progress: null,
+        });
+        pushConsole(result.error, 'error');
+        return;
+      }
+
+      await openBoardCodeResult(result, mode);
+      const detail = `${formatBoardCodeSource(result.source)} written to ${result.outputPath || result.workspacePath}.`;
+      finishToast(toastId, {
+        message: `Code view ready for ${target.label}`,
+        detail,
+        tone: result.source === 'unavailable' ? 'info' : 'success',
+        progress: 100,
+        progressLabel: '100%',
+      });
+      pushConsole(detail, result.source === 'unavailable' ? 'info' : 'success');
+      if (result.warnings.length > 0) {
+        pushConsole(result.warnings.join('\n'), 'info');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to view board code.';
+      finishToast(toastId, {
+        message: 'Unable to view board code',
+        detail: message,
+        tone: 'error',
+        progress: null,
+      });
+      pushConsole(message, 'error');
+    } finally {
+      boardCodeProgressToastIdsRef.current.delete(requestId);
+      setBusyAction(null);
+      resumeLocalBoardMonitoringSoon();
+    }
+  }
+
   async function handleCompile() {
     if (!activeTab) {
       return;
@@ -5268,6 +5635,20 @@ export function IDEWorkspace({
     openConsolePanel('output');
     pushConsole(`Uploading ${activeTab.name} to ${boardName} on ${uploadBoard.port}...`);
 
+    let sourceSnapshot: BoardCodeSourceSnapshotInput | null = null;
+    try {
+      sourceSnapshot = await buildBoardCodeSourceSnapshot(boardName, {
+        operation: 'usb-upload',
+        boardType: uploadBoard.fqbn,
+        port: uploadBoard.port,
+        profileId: uploadBoard.profileId,
+        cloudBoardId: uploadBoard.cloudBoardId,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot for upload history.';
+      pushConsole(`Source snapshot skipped: ${message}`, 'info');
+    }
+
     let result;
     try {
       result = await window.tantalum.toolchain.uploadLocalSketch({
@@ -5276,6 +5657,7 @@ export function IDEWorkspace({
         port: uploadBoard.port,
         uploadId: notificationId,
         cloudRuntime: linkedCloudRuntime,
+        ...(sourceSnapshot ? { sourceSnapshot, sourceIdentity: localBoardSourceIdentity(uploadBoard) } : {}),
       });
 
       if (!result.success && isLocalBoardUploadRecoverableSerialError(result.error)) {
@@ -5326,6 +5708,7 @@ export function IDEWorkspace({
             port: uploadBoard.port,
             uploadId: notificationId,
             cloudRuntime: linkedCloudRuntime,
+            ...(sourceSnapshot ? { sourceSnapshot, sourceIdentity: localBoardSourceIdentity(uploadBoard) } : {}),
           });
         }
       }
@@ -5505,6 +5888,20 @@ export function IDEWorkspace({
     setBusyAction('upload');
     pushConsole(`Building ${targetBoard.name} firmware release ${releaseVersion}...`);
 
+    let releaseSourceSnapshotInput: BoardCodeSourceSnapshotInput | null = null;
+    try {
+      releaseSourceSnapshotInput = await buildBoardCodeSourceSnapshot(boardName, {
+        operation: 'firmware-release',
+        boardId: targetBoard.$id,
+        boardType: targetBoard.boardType,
+        firmwareId,
+        version: releaseVersion,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot.';
+      pushConsole(`Source snapshot skipped: ${message}`, 'info');
+    }
+
     const secretResult = await window.tantalum.secrets.getBoardSecrets(targetBoard.$id);
     if (!secretResult.success || !secretResult.secrets?.apiToken || !secretResult.secrets?.commandSecret || !secretResult.secrets?.mqttTopic || !secretResult.secrets?.provisioningPop) {
       setBusyAction(null);
@@ -5626,6 +6023,35 @@ export function IDEWorkspace({
       });
       pushConsole('Calculating firmware checksum...');
       const checksum = await sha256Hex(compileResult.binData);
+      let uploadedSourceSnapshot: {
+        fileId: string;
+        checksum: string;
+        manifest: Record<string, unknown>;
+        createdAt: string;
+      } | null = null;
+      if (releaseSourceSnapshotInput && appwriteConfig.firmwareSourceBucketId) {
+        pushConsole('Saving firmware source snapshot...');
+        const snapshotResult = await window.tantalum.toolchain.createSourceSnapshot({
+          sourceSnapshot: releaseSourceSnapshotInput,
+          metadata: {
+            boardId: targetBoard.$id,
+            boardName,
+            boardType: targetBoard.boardType,
+            firmwareId,
+            version: releaseVersion,
+          },
+        });
+        if (snapshotResult.success) {
+          uploadedSourceSnapshot = {
+            fileId: snapshotResult.fileId,
+            checksum: snapshotResult.checksum,
+            manifest: snapshotResult.manifest,
+            createdAt: snapshotResult.createdAt,
+          };
+        } else {
+          pushConsole(`Source snapshot skipped: ${snapshotResult.error}`, 'info');
+        }
+      }
       updateFirmwareReleaseProgress(notificationId, {
         phase: 'storage',
         detail: FIRMWARE_RELEASE_PHASE_CONFIG.storage.fallbackDetail,
@@ -5641,6 +6067,7 @@ export function IDEWorkspace({
         version: releaseVersion,
         notes: releaseNotes,
         checksum,
+        sourceSnapshot: uploadedSourceSnapshot,
         compileResult: {
           filename: compileResult.filename,
           binData: compileResult.binData,
@@ -8943,6 +9370,9 @@ export function IDEWorkspace({
     const offUsbUploadProgress = window.tantalum.toolchain.onUsbUploadProgress((event) => {
       handleUsbUploadProgress(event);
     });
+    const offBoardCodeProgress = window.tantalum.toolchain.onBoardCodeProgress((event) => {
+      handleBoardCodeProgress(event);
+    });
     const offLibraryProgress = window.tantalum.toolchain.onLibraryInstallProgress((event) => {
       handleLibraryInstallProgress(event);
     });
@@ -8956,6 +9386,7 @@ export function IDEWorkspace({
       offCompileProgress();
       offStorageUploadProgress();
       offUsbUploadProgress();
+      offBoardCodeProgress();
       offLibraryProgress();
       offLibraryMigrationProgress();
     };
@@ -9255,6 +9686,15 @@ export function IDEWorkspace({
             </div>
           ) : null}
           <div className="action-row">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => openBoardCodeDestination(remoteBoardCodeTarget(selectedBoard, selectedBoardLinkedLocalRow))}
+              disabled={busyAction === 'view-code'}
+            >
+              <FileCode2 size={14} />
+              View code
+            </button>
             <button
               className="secondary-button"
               type="button"
@@ -9624,6 +10064,15 @@ export function IDEWorkspace({
               <button className="secondary-button compact" type="button" onClick={() => handleResetLocalBoardEdit(row.key)}>
                 Reset
               </button>
+              <button
+                className="secondary-button compact"
+                type="button"
+                onClick={() => openBoardCodeDestination(localBoardCodeTarget(row))}
+                disabled={busyAction === 'view-code'}
+              >
+                <FileCode2 size={13} />
+                View code
+              </button>
               <button className="primary-button compact" type="button" onClick={() => void handleSaveLocalBoard(row)} disabled={saveBusy || !canUseBoard}>
                 {saveBusy ? <LoaderCircle size={13} className="spin" /> : null}
                 {row.profileId ? 'Save' : 'Save board'}
@@ -9798,6 +10247,18 @@ export function IDEWorkspace({
                     >
                       {selectedLocalLinkBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
                       {selectedLocalLinkedToThis ? 'Local linked' : 'Link selected local'}
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      type="button"
+                      onClick={() => {
+                        setSelectedBoardId(board.$id);
+                        openBoardCodeDestination(remoteBoardCodeTarget(board, linkedLocalRow));
+                      }}
+                      disabled={busyAction === 'view-code'}
+                    >
+                      <FileCode2 size={13} />
+                      View code
                     </button>
                     <button
                       className="secondary-button compact"
@@ -11920,6 +12381,33 @@ export function IDEWorkspace({
             </button>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(boardCodeDestinationRequest)}
+        title="View board code"
+        subtitle={boardCodeDestinationRequest ? `Choose where to write code files for ${boardCodeDestinationRequest.label}.` : 'Choose where to write code files.'}
+        size="sm"
+        onClose={() => setBoardCodeDestinationRequest(null)}
+      >
+        {boardCodeDestinationRequest ? (
+          <div className="modal-form">
+            <div className="inline-banner">
+              Saved source snapshots open as exact source. Firmware readback creates raw artifacts and, when configured, a reconstructed project.
+            </div>
+            <div className="form-actions">
+              <button className="secondary-button" type="button" onClick={() => setBoardCodeDestinationRequest(null)}>
+                Cancel
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void handleViewBoardCodeDestination('current')} disabled={!workspacePath || busyAction === 'view-code'}>
+                Current workspace
+              </button>
+              <button className="primary-button" type="button" onClick={() => void handleViewBoardCodeDestination('new')} disabled={busyAction === 'view-code'}>
+                New workspace
+              </button>
+            </div>
+          </div>
+        ) : null}
       </Modal>
 
       <Modal
