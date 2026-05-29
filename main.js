@@ -3088,6 +3088,7 @@ function getAppwriteSessionHeaders() {
 function clearAppwriteSession() {
   secretStore?.delete("appwrite.sessionFallback");
   secretStore?.delete("appwrite.sessionCookie");
+  clearAppwriteJwtCache();
   clearAppwriteReadCache();
 }
 
@@ -3269,6 +3270,7 @@ const APPWRITE_AGENT_MESSAGES_CACHE_TTL_MS = 30 * 1000;
 const appwriteReadCache = new Map();
 const appwriteInflightReadCache = new Map();
 let appwriteReadCacheEpoch = 0;
+let appwriteJwtCache = { sessionKey: "", jwt: "", expiresAt: 0 };
 
 function cloneAppwritePayload(payload) {
   try {
@@ -3288,6 +3290,37 @@ function appwriteSessionCacheKey(useSession = true) {
     .createHash("sha256")
     .update(`${headers.Cookie || ""}\n${headers["X-Fallback-Cookies"] || ""}`)
     .digest("hex");
+}
+
+function clearAppwriteJwtCache() {
+  appwriteJwtCache = { sessionKey: "", jwt: "", expiresAt: 0 };
+}
+
+async function getCurrentAppwriteJwt() {
+  const sessionHeaders = getAppwriteSessionHeaders();
+  if (!sessionHeaders.Cookie && !sessionHeaders["X-Fallback-Cookies"]) {
+    return "";
+  }
+
+  const sessionKey = appwriteSessionCacheKey(true);
+  const now = Date.now();
+  if (appwriteJwtCache.jwt && appwriteJwtCache.sessionKey === sessionKey && appwriteJwtCache.expiresAt > now + 60_000) {
+    return appwriteJwtCache.jwt;
+  }
+
+  const token = await appwriteRequest({
+    method: "POST",
+    pathName: "account/jwt",
+    useSession: true,
+    invalidateCache: false,
+  });
+  const jwt = typeof token?.jwt === "string" ? token.jwt : "";
+  appwriteJwtCache = {
+    sessionKey,
+    jwt,
+    expiresAt: now + 10 * 60 * 1000,
+  };
+  return jwt;
 }
 
 function appwriteCacheKeyForRequest(request, cacheKey) {
@@ -5204,6 +5237,22 @@ ipcMain.handle("cloud:storage:delete-file", async (_event, payload) => {
 
 ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
   try {
+    const executionHeaders = {
+      "content-type": "application/json",
+      ...(payload.headers ?? {}),
+    };
+    const hasForwardedJwt = Object.keys(executionHeaders).some((key) => key.toLowerCase() === "x-appwrite-jwt");
+    if (!hasForwardedJwt) {
+      try {
+        const jwt = await getCurrentAppwriteJwt();
+        if (jwt) {
+          executionHeaders["X-Appwrite-JWT"] = jwt;
+        }
+      } catch {
+        // Appwrite will still enforce the function execute permissions if no session JWT is available.
+      }
+    }
+
     const request = {
       method: "POST",
       pathName: `functions/${encodeURIComponent(payload.functionId)}/executions`,
@@ -5212,7 +5261,7 @@ ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
         async: Boolean(payload.async),
         path: payload.pathName ?? "/",
         method: payload.method ?? "POST",
-        headers: payload.headers ?? { "content-type": "application/json" },
+        headers: executionHeaders,
       },
     };
     const cacheTtlMs = functionExecutionCacheTtlMs(payload);

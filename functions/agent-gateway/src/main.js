@@ -83,8 +83,17 @@ function createUserClient(jwt) {
     .setJWT(jwt);
 }
 
+function requestUserJwt(req) {
+  const authorization = req.headers.authorization || req.headers.Authorization || '';
+  return (
+    req.headers['x-appwrite-user-jwt'] ||
+    req.headers['x-appwrite-jwt'] ||
+    String(authorization).replace(/^Bearer\s+/i, '').trim()
+  );
+}
+
 async function resolveUser(req) {
-  const account = new Account(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
 }
 
@@ -207,6 +216,42 @@ function ensureArray(value) {
   return [];
 }
 
+function errorMessage(error) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (error && typeof error === 'object') {
+    const values = [
+      error.message,
+      error.response?.message,
+      error.responseBody,
+      error.body,
+    ];
+    const message = values.find((value) => typeof value === 'string' && value.length > 0);
+    if (message) {
+      return message;
+    }
+  }
+
+  return String(error || '');
+}
+
+function isConflictError(error) {
+  const statusCode = Number(error?.code || error?.status || error?.response?.code || 0);
+  return statusCode === 409 || /already exists|conflict/i.test(errorMessage(error));
+}
+
+function stableDocumentId(prefix, ...parts) {
+  const suffix = parts
+    .join('_')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[._-]+/, '')
+    .slice(0, Math.max(1, 35 - prefix.length));
+
+  return `${prefix}_${suffix || 'document'}`.slice(0, 36);
+}
+
 async function findDocument(databases, collectionId, queries) {
   const response = await databases.listDocuments(APPWRITE_DATABASE_ID, collectionId, [...queries, Query.limit(1)]);
   return response.documents[0] || null;
@@ -229,6 +274,7 @@ async function resolveAgentOutputStyle(databases) {
 async function ensureCreditAccount(databases, userId) {
   const now = new Date().toISOString();
   const periodKey = periodKeyFor();
+  const documentId = stableDocumentId('credit', periodKey.replace(/-/g, ''), userId);
   const existing = await findDocument(databases, APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID, [
     Query.equal('userId', userId),
     Query.equal('periodKey', periodKey),
@@ -241,7 +287,7 @@ async function ensureCreditAccount(databases, userId) {
   return databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID,
-    ID.unique(),
+    documentId,
     {
       userId,
       periodKey,
@@ -252,7 +298,88 @@ async function ensureCreditAccount(databases, userId) {
       updatedAt: now,
     },
     [],
-  );
+  ).catch(async (error) => {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+
+    return databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID, documentId);
+  });
+}
+
+async function ensureManagedAssignment(databases, userId) {
+  const existing = await findDocument(databases, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, [
+    Query.equal('userId', userId),
+    Query.equal('status', 'active'),
+  ]);
+
+  if (existing) {
+    return existing;
+  }
+
+  const pool = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, [
+    Query.equal('status', 'active'),
+    Query.limit(100),
+  ]);
+
+  const available = pool.documents
+    .filter((entry) => {
+      const maxAssignments = Number(entry.maxAssignments || 0);
+      return maxAssignments <= 0 || Number(entry.assignedCount || 0) < maxAssignments;
+    })
+    .sort((left, right) => {
+      const weightDelta = Number(right.assignmentWeight || 1) - Number(left.assignmentWeight || 1);
+      return weightDelta || Number(left.assignedCount || 0) - Number(right.assignedCount || 0);
+    })[0];
+
+  if (!available) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const documentId = stableDocumentId('managed', userId);
+  let createdAssignment = false;
+  const assignment = await databases.createDocument(
+    APPWRITE_DATABASE_ID,
+    APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID,
+    documentId,
+    {
+      userId,
+      poolKeyId: available.$id,
+      status: 'active',
+      assignedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    },
+    [],
+  ).then((document) => {
+    createdAssignment = true;
+    return document;
+  }).catch(async (error) => {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+
+    const racedAssignment = await findDocument(databases, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, [
+      Query.equal('userId', userId),
+      Query.equal('status', 'active'),
+    ]);
+
+    return racedAssignment || databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, documentId);
+  });
+
+  try {
+    if (createdAssignment) {
+      await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, available.$id, {
+        assignedCount: Number(available.assignedCount || 0) + 1,
+        updatedAt: now,
+      });
+    }
+  } catch {
+    // Assignment is still valid if this non-critical counter update loses a race.
+  }
+
+  return assignment;
 }
 
 function stripOpenAiPrefix(modelName) {
@@ -282,10 +409,7 @@ function resolveManagedModel(poolKey, mode, incomingModel) {
 }
 
 async function resolveManagedProvider(databases, userId, mode, incomingModel) {
-  const assignment = await findDocument(databases, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, [
-    Query.equal('userId', userId),
-    Query.equal('status', 'active'),
-  ]);
+  const assignment = await ensureManagedAssignment(databases, userId);
 
   if (!assignment) {
     throw new Error('No managed model key is assigned to this account yet.');

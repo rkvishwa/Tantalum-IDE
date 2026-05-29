@@ -45,6 +45,15 @@ function createUserClient(jwt) {
     .setJWT(jwt);
 }
 
+function requestUserJwt(req) {
+  const authorization = req.headers.authorization || req.headers.Authorization || '';
+  return (
+    req.headers['x-appwrite-user-jwt'] ||
+    req.headers['x-appwrite-jwt'] ||
+    String(authorization).replace(/^Bearer\s+/i, '').trim()
+  );
+}
+
 function json(res, status, payload) {
   return res.json(payload, status);
 }
@@ -86,8 +95,7 @@ function boardPermissions(userId) {
 }
 
 async function resolveUser(req) {
-  const jwt = req.headers['x-appwrite-user-jwt'];
-  const account = new Account(createUserClient(jwt));
+  const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
 }
 
@@ -260,7 +268,7 @@ async function publishBoardCommand(board, action, deploymentId = '') {
 
 async function ensureUserCanAccessBoard(req, boardId) {
   const user = await resolveUser(req);
-  const userDatabases = new Databases(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const userDatabases = new Databases(createUserClient(requestUserJwt(req)));
   const board = await userDatabases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, boardId);
   if (board.userId !== user.$id) {
     throw new Error('Board does not belong to the current user.');
@@ -373,7 +381,7 @@ async function deployFirmware(req, res) {
   }
 
   const { user } = await ensureUserCanAccessBoard(req, payload.boardId);
-  const userDatabases = new Databases(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const userDatabases = new Databases(createUserClient(requestUserJwt(req)));
   const firmware = await userDatabases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_FIRMWARE_COLLECTION_ID, payload.firmwareId);
   if (firmware.boardId !== payload.boardId || firmware.userId !== user.$id) {
     return fail(res, 403, 'Firmware does not belong to this board.');

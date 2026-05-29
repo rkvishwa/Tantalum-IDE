@@ -65,8 +65,17 @@ function createUserClient(jwt) {
     .setJWT(jwt);
 }
 
+function requestUserJwt(req) {
+  const authorization = req.headers.authorization || req.headers.Authorization || '';
+  return (
+    req.headers['x-appwrite-user-jwt'] ||
+    req.headers['x-appwrite-jwt'] ||
+    String(authorization).replace(/^Bearer\s+/i, '').trim()
+  );
+}
+
 async function resolveUser(req) {
-  const account = new Account(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
 }
 

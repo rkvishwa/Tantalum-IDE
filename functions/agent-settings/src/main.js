@@ -90,8 +90,17 @@ function createUserClient(jwt) {
     .setJWT(jwt);
 }
 
+function requestUserJwt(req) {
+  const authorization = req.headers.authorization || req.headers.Authorization || '';
+  return (
+    req.headers['x-appwrite-user-jwt'] ||
+    req.headers['x-appwrite-jwt'] ||
+    String(authorization).replace(/^Bearer\s+/i, '').trim()
+  );
+}
+
 async function resolveUser(req) {
-  const account = new Account(createUserClient(req.headers['x-appwrite-user-jwt']));
+  const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
 }
 
@@ -193,6 +202,21 @@ function errorMessage(error) {
   }
 
   return String(error || '');
+}
+
+function isConflictError(error) {
+  const statusCode = Number(error?.code || error?.status || error?.response?.code || 0);
+  return statusCode === 409 || /already exists|conflict/i.test(errorMessage(error));
+}
+
+function stableDocumentId(prefix, ...parts) {
+  const suffix = parts
+    .join('_')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[._-]+/, '')
+    .slice(0, Math.max(1, 35 - prefix.length));
+
+  return `${prefix}_${suffix || 'document'}`.slice(0, 36);
 }
 
 function isUnknownSelectedCustomModelError(error) {
@@ -378,6 +402,7 @@ async function findDocument(databases, collectionId, queries) {
 async function ensureCreditAccount(databases, userId) {
   const now = new Date().toISOString();
   const periodKey = periodKeyFor();
+  const documentId = stableDocumentId('credit', periodKey.replace(/-/g, ''), userId);
   const existing = await findDocument(databases, APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID, [
     Query.equal('userId', userId),
     Query.equal('periodKey', periodKey),
@@ -390,7 +415,7 @@ async function ensureCreditAccount(databases, userId) {
   return databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID,
-    ID.unique(),
+    documentId,
     {
       userId,
       periodKey,
@@ -401,7 +426,13 @@ async function ensureCreditAccount(databases, userId) {
       updatedAt: now,
     },
     [],
-  );
+  ).catch(async (error) => {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+
+    return databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID, documentId);
+  });
 }
 
 async function ensurePreferences(databases, userId) {
@@ -423,10 +454,16 @@ async function ensurePreferences(databases, userId) {
   return databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID,
-    ID.unique(),
+    stableDocumentId('prefs', userId),
     preferences,
     [],
-  );
+  ).catch(async (error) => {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+
+    return findDocument(databases, APPWRITE_AGENT_USER_PREFERENCES_COLLECTION_ID, [Query.equal('userId', userId)]);
+  });
 }
 
 async function ensureManagedAssignment(databases, userId) {
@@ -459,10 +496,12 @@ async function ensureManagedAssignment(databases, userId) {
   }
 
   const now = new Date().toISOString();
+  const documentId = stableDocumentId('managed', userId);
+  let createdAssignment = false;
   const assignment = await databases.createDocument(
     APPWRITE_DATABASE_ID,
     APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID,
-    ID.unique(),
+    documentId,
     {
       userId,
       poolKeyId: available.$id,
@@ -472,13 +511,29 @@ async function ensureManagedAssignment(databases, userId) {
       updatedAt: now,
     },
     [],
-  );
+  ).then((document) => {
+    createdAssignment = true;
+    return document;
+  }).catch(async (error) => {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+
+    const racedAssignment = await findDocument(databases, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, [
+      Query.equal('userId', userId),
+      Query.equal('status', 'active'),
+    ]);
+
+    return racedAssignment || databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, documentId);
+  });
 
   try {
-    await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, available.$id, {
-      assignedCount: Number(available.assignedCount || 0) + 1,
-      updatedAt: now,
-    });
+    if (createdAssignment) {
+      await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, available.$id, {
+        assignedCount: Number(available.assignedCount || 0) + 1,
+        updatedAt: now,
+      });
+    }
   } catch {
     // Assignment is still valid if this non-critical counter update loses a race.
   }

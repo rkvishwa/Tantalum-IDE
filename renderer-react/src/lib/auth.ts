@@ -1,6 +1,7 @@
 import type { Models } from 'appwrite';
 
 import { account, ID } from './appwrite';
+import { loadAgentSettings } from './agent';
 
 export async function getCurrentUser() {
   try {
@@ -29,7 +30,13 @@ export async function signIn(email: string, password: string) {
 
 export async function register(email: string, password: string, name: string) {
   await account.create(ID.unique(), email, password, name);
-  return signIn(email, password);
+  const user = await signIn(email, password);
+  try {
+    await loadAgentSettings(null);
+  } catch {
+    // The Agent panel will retry bootstrap; account creation should not be rolled back.
+  }
+  return user;
 }
 
 export async function signOut() {
