@@ -6,10 +6,14 @@ const electronBinary = require('electron');
 
 const child = spawn(electronBinary, ['.'], {
   cwd: projectRoot,
-  detached: true,
-  stdio: 'ignore',
+  stdio: 'inherit',
 });
 
-child.unref();
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
 
-console.log('Tantalum IDE launched in the background.');
+  process.exit(code ?? 0);
+});

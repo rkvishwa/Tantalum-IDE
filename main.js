@@ -4814,6 +4814,10 @@ function createMainWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
+    mainWindow.focus();
+    if (process.platform === "darwin") {
+      app.focus({ steal: true });
+    }
   });
 
   mainWindow.on("closed", () => {
@@ -6693,6 +6697,12 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
+      return;
+    }
+
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
     }
   });
 });
