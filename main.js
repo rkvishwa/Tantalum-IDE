@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const http = require("node:http");
 const https = require("node:https");
@@ -74,7 +74,7 @@ const provisioningService = require("./src/services/provisioningService");
 const appwriteManifest = require("./appwrite.config.json");
 
 const APP_NAME = "Tantalum IDE";
-const APPWRITE_ENDPOINT = String(appwriteManifest.endpoint || "https://sgp.cloud.appwrite.io/v1").replace(/\/$/, "");
+const APPWRITE_ENDPOINT = String(appwriteManifest.endpoint || "").replace(/\/$/, "");
 const APPWRITE_PROJECT_ID = String(appwriteManifest.projectId || "");
 const REACT_DIST_ENTRY = path.join(__dirname, "renderer-react", "dist", "index.html");
 const DEFAULT_EDITOR_CONTENT = `// Welcome to ${APP_NAME}
@@ -267,6 +267,27 @@ function latestToolchainProgressLine(value, fallback = "") {
     .filter((line) => !/^\d{1,3}(?:\.\d+)?\s*%$/.test(line));
 
   return normalizeNotificationText(lines.at(-1), fallback);
+}
+
+function textFromToolchainProgressPayload(value, fallback = "") {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value && typeof value === "object") {
+    const message = value.message || value.detail || value.phase || value.status;
+    if (message) {
+      return String(message);
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+
+  return String(value ?? fallback);
 }
 
 function normalizeToolchainNotification(entry, existing = null) {
@@ -951,7 +972,7 @@ function formatLibraryInstallMessage(chunk) {
 }
 
 function formatUsbUploadProgressMessage(chunk) {
-  const normalized = String(chunk || "")
+  const normalized = textFromToolchainProgressPayload(chunk)
     .replace(/\u001b\[[0-9;]*m/g, "")
     .replace(/\r/g, "\n")
     .split("\n")
@@ -4388,6 +4409,248 @@ function serialMonitorPortKey(port) {
   return String(port || "").trim().toLowerCase();
 }
 
+function execFileAsync(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeProcessPath(value) {
+  return String(value || "").trim().replace(/\//g, "\\").toLowerCase();
+}
+
+function serialPortMentionPattern(port) {
+  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(port)}([^a-z0-9]|$)`, "i");
+}
+
+function commandMentionsSerialPort(commandLine, port) {
+  return serialPortMentionPattern(port).test(String(commandLine || ""));
+}
+
+function isKnownSerialProcess(processInfo) {
+  const text = `${processInfo.name || ""} ${processInfo.executablePath || ""} ${processInfo.commandLine || ""}`;
+  return /\b(arduino(?:-ide|-cli)?|esptool|serial|platformio|pio|putty|tterm|teraterm|coolterm|python(?:w)?|node)\b/i.test(text);
+}
+
+function isOwnTantalumProcess(processInfo) {
+  const pid = Number(processInfo.pid);
+  if (pid === process.pid) {
+    return true;
+  }
+
+  const executablePath = normalizeProcessPath(processInfo.executablePath);
+  const commandLine = String(processInfo.commandLine || "").toLowerCase();
+  const ownExecutablePath = normalizeProcessPath(process.execPath);
+  const appPath = normalizeProcessPath(app.getAppPath?.());
+  const userDataPath = normalizeProcessPath(app.getPath?.("userData"));
+
+  if (ownExecutablePath && executablePath === ownExecutablePath) {
+    if ((appPath && commandLine.includes(appPath)) || (userDataPath && commandLine.includes(userDataPath)) || commandLine.includes("tantalum-ide")) {
+      return true;
+    }
+  }
+
+  return Boolean(
+    (appPath && commandLine.includes(appPath)) ||
+    (userDataPath && commandLine.includes(userDataPath))
+  );
+}
+
+function createExternalBlockerId(port, processInfo) {
+  const signature = crypto
+    .createHash("sha1")
+    .update([
+      String(port || "").toLowerCase(),
+      String(processInfo.pid || ""),
+      String(processInfo.name || ""),
+      String(processInfo.executablePath || ""),
+      String(processInfo.commandLine || "")
+    ].join("\0"))
+    .digest("hex")
+    .slice(0, 12);
+
+  return `external:${processInfo.pid}:${signature}`;
+}
+
+function mapWindowsProcessInfo(rawProcess) {
+  return {
+    pid: Number(rawProcess?.ProcessId ?? rawProcess?.processId ?? rawProcess?.pid),
+    parentPid: Number(rawProcess?.ParentProcessId ?? rawProcess?.parentProcessId ?? rawProcess?.parentPid),
+    name: String(rawProcess?.Name ?? rawProcess?.name ?? "").trim(),
+    executablePath: String(rawProcess?.ExecutablePath ?? rawProcess?.executablePath ?? "").trim(),
+    commandLine: String(rawProcess?.CommandLine ?? rawProcess?.commandLine ?? "").trim()
+  };
+}
+
+function normalizeWindowsProcessList(payload) {
+  if (!payload) {
+    return [];
+  }
+
+  const parsed = JSON.parse(payload);
+  if (Array.isArray(parsed)) {
+    return parsed.map(mapWindowsProcessInfo);
+  }
+
+  if (parsed && typeof parsed === "object") {
+    return [mapWindowsProcessInfo(parsed)];
+  }
+
+  return [];
+}
+
+function buildInternalSerialPortBlockers(port) {
+  const portKey = serialMonitorPortKey(port);
+  const blockers = [];
+
+  for (const [sessionId, session] of serialMonitorSessions.entries()) {
+    if (session.portKey !== portKey) {
+      continue;
+    }
+
+    blockers.push({
+      blockerId: `tantalum-session:${sessionId}`,
+      kind: "tantalum-session",
+      confidence: "confirmed",
+      pid: process.pid,
+      name: "Tantalum Serial Monitor",
+      executablePath: null,
+      commandLine: null,
+      reason: `Tantalum Serial Monitor has ${session.port} open.`,
+      canTerminate: true
+    });
+  }
+
+  return blockers;
+}
+
+async function listWindowsSerialPortBlockers(port) {
+  const script = "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Depth 3 -Compress";
+  const { stdout } = await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script
+  ], {
+    maxBuffer: 8 * 1024 * 1024,
+    timeout: 15000,
+    windowsHide: true
+  });
+  const processes = normalizeWindowsProcessList(String(stdout || "").trim());
+  const blockers = [];
+
+  for (const processInfo of processes) {
+    if (!Number.isInteger(processInfo.pid) || processInfo.pid <= 0) {
+      continue;
+    }
+
+    if (!commandMentionsSerialPort(processInfo.commandLine, port) || isOwnTantalumProcess(processInfo)) {
+      continue;
+    }
+
+    const confirmed = isKnownSerialProcess(processInfo);
+    blockers.push({
+      blockerId: createExternalBlockerId(port, processInfo),
+      kind: "external-process",
+      confidence: confirmed ? "confirmed" : "possible",
+      pid: processInfo.pid,
+      name: processInfo.name || `Process ${processInfo.pid}`,
+      executablePath: processInfo.executablePath || null,
+      commandLine: processInfo.commandLine || null,
+      reason: confirmed
+        ? `${processInfo.name || "This process"} references ${port} in its command line.`
+        : `This process references ${port}, but it is not a recognized serial tool.`,
+      canTerminate: confirmed
+    });
+  }
+
+  return blockers;
+}
+
+async function listSerialPortBlockers(payload = {}) {
+  const port = normalizeSerialMonitorPort(payload.port);
+  const blockers = buildInternalSerialPortBlockers(port);
+
+  if (process.platform !== "win32") {
+    return {
+      success: true,
+      port,
+      platform: process.platform,
+      supported: false,
+      blockers,
+      message: "External serial blocker detection is currently available on Windows only."
+    };
+  }
+
+  blockers.push(...await listWindowsSerialPortBlockers(port));
+
+  return {
+    success: true,
+    port,
+    platform: process.platform,
+    supported: true,
+    blockers
+  };
+}
+
+async function terminateSerialPortBlocker(payload = {}) {
+  const port = normalizeSerialMonitorPort(payload.port);
+  const blockerId = String(payload.blockerId || "").trim();
+  if (!blockerId) {
+    throw new Error("Choose a serial port blocker to close.");
+  }
+
+  if (blockerId.startsWith("tantalum-session:")) {
+    const sessionId = blockerId.slice("tantalum-session:".length);
+    const session = serialMonitorSessions.get(sessionId);
+    if (!session || session.portKey !== serialMonitorPortKey(port)) {
+      throw new Error("That Tantalum Serial Monitor session is no longer open on this port.");
+    }
+
+    disposeSerialMonitorSession(sessionId, "closed", true);
+    return { success: true, port, blockerId };
+  }
+
+  const currentBlockers = await listSerialPortBlockers({ port });
+  if (!currentBlockers.success) {
+    throw new Error(currentBlockers.error || "Unable to refresh serial port blockers.");
+  }
+
+  const blocker = currentBlockers.blockers.find((item) => item.blockerId === blockerId);
+  if (!blocker) {
+    throw new Error("That serial port blocker is no longer present.");
+  }
+
+  if (blocker.kind !== "external-process" || blocker.confidence !== "confirmed" || !blocker.canTerminate || !Number.isInteger(blocker.pid)) {
+    throw new Error("Only confirmed external serial-tool processes can be terminated.");
+  }
+
+  if (process.platform === "win32") {
+    await execFileAsync("taskkill.exe", ["/PID", String(blocker.pid), "/T", "/F"], {
+      timeout: 15000,
+      windowsHide: true
+    });
+  } else {
+    process.kill(blocker.pid, "SIGTERM");
+  }
+
+  return { success: true, port, blockerId, pid: blocker.pid };
+}
+
 function buildTerminalNavigationCommand(shellBinary, targetPath) {
   const normalizedShell = String(shellBinary || "").toLowerCase();
 
@@ -5798,14 +6061,15 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
 
   try {
     return await uploadLocalSketch(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board, port || payload.port, (chunk, stream) => {
+      const rawChunk = textFromToolchainProgressPayload(chunk);
       _event.sender.send("toolchain:usb-upload-progress", {
         uploadId,
         port,
         board: payload.board,
         stream,
-        chunk,
-        message: formatUsbUploadProgressMessage(chunk),
-        progress: extractLastCliProgressPercent(chunk)
+        chunk: rawChunk,
+        message: formatUsbUploadProgressMessage(rawChunk),
+        progress: typeof chunk?.progress === "number" ? chunk.progress : extractLastCliProgressPercent(rawChunk)
       });
     }, {
       cloudRuntime: payload?.cloudRuntime || null
@@ -6151,14 +6415,15 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
       port,
       appwriteConfig,
       (chunk, stream) => {
+        const rawChunk = textFromToolchainProgressPayload(chunk);
         _event.sender.send("toolchain:usb-upload-progress", {
           uploadId,
           port,
           board: board.boardType,
           stream: stream || "stdout",
-          chunk,
-          message: formatUsbUploadProgressMessage(chunk),
-          progress: extractLastCliProgressPercent(chunk)
+          chunk: rawChunk,
+          message: formatUsbUploadProgressMessage(rawChunk),
+          progress: typeof chunk?.progress === "number" ? chunk.progress : extractLastCliProgressPercent(rawChunk)
         });
       }
     );
@@ -6374,6 +6639,22 @@ ipcMain.handle("serial-monitor:close", async (_event, sessionId) => {
     }
 
     return { success: true };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("serial-port:list-blockers", async (_event, payload = {}) => {
+  try {
+    return await listSerialPortBlockers(payload);
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("serial-port:terminate-blocker", async (_event, payload = {}) => {
+  try {
+    return await terminateSerialPortBlocker(payload);
   } catch (error) {
     return toErrorResult(error);
   }

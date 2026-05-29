@@ -1,8 +1,11 @@
 node_modules
 dist
+backups
 renderer-react/dist
 renderer-react/.env
 renderer-react/.env.local
+infra/selfhost/*.env
+infra/selfhost/*.env.local
 resources/arduino-cli/linux
 resources/arduino-cli/windows
 resources/arduino-cli/macos

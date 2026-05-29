@@ -110,6 +110,7 @@ import { ConsoleTerminal } from './ConsoleTerminal';
 import { AgentPanel, type AgentEditorSelectionContext, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
 import { GitHistoryPanel, GitSourceControlPanel, GitWorkspace } from './GitWorkspace';
 import { SerialMonitor } from './SerialMonitor';
+import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
 import { useGitWorkspaceController } from './useGitWorkspaceController';
 import { Modal } from './Modal';
 import { TerminalWorkspace } from './TerminalWorkspace';
@@ -242,6 +243,14 @@ type Toast = {
     onSelect: () => void;
     dismissOnSelect?: boolean;
   }>;
+};
+
+type SerialBlockerDialogRequest = {
+  port: string;
+  title?: string;
+  subtitle?: string;
+  retryLabel?: string;
+  onRetry?: () => void;
 };
 
 type BoardPlatform = {
@@ -830,6 +839,14 @@ function isLocalBoardUploadPortUnavailableError(message: string) {
   return (
     /FileNotFoundError|cannot find the file specified|doesn't exist|not currently available|No such file|ENOENT/i.test(normalized) &&
     !/PermissionError|Access is denied/i.test(normalized)
+  );
+}
+
+function isLocalBoardUploadRecoverableSerialError(message: string) {
+  const normalized = String(message || '');
+  return (
+    isLocalBoardUploadPortUnavailableError(normalized) ||
+    /Cannot configure port|device attached to the system is not functioning|PermissionError|pySerial|port is busy|Access is denied|already open/i.test(normalized)
   );
 }
 
@@ -2580,6 +2597,7 @@ export function IDEWorkspace({
   ]);
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [serialBlockerDialog, setSerialBlockerDialog] = useState<SerialBlockerDialogRequest | null>(null);
   const [boards, setBoards] = useState<BoardDocument[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(() => hasRequiredCloudConfiguration());
   const [boardsError, setBoardsError] = useState<string | null>(null);
@@ -5260,7 +5278,7 @@ export function IDEWorkspace({
         cloudRuntime: linkedCloudRuntime,
       });
 
-      if (!result.success && isLocalBoardUploadPortUnavailableError(result.error)) {
+      if (!result.success && isLocalBoardUploadRecoverableSerialError(result.error)) {
         const retryBoard = await resolveLocalBoardUploadTarget(uploadBoard);
         if (retryBoard.port && retryBoard.port !== uploadBoard.port && canUploadLocalBoard(retryBoard)) {
           const retryMessage = `Upload port changed from ${uploadBoard.port} to ${retryBoard.port}; retrying once.`;
@@ -5329,6 +5347,24 @@ export function IDEWorkspace({
     }
 
     if (!result.success) {
+      const blockerActions: Toast['actions'] | undefined = isLocalBoardUploadRecoverableSerialError(result.error) && uploadBoard.port
+        ? [{
+            label: 'Find blockers',
+            dismissOnSelect: false,
+            onSelect: () => {
+              setSerialBlockerDialog({
+                port: uploadBoard.port,
+                title: 'USB upload blockers',
+                subtitle: `Checking ${uploadBoard.port} before retrying upload to ${boardName}.`,
+                retryLabel: 'Retry upload',
+                onRetry: () => {
+                  setSerialBlockerDialog(null);
+                  void handleUploadLocal(uploadBoard);
+                },
+              });
+            },
+          }]
+        : undefined;
       pushConsole(result.error, 'error');
       persistToolchainNotification({
         id: notificationId,
@@ -5346,12 +5382,23 @@ export function IDEWorkspace({
           fileName: activeTab.name,
         },
       });
-      finishToast(toastId, {
-        message: 'USB upload failed',
-        detail: result.error,
-        tone: 'error',
-        progress: null,
-      });
+      if (blockerActions) {
+        updateToast(toastId, {
+          message: 'USB upload failed',
+          detail: result.error,
+          tone: 'error',
+          progress: null,
+          persistent: true,
+          actions: blockerActions,
+        });
+      } else {
+        finishToast(toastId, {
+          message: 'USB upload failed',
+          detail: result.error,
+          tone: 'error',
+          progress: null,
+        });
+      }
       return;
     }
 
@@ -5790,7 +5837,7 @@ export function IDEWorkspace({
         },
       });
 
-      if (!result.success && resolvedLocalBoard && isLocalBoardUploadPortUnavailableError(result.error)) {
+      if (!result.success && resolvedLocalBoard && isLocalBoardUploadRecoverableSerialError(result.error)) {
         const retryResolution = await resolveLiveLocalBoardTarget(resolvedLocalBoard);
         if (retryResolution.row.port && retryResolution.row.port !== port && canUploadLocalBoard(retryResolution.row)) {
           port = retryResolution.row.port;
@@ -5851,6 +5898,31 @@ export function IDEWorkspace({
       }
 
       if (!result.success) {
+        const blockerActions: Toast['actions'] | undefined = isLocalBoardUploadRecoverableSerialError(result.error) && port
+          ? [{
+              label: 'Find blockers',
+              dismissOnSelect: false,
+              onSelect: () => {
+                setSerialBlockerDialog({
+                  port,
+                  title: 'Tantalum Cloud install blockers',
+                  subtitle: `Checking ${port} before retrying the runtime install.`,
+                  retryLabel: 'Retry install',
+                  onRetry: () => {
+                    setSerialBlockerDialog(null);
+                    void installTantalumCloudRuntime({
+                      board,
+                      port,
+                      profile,
+                      localBoard: resolvedLocalBoard,
+                      busyActionId,
+                      closeModal,
+                    });
+                  },
+                });
+              },
+            }]
+          : undefined;
         pushConsole(result.error, 'error');
         const failedProgress = localBoardUploadProgressRef.current?.uploadId === notificationId ? localBoardUploadProgressRef.current.lastProgress : null;
         persistToolchainNotification({
@@ -5866,13 +5938,25 @@ export function IDEWorkspace({
           metadata: notificationMetadata,
         });
         if (toastId !== null) {
-          finishToast(toastId, {
-            message: 'Tantalum Cloud install failed',
-            detail: result.error,
-            tone: 'error',
-            progress: failedProgress,
-            progressLabel: typeof failedProgress === 'number' ? formatReleaseProgressLabel(failedProgress) : undefined,
-          });
+          if (blockerActions) {
+            updateToast(toastId, {
+              message: 'Tantalum Cloud install failed',
+              detail: result.error,
+              tone: 'error',
+              progress: failedProgress,
+              progressLabel: typeof failedProgress === 'number' ? formatReleaseProgressLabel(failedProgress) : undefined,
+              persistent: true,
+              actions: blockerActions,
+            });
+          } else {
+            finishToast(toastId, {
+              message: 'Tantalum Cloud install failed',
+              detail: result.error,
+              tone: 'error',
+              progress: failedProgress,
+              progressLabel: typeof failedProgress === 'number' ? formatReleaseProgressLabel(failedProgress) : undefined,
+            });
+          }
         } else {
           pushToast('Tantalum Cloud install failed.', 'error', undefined, { detail: result.error });
         }
@@ -11913,6 +11997,16 @@ export function IDEWorkspace({
           </div>
         ) : null}
       </Modal>
+
+      <SerialPortBlockerDialog
+        open={Boolean(serialBlockerDialog)}
+        port={serialBlockerDialog?.port || ''}
+        title={serialBlockerDialog?.title}
+        subtitle={serialBlockerDialog?.subtitle}
+        retryLabel={serialBlockerDialog?.retryLabel || 'Retry'}
+        onClose={() => setSerialBlockerDialog(null)}
+        onRetry={serialBlockerDialog?.onRetry}
+      />
 
       <div className="toast-stack">
         {toasts.map((toast) => (

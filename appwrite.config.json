@@ -1,7 +1,7 @@
 {
-    "projectId": "697b8f42002a34ba04b3",
-    "projectName": "Knurdz",
-    "endpoint": "https://sgp.cloud.appwrite.io/v1",
+    "projectId": "tantalum",
+    "projectName": "Tantalum",
+    "endpoint": "https://fra.cloud.appwrite.io/v1",
     "settings": {
         "services": {
             "account": true,
@@ -625,9 +625,7 @@
                     "type": "integer",
                     "required": true,
                     "array": false,
-                    "default": null,
-                    "min": "-9223372036854775808",
-                    "max": "9223372036854775807"
+                    "default": null
                 },
                 {
                     "key": "checksum",
@@ -1645,7 +1643,7 @@
                     "type": "string",
                     "required": false,
                     "array": false,
-                    "size": 2048,
+                    "size": 384,
                     "default": null,
                     "encrypt": false
                 },
@@ -2004,7 +2002,7 @@
                 },
                 {
                     "key": "confidence",
-                    "type": "float",
+                    "type": "double",
                     "required": false,
                     "array": false,
                     "min": 0,
@@ -2106,7 +2104,7 @@
                 },
                 {
                     "key": "confidence",
-                    "type": "float",
+                    "type": "double",
                     "required": false,
                     "array": false,
                     "min": 0,

@@ -7,6 +7,8 @@ import { FitAddon } from 'xterm-addon-fit';
 import type { UiPreferences } from '@/lib/uiPreferences';
 import type { PortInfo, SerialMonitorCloseEvent, SerialMonitorDataEvent, SerialMonitorErrorEvent } from '@/types/electron';
 
+import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
+
 type SerialLineEnding = 'none' | 'lf' | 'cr' | 'crlf';
 
 type SerialMonitorProps = {
@@ -41,6 +43,7 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
   const [connecting, setConnecting] = useState(false);
   const [loadingPorts, setLoadingPorts] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [blockerDialogOpen, setBlockerDialogOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -434,7 +437,16 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
         <span className={`serial-monitor-status ${connected ? 'connected' : ''}`}>{statusText}</span>
       </div>
 
-      {notice ? <div className="serial-monitor-notice">{notice}</div> : null}
+      {notice ? (
+        <div className="serial-monitor-notice">
+          <span>{notice}</span>
+          {port.trim() ? (
+            <button className="secondary-button compact" type="button" onClick={() => setBlockerDialogOpen(true)}>
+              Find blockers
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div ref={containerRef} className="serial-monitor-terminal-shell" onContextMenu={handleTerminalContextMenu} />
 
@@ -459,6 +471,17 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
           Send
         </button>
       </form>
+      <SerialPortBlockerDialog
+        open={blockerDialogOpen}
+        port={port}
+        title="Serial Monitor blockers"
+        retryLabel="Retry connect"
+        onClose={() => setBlockerDialogOpen(false)}
+        onRetry={() => {
+          setBlockerDialogOpen(false);
+          void openMonitor();
+        }}
+      />
     </div>
   );
 }

@@ -8,8 +8,8 @@ Pass Appwrite IDs with `--dart-define`:
 
 ```bash
 flutter run \
-  --dart-define=APPWRITE_ENDPOINT=https://sgp.cloud.appwrite.io/v1 \
-  --dart-define=APPWRITE_PROJECT_ID=697b8f42002a34ba04b3 \
+  --dart-define=APPWRITE_ENDPOINT=https://fra.cloud.appwrite.io/v1 \
+  --dart-define=APPWRITE_PROJECT_ID=tantalum \
   --dart-define=APPWRITE_DATABASE_ID=697b8f660033fffde4be \
   --dart-define=APPWRITE_BOARDS_COLLECTION_ID=boards \
   --dart-define=APPWRITE_BOARD_ADMIN_FUNCTION_ID=board-admin

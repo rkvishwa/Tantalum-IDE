@@ -385,6 +385,18 @@ export type SerialMonitorCloseEvent = {
   reason: string;
 };
 
+export type SerialPortBlocker = {
+  blockerId: string;
+  kind: 'tantalum-session' | 'external-process' | string;
+  confidence: 'confirmed' | 'possible' | string;
+  pid?: number | null;
+  name: string;
+  executablePath?: string | null;
+  commandLine?: string | null;
+  reason: string;
+  canTerminate: boolean;
+};
+
 export type CloudConfig = {
   endpoint: string;
   projectId: string;
@@ -1021,6 +1033,10 @@ export type DesktopApi = {
     onData: (callback: (event: SerialMonitorDataEvent) => void) => () => void;
     onError: (callback: (event: SerialMonitorErrorEvent) => void) => () => void;
     onClose: (callback: (event: SerialMonitorCloseEvent) => void) => () => void;
+  };
+  serialPort: {
+    listBlockers: (payload: { port: string }) => Promise<Result<{ port: string; platform: string; supported: boolean; blockers: SerialPortBlocker[]; message?: string }>>;
+    terminateBlocker: (payload: { port: string; blockerId: string }) => Promise<Result<{ port: string; blockerId: string; pid?: number }>>;
   };
 };
 

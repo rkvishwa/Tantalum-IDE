@@ -190,5 +190,9 @@ contextBridge.exposeInMainWorld("tantalum", {
     onData: (callback) => subscribe("serial-monitor:data", callback),
     onError: (callback) => subscribe("serial-monitor:error", callback),
     onClose: (callback) => subscribe("serial-monitor:close", callback)
+  },
+  serialPort: {
+    listBlockers: (payload) => ipcRenderer.invoke("serial-port:list-blockers", payload),
+    terminateBlocker: (payload) => ipcRenderer.invoke("serial-port:terminate-blocker", payload)
   }
 });

@@ -1871,17 +1871,29 @@ function joinArduinoCliOutput(stdout, stderr) {
 
 function appendArduinoCliDiagnosticHint(message) {
   const normalized = normalizeArduinoCliOutput(message);
-  const portMatch = normalized.match(/Could not open\s+([A-Za-z0-9/._-]+)/i) || normalized.match(/port\s+'([^']+)'/i);
+  const portMatch = normalized.match(/Could not open\s+([A-Za-z0-9/._-]+)/i) ||
+    normalized.match(/port\s+'([^']+)'/i) ||
+    normalized.match(/Serial port\s+([A-Za-z0-9/._-]+)\s*:/i);
   const portLabel = portMatch?.[1] || "the selected port";
-  const permissionDenied = /PermissionError|Access is denied/i.test(normalized);
+  const accessDenied = /Access is denied|port is busy/i.test(normalized);
+  const cannotConfigurePort = /Cannot configure port|device attached to the system is not functioning/i.test(normalized);
+  const permissionDenied = /PermissionError/i.test(normalized);
   const portUnavailable = /FileNotFoundError|cannot find the file specified|doesn't exist|not currently available|No such file|ENOENT/i.test(normalized);
 
   if (portUnavailable && !permissionDenied) {
     return `${normalized}\n\nTantalum hint: ${portLabel} is not currently available. ESP boards can change COM ports when they reset for upload. Reconnect the board or run Auto scan, then try Upload again.`;
   }
 
-  if (permissionDenied || /port is busy/i.test(normalized)) {
-    return `${normalized}\n\nTantalum hint: ${portLabel} is already open. Close Arduino IDE Serial Monitor, Arduino IDE Plotter, or any other serial terminal using that port, then try Upload again.`;
+  if (cannotConfigurePort) {
+    return `${normalized}\n\nTantalum hint: ${portLabel} could not be configured. The board may have reset onto another COM port, the USB driver may be stuck, or another app may be holding the port. Run Auto scan or Find blockers, then try Upload again.`;
+  }
+
+  if (accessDenied) {
+    return `${normalized}\n\nTantalum hint: ${portLabel} looks busy. Close Arduino IDE Serial Monitor, Arduino IDE Plotter, or any other serial terminal using that port, or use Find blockers in Tantalum IDE.`;
+  }
+
+  if (permissionDenied) {
+    return `${normalized}\n\nTantalum hint: ${portLabel} could not be opened. Another app may be holding the port, or the board may have reset onto a different COM port. Run Auto scan or Find blockers, then try Upload again.`;
   }
 
   return normalized;

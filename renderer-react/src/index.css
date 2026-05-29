@@ -4451,6 +4451,10 @@ body.panel-resizing-row * {
 }
 
 .serial-monitor-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   margin: 0.65rem 0.85rem 0;
   padding: 0.6rem 0.75rem;
   border: 1px solid rgba(255, 193, 7, 0.25);
@@ -4458,6 +4462,11 @@ body.panel-resizing-row * {
   background: rgba(255, 193, 7, 0.08);
   color: var(--text-soft);
   font-size: 0.82rem;
+}
+
+.serial-monitor-notice span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .serial-monitor-terminal-shell {
@@ -4959,6 +4968,113 @@ body.panel-resizing-row * {
 .confirmation-dialog-icon-danger {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
+}
+
+.serial-blocker-dialog {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.serial-blocker-alert,
+.serial-blocker-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.72rem 0.85rem;
+  border: 1px solid rgba(255, 193, 7, 0.25);
+  border-radius: 6px;
+  background: rgba(255, 193, 7, 0.08);
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.serial-blocker-alert {
+  border-color: color-mix(in srgb, var(--danger) 26%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.serial-blocker-message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.serial-blocker-list {
+  display: grid;
+  max-height: min(48vh, 430px);
+  gap: 0.55rem;
+  overflow-y: auto;
+}
+
+.serial-blocker-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.78rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-panel-alt) 58%, transparent);
+}
+
+.serial-blocker-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.serial-blocker-content {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.serial-blocker-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.serial-blocker-title-row strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.serial-blocker-title-row span {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.serial-blocker-content p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.83rem;
+  line-height: 1.4;
+}
+
+.serial-blocker-content code {
+  display: block;
+  max-width: 100%;
+  padding: 0.3rem 0.4rem;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-editor) 88%, var(--bg-panel-alt) 12%);
+  color: var(--text-soft);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .library-install-history-list {
