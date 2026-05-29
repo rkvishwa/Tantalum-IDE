@@ -4563,22 +4563,76 @@ function functionExecutionIsUncacheable(execution) {
   return Boolean(parsed && typeof parsed === "object" && parsed.ok === false);
 }
 
+function functionExecutionIsTerminal(execution) {
+  const status = String(execution?.status || "").toLowerCase();
+  return status === "completed" || status === "failed" || status === "timeout";
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForFunctionExecution(functionId, executionId, { timeoutMs = 125000, pollMs = 1000 } = {}) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const execution = normalizeFunctionExecutionShape(await appwriteRequest({
+      method: "GET",
+      pathName: `functions/${encodeURIComponent(functionId)}/executions/${encodeURIComponent(executionId)}`,
+      invalidateCache: false,
+    }));
+
+    if (functionExecutionIsTerminal(execution)) {
+      return execution;
+    }
+
+    await delay(pollMs);
+  }
+
+  throw new Error("Agent gateway execution did not finish before the local wait timeout.");
+}
+
+async function createFunctionExecutionAndWait(functionId, body) {
+  const initial = normalizeFunctionExecutionShape(await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(functionId)}/executions`,
+    body,
+  }));
+
+  if (!body?.async || functionExecutionIsTerminal(initial)) {
+    return initial;
+  }
+
+  const executionId = initial?.$id || initial?.id;
+  if (!executionId) {
+    throw new Error("Appwrite did not return an execution ID for the async function request.");
+  }
+
+  return waitForFunctionExecution(functionId, executionId);
+}
+
 async function executeAgentGatewayRequest(body) {
   const cloudConfig = getRendererCloudConfig();
   if (!cloudConfig.agentGatewayFunctionId) {
     throw new Error("The agent gateway function is not configured.");
   }
 
-  const execution = await appwriteRequest({
+  const headers = { "content-type": "application/json" };
+  try {
+    const jwt = await getCurrentAppwriteJwt();
+    if (jwt) {
+      headers["X-Appwrite-JWT"] = jwt;
+    }
+  } catch {
+    // Appwrite will reject the function if a user session is required and unavailable.
+  }
+
+  const execution = await createFunctionExecutionAndWait(cloudConfig.agentGatewayFunctionId, {
+    body: JSON.stringify(body),
+    async: true,
+    path: "/gateway",
     method: "POST",
-    pathName: `functions/${encodeURIComponent(cloudConfig.agentGatewayFunctionId)}/executions`,
-    body: {
-      body: JSON.stringify(body),
-      async: false,
-      path: "/gateway",
-      method: "POST",
-      headers: { "content-type": "application/json" },
-    },
+    headers,
   });
   const responseBody = functionExecutionResponseBody(execution);
   const parsed = safeJsonParse(responseBody || "{}", {
@@ -4621,6 +4675,16 @@ function shouldUseBoardDetectionAi(candidate) {
 }
 
 async function executeBoardDetectionAi(candidate) {
+  const headers = { "content-type": "application/json" };
+  try {
+    const jwt = await getCurrentAppwriteJwt();
+    if (jwt) {
+      headers["X-Appwrite-JWT"] = jwt;
+    }
+  } catch {
+    // Appwrite will reject the function if a user session is required and unavailable.
+  }
+
   const execution = await appwriteRequest({
     method: "POST",
     pathName: `functions/${encodeURIComponent(BOARD_DETECTION_FUNCTION_ID)}/executions`,
@@ -4629,7 +4693,7 @@ async function executeBoardDetectionAi(candidate) {
       async: false,
       path: "/",
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
     },
   });
   const responseBody = functionExecutionResponseBody(execution);
