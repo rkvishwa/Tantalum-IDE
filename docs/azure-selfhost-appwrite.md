@@ -25,6 +25,16 @@ brew install --cask powershell
 npm install -g appwrite-cli
 ```
 
+If `pwsh` is still not found after installing PowerShell, reload Homebrew into the current zsh session:
+
+```bash
+eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"
+command -v pwsh
+pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion'
+```
+
+If `command -v pwsh` prints nothing, close and reopen Terminal. On some macOS installs the PowerShell cask is linked only after a new shell starts.
+
 Sign in to Azure:
 
 ```bash
