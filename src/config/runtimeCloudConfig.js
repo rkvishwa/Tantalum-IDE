@@ -10,6 +10,7 @@ function deriveCollections(config) {
     boards: tables.find((table) => table.$id === 'boards')?.$id || 'boards',
     firmwares: tables.find((table) => table.$id === 'firmwares')?.$id || 'firmwares',
     sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches',
+    boardSourceSnapshots: tables.find((table) => table.$id === 'board_source_snapshots')?.$id || 'board_source_snapshots',
   };
 }
 
@@ -56,6 +57,7 @@ function getRendererCloudConfig() {
     boardsCollectionId: String(collections.boards || '').trim(),
     firmwareCollectionId: String(collections.firmwares || '').trim(),
     sketchesCollectionId: String(collections.sketches || '').trim(),
+    sourceSnapshotsCollectionId: String(collections.boardSourceSnapshots || '').trim(),
     firmwareBucketId: deriveFirmwareBucketId(appwriteManifest),
     firmwareSourceBucketId: deriveFirmwareSourceBucketId(appwriteManifest),
     boardAdminFunctionId: deriveFunctionId(appwriteManifest, 'board-admin'),
@@ -63,7 +65,6 @@ function getRendererCloudConfig() {
     agentSettingsFunctionId: deriveFunctionId(appwriteManifest, 'agent-settings'),
     agentGatewayFunctionId: deriveFunctionId(appwriteManifest, 'agent-gateway'),
     boardDetectionFunctionId: deriveFunctionId(appwriteManifest, 'board-detection'),
-    codeExtractFunctionId: deriveFunctionId(appwriteManifest, 'code-extract'),
     mqttHost: process.env.TANTALUM_MQTT_HOST || appwriteManifest.mqttHost || '',
     mqttPort: process.env.TANTALUM_MQTT_PORT || appwriteManifest.mqttPort || '',
     mqttUsername: process.env.TANTALUM_MQTT_DEVICE_USERNAME || '',

@@ -20,6 +20,7 @@ export type BoardDocument = Models.Document & {
   provisioningPop?: string;
   mqttTopicSuffix?: string;
   lastOtaError?: string;
+  sourceCodeVisibility?: 'private' | 'public' | string;
   firmwareVersion: string;
   status: string;
   lastSeen: string | null;
@@ -48,6 +49,7 @@ export type FirmwareDocument = Models.Document & {
 export type BoardInput = {
   name: string;
   boardType: string;
+  sourceCodeVisibility?: 'private' | 'public';
 };
 
 export type BoardSecret = {

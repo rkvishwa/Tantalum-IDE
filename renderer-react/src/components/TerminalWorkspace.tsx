@@ -161,7 +161,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences }: 
 
   const openCurrentFolderInTerminal = useCallback(async () => {
     if (!currentFolderPath) {
-      setNotice({ tone: 'info', message: 'Open a workspace or file first, then send that folder into the terminal.' });
+      setNotice({ tone: 'info', message: 'Open a Project or file first, then send that folder into the terminal.' });
       return;
     }
 
@@ -319,7 +319,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences }: 
             type="button"
             onClick={() => void openCurrentFolderInTerminal()}
             disabled={!currentFolderPath}
-            title={currentFolderPath ?? 'Open a workspace folder first'}
+            title={currentFolderPath ?? 'Open a Project first'}
           >
             <FolderOpen size={16} />
             Open current folder

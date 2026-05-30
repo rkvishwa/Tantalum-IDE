@@ -44,6 +44,7 @@ const BOARD_SELECT_FIELDS = [
   'provisioningPop',
   'mqttTopicSuffix',
   'lastOtaError',
+  'sourceCodeVisibility',
   'firmwareVersion',
   'status',
   'lastSeen',
@@ -103,6 +104,7 @@ export async function createBoard(input: BoardInput, user: Models.User<Models.Pr
       provisioningRequestedAt: null,
       provisioningMode: '',
       lastOtaError: '',
+      sourceCodeVisibility: input.sourceCodeVisibility || 'private',
       status: 'pending',
       lastSeen: null,
       lastProvisionedAt: null,
@@ -137,6 +139,7 @@ export async function updateBoard(boardId: string, updates: Partial<BoardDocumen
           'provisioningRequestedAt',
           'provisioningMode',
           'lastOtaError',
+          'sourceCodeVisibility',
           'updatedAt',
         ].includes(key)
       );

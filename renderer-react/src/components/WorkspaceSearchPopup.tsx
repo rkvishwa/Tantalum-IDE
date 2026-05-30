@@ -301,7 +301,7 @@ export function WorkspaceSearchPopup({
 
   return (
     <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="workspace-search-dialog" role="dialog" aria-modal="true" aria-label="Workspace search" onKeyDown={(event) => void handleKeyDown(event)}>
+      <div className="workspace-search-dialog" role="dialog" aria-modal="true" aria-label="Project search" onKeyDown={(event) => void handleKeyDown(event)}>
         <div className="workspace-search-head">
           <Search size={17} />
           <input
@@ -309,7 +309,7 @@ export function WorkspaceSearchPopup({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search files, folders, or text"
-            aria-label="Search workspace"
+            aria-label="Search Project"
           />
           {searching ? <LoaderCircle size={16} className="spin" /> : null}
           <select className="workspace-search-mode-select" value={mode} onChange={(event) => setMode(event.target.value as WorkspaceSearchMode)} aria-label="Search mode">
@@ -330,7 +330,7 @@ export function WorkspaceSearchPopup({
               W
             </button>
           </div>
-          <button className="workspace-search-close" type="button" onClick={onClose} aria-label="Close workspace search">
+          <button className="workspace-search-close" type="button" onClick={onClose} aria-label="Close Project search">
             <X size={16} />
           </button>
         </div>
@@ -381,9 +381,9 @@ export function WorkspaceSearchPopup({
           </div>
         ) : null}
 
-        <div className="workspace-search-results" role="listbox" aria-label="Workspace search results">
+        <div className="workspace-search-results" role="listbox" aria-label="Project search results">
           {!query.trim() ? (
-            <div className="workspace-search-empty">Type to search the workspace.</div>
+            <div className="workspace-search-empty">Type to search the Project.</div>
           ) : results.length === 0 && !searching && !error ? (
             <div className="workspace-search-empty">No matches found.</div>
           ) : (

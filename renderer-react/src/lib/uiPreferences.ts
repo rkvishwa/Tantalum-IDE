@@ -21,6 +21,7 @@ export type UiPreferences = {
   editorBracketPairs: boolean;
   editorAutoSave: boolean;
   verifyBeforeUpload: boolean;
+  sourceSnapshotsEnabled: boolean;
 };
 
 const LEGACY_VS_CODE_FONT_FAMILY = "'Segoe WPC', 'Segoe UI', system-ui, sans-serif";
@@ -60,6 +61,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   editorBracketPairs: true,
   editorAutoSave: false,
   verifyBeforeUpload: true,
+  sourceSnapshotsEnabled: true,
 };
 
 const STORAGE_KEY = 'tantalum-ui-preferences';
@@ -150,6 +152,7 @@ export function normalizeUiPreferences(preferences: Partial<UiPreferences>): UiP
     editorBracketPairs: typeof preferences.editorBracketPairs === 'boolean' ? preferences.editorBracketPairs : DEFAULT_UI_PREFERENCES.editorBracketPairs,
     editorAutoSave: typeof preferences.editorAutoSave === 'boolean' ? preferences.editorAutoSave : DEFAULT_UI_PREFERENCES.editorAutoSave,
     verifyBeforeUpload: typeof preferences.verifyBeforeUpload === 'boolean' ? preferences.verifyBeforeUpload : DEFAULT_UI_PREFERENCES.verifyBeforeUpload,
+    sourceSnapshotsEnabled: typeof preferences.sourceSnapshotsEnabled === 'boolean' ? preferences.sourceSnapshotsEnabled : DEFAULT_UI_PREFERENCES.sourceSnapshotsEnabled,
   };
 }
 

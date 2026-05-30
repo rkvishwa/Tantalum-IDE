@@ -42,10 +42,42 @@ export type BoardCodeSourceSnapshotInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type ToolchainSketchSource =
+  | {
+      kind: 'workspace';
+      workspacePath: string;
+      entryFileName?: 'main.ino' | string;
+      dirtyFiles?: BoardCodeSourceFile[];
+    }
+  | {
+      kind: 'inline';
+      fileName?: string;
+      code: string;
+    };
+
+export type SourceRestoreMarker = {
+  markerId: string;
+  snapshotChecksum: string;
+  sourceSnapshotFileId?: string;
+  retentionGroup?: string;
+};
+
 export type BoardCodeViewSource = 'snapshot' | 'local-history' | 'hardware-ai' | 'hardware-binary' | 'unavailable';
+export type BoardCodeExtractionMode = 'restore-first' | 'force-hardware-reconstruct' | 'force-hardware-artifacts';
 
 export type BoardCodeViewResult = {
   source: BoardCodeViewSource;
+  exact?: boolean;
+  evidenceQuality?: 'none' | 'low' | 'medium' | 'high' | string | null;
+  extractionMode?: BoardCodeExtractionMode | string;
+  restoreAttempts?: Array<Record<string, unknown>>;
+  snapshotManifest?: Record<string, unknown> | null;
+  snapshotAccepted?: boolean | null;
+  snapshotRejectReason?: string;
+  reconstructionRequested?: boolean;
+  sourceMarker?: Record<string, unknown> | null;
+  markerVerifiedFromFirmware?: boolean;
+  markerRestoreStatus?: string;
   workspacePath: string;
   outputPath?: string;
   files: Array<{ path: string; relativePath: string }>;
@@ -54,6 +86,40 @@ export type BoardCodeViewResult = {
   confidence?: number | null;
   artifacts: Array<{ path: string; relativePath: string; type: string }>;
   primaryFile?: { path: string; relativePath: string } | null;
+};
+
+export type BoardCodeSnapshotSummary = {
+  id: string;
+  markerId: string;
+  status: 'current' | 'previous' | string;
+  visibility: 'private' | 'public' | string;
+  flashedVia?: 'usb' | 'ota' | string;
+  boardId?: string;
+  boardName?: string;
+  boardType?: string;
+  profileId?: string;
+  fingerprint?: string;
+  port?: string;
+  uploadId?: string;
+  firmwareId?: string;
+  createdAt?: string;
+  appliedAt?: string;
+  visibilityUpdatedAt?: string;
+  markerVerifiedFromFirmware?: boolean;
+  firmwareMarkerMatched?: boolean;
+  sourceSnapshotChecksum?: string;
+};
+
+export type BoardCodeSnapshotListResult = {
+  status: 'available' | 'available-unverified' | 'not-tantalum-flashed' | 'private' | 'unavailable' | string;
+  board: { id?: string; name?: string; fqbn?: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string; sourceCodeVisibility?: string };
+  snapshots: BoardCodeSnapshotSummary[];
+  warnings: string[];
+  restoreAttempts?: Array<Record<string, unknown>>;
+  markerVerifiedFromFirmware?: boolean;
+  sourceMarker?: Record<string, unknown> | null;
+  markerScan?: Record<string, unknown> | null;
+  message?: string;
 };
 
 export type CompileProgressEvent = {
@@ -388,6 +454,7 @@ export type LocalBoardProfile = {
   cloudLinkedAt?: string;
   lastCloudProvisionedAt?: string;
   lastCloudUsbUploadAt?: string;
+  sourceCodeVisibility?: 'private' | 'public' | string;
   createdAt: string;
   updatedAt: string;
 };
@@ -437,6 +504,7 @@ export type CloudConfig = {
   boardsCollectionId: string;
   firmwareCollectionId: string;
   sketchesCollectionId: string;
+  sourceSnapshotsCollectionId?: string;
   firmwareBucketId: string;
   firmwareSourceBucketId?: string;
   boardAdminFunctionId: string;
@@ -444,7 +512,6 @@ export type CloudConfig = {
   agentSettingsFunctionId: string;
   agentGatewayFunctionId: string;
   boardDetectionFunctionId?: string;
-  codeExtractFunctionId?: string;
   mqttHost?: string;
   mqttPort?: string | number;
   mqttUsername?: string;
@@ -511,6 +578,8 @@ export type PendingAgentAction = {
   kind: 'edit' | 'ask' | string;
   originalPrompt: string;
   normalizedPrompt: string;
+  userMessageId?: string | null;
+  userMessageCreatedAt?: string | null;
   riskLevel: 'low' | 'medium' | 'high' | string;
   reason: string;
   createdAt: string;
@@ -762,6 +831,32 @@ export type AgentChangePreview = {
   };
 };
 
+export type AgentRestorePointStatus = 'pending' | 'kept' | 'reverted' | 'restored';
+
+export type AgentRestorePointSummary = {
+  id: string;
+  threadId: string;
+  userMessageId: string;
+  userMessageCreatedAt: string | null;
+  reviewId: string | null;
+  status: AgentRestorePointStatus;
+  createdAt: string;
+  fileCount: number;
+  files: Array<{
+    path: string;
+    changeType: AgentChangePreview['changeType'];
+    stats?: AgentChangePreview['stats'];
+  }>;
+};
+
+export type AgentRestoredFile = {
+  path: string;
+  absolutePath: string;
+  exists: boolean;
+  isDirectory: boolean;
+  content: string | null;
+};
+
 export type AgentApprovalPreview =
   | {
       kind: 'agent-run';
@@ -898,6 +993,27 @@ export type DesktopApi = {
     >;
     stop: (payload: { threadId: string }) => Promise<Result<{ stopped: boolean }>>;
     resolveApproval: (payload: { requestId: string; approved: boolean }) => Promise<AgentApprovalResolution>;
+    listRestorePoints: (payload: { workspacePath?: string | null; threadId?: string | null }) => Promise<Result<{ restorePoints: AgentRestorePointSummary[] }>>;
+    recordRestorePoint: (payload: {
+      workspacePath: string;
+      threadId: string;
+      userMessageId: string;
+      userMessageCreatedAt?: string | null;
+      reviewId?: string | null;
+      status?: AgentRestorePointStatus;
+      files: AgentChangePreview[];
+    }) => Promise<Result<{ changeset: AgentRestorePointSummary; restorePoints: AgentRestorePointSummary[] }>>;
+    updateRestoreReviewStatus: (payload: {
+      workspacePath: string;
+      reviewId: string;
+      status: AgentRestorePointStatus;
+    }) => Promise<Result<{ restorePoints: AgentRestorePointSummary[] }>>;
+    restoreToMessage: (payload: {
+      workspacePath: string;
+      threadId: string;
+      messageId: string;
+      messageIdsInOrder: string[];
+    }) => Promise<Result<{ restoredFiles: AgentRestoredFile[]; restoredChangeSetIds: string[]; restorePoints: AgentRestorePointSummary[] }>>;
     onProgress: (callback: (event: AgentProgressEvent) => void) => () => void;
     tools: {
       listSettings: () => Promise<Result<AgentToolSettingsResponse>>;
@@ -925,7 +1041,19 @@ export type DesktopApi = {
       onUploadProgress: (callback: (event: StorageUploadProgressEvent) => void) => () => void;
     };
     functions: {
-      createExecution: (payload: { functionId: string; body: string; async?: boolean; pathName?: string; method?: string; headers?: Record<string, string> }) => Promise<Result<{ execution: Record<string, unknown> }>>;
+      createExecution: (payload: {
+        functionId: string;
+        body: string;
+        async?: boolean;
+        pathName?: string;
+        method?: string;
+        headers?: Record<string, string>;
+        bypassCache?: boolean;
+        waitForCompletion?: boolean;
+        waitTimeoutMs?: number;
+        pollMs?: number;
+        retryOnSyncTimeout?: boolean;
+      }) => Promise<Result<{ execution: Record<string, unknown> }>>;
     };
   };
   shell: {
@@ -1011,18 +1139,38 @@ export type DesktopApi = {
     deleteBoardSecrets: (boardId: string) => Promise<Result>;
   };
   toolchain: {
-    compile: (payload: { code: string; board: string; cloudRuntime?: Record<string, unknown> | null; compileId?: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string; cloudRuntime?: boolean }>>;
+    compile: (payload: { code?: string; board: string; sketchSource?: ToolchainSketchSource | null; cloudRuntime?: Record<string, unknown> | null; sourceRestoreMarker?: SourceRestoreMarker | null; compileId?: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string; cloudRuntime?: boolean; sourceRestoreMarkerEmbedded?: boolean; sourceRestoreMarkerWarning?: string }>>;
     detectLocalBoards: (payload?: { portsOnly?: boolean; probeEsp?: boolean; aiFallback?: boolean }) => Promise<Result<{ boards: LocalBoardDetection[]; ports?: LocalBoardPort[]; detectedAt: string }>>;
     listLocalBoardProfiles: () => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     saveLocalBoardProfile: (payload: Partial<LocalBoardProfile>) => Promise<Result<{ profile: LocalBoardProfile }>>;
     deleteLocalBoardProfile: (profileId: string) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     replaceLocalBoardProfiles: (profiles: Array<Partial<LocalBoardProfile>>) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
-    uploadLocalSketch: (payload: { code: string; board: string; port: string; uploadId?: string; cloudRuntime?: Record<string, unknown> | null; sourceSnapshot?: BoardCodeSourceSnapshotInput; sourceIdentity?: Record<string, unknown> }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean }>>;
+    uploadLocalSketch: (payload: { code?: string; board: string; port: string; sketchSource?: ToolchainSketchSource | null; uploadId?: string; cloudRuntime?: Record<string, unknown> | null; sourceSnapshot?: BoardCodeSourceSnapshotInput; sourceIdentity?: Record<string, unknown>; sourceRestoreMarker?: SourceRestoreMarker | null }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean; sourceRestoreMarkerEmbedded?: boolean; sourceRestoreMarkerWarning?: string }>>;
     createSourceSnapshot: (payload: { sourceSnapshot: BoardCodeSourceSnapshotInput; metadata?: Record<string, unknown> }) => Promise<Result<{ fileId: string; checksum: string; manifest: Record<string, unknown>; createdAt: string }>>;
+    prepareSourceRestoreMarker: (payload: { sourceSnapshot: BoardCodeSourceSnapshotInput; identity?: Record<string, unknown>; board?: Record<string, unknown>; metadata?: Record<string, unknown>; uploadId?: string; firmwareId?: string; operation?: string }) => Promise<Result<SourceRestoreMarker & { sourceSnapshotChecksum?: string; sourceSnapshotManifest?: Record<string, unknown>; createdAt?: string; status?: string; document?: Record<string, unknown> }>>;
+    promoteSourceRestoreMarker: (payload: { markerId?: string; sourceRestoreMarker?: SourceRestoreMarker | null; firmwareId?: string }) => Promise<Result<{ promoted?: boolean; markerId?: string; appliedAt?: string }>>;
+    discardSourceRestoreMarker: (payload: { markerId?: string; sourceRestoreMarker?: SourceRestoreMarker | null }) => Promise<Result<{ discarded?: boolean; reason?: string }>>;
+    listBoardCodeSnapshots: (payload: {
+      requestId?: string;
+      board: { id?: string; name?: string; fqbn?: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string; sourceCodeVisibility?: string };
+    }) => Promise<Result<BoardCodeSnapshotListResult>>;
+    restoreBoardCodeSnapshot: (payload: {
+      requestId?: string;
+      markerId: string;
+      markerVerifiedFromFirmware?: boolean;
+      destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
+      board: { id?: string; name?: string; fqbn?: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string; sourceCodeVisibility?: string };
+    }) => Promise<Result<BoardCodeViewResult>>;
+    setBoardCodeVisibility: (payload: {
+      visibility: 'private' | 'public';
+      board?: { id?: string; name?: string; fqbn?: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string; sourceCodeVisibility?: string };
+      identity?: Record<string, unknown>;
+    }) => Promise<Result<{ visibility: 'private' | 'public' | string; updated: number; retentionGroup: string; updatedAt: string }>>;
     viewBoardCode: (payload: {
       requestId?: string;
+      extractionMode?: BoardCodeExtractionMode;
       destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
-      board: { id?: string; name?: string; fqbn: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string };
+      board: { id?: string; name?: string; fqbn: string; port?: string; profileId?: string; fingerprint?: string; cloudBoardId?: string; sourceCodeVisibility?: string };
     }) => Promise<Result<BoardCodeViewResult>>;
     provisionBoardWifiUsb: (payload: { boardId: string; port: string; ssid: string; password: string }) => Promise<Result<{ status?: string; message?: string; boardId: string; port: string }>>;
     installBoardPackage: (payload: { packageName: string; packageUrl?: string | null; installId?: string }) => Promise<Result<{ output?: string; installId?: string }>>;

@@ -506,7 +506,7 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
       <AppTitleBar
         appName={appName}
         version={version}
-        titleText={currentView === 'settings' ? 'Settings' : workspaceTitle || 'No folder open'}
+        titleText={currentView === 'settings' ? 'Settings' : workspaceTitle || 'No Project open'}
         user={user}
         view={currentView}
         leftPanelOpen={leftPanelOpen}
@@ -833,7 +833,7 @@ function AppTitleBar({
         title: folderPath,
         action: { type: 'open-recent-workspace', folderPath },
       }))
-    : [{ id: 'recent-workspaces-empty', label: 'No Recent Folders', disabled: true }];
+    : [{ id: 'recent-workspaces-empty', label: 'No Recent Projects', disabled: true }];
 
   const recentFileItems: TitlebarMenuItem[] = recentFiles.length
     ? recentFiles.map((filePath) => ({
@@ -851,12 +851,12 @@ function AppTitleBar({
       items: [
         { id: 'new-file', label: 'New File', shortcut: 'Ctrl N', action: { type: 'new-file' } },
         { id: 'open-file', label: 'Open File...', shortcut: 'Ctrl O', action: { type: 'open-file' } },
-        { id: 'open-folder', label: 'Open Folder...', shortcut: 'Ctrl Shift O', action: { type: 'open-folder' } },
+        { id: 'open-folder', label: 'Open Project...', shortcut: 'Ctrl Shift O', action: { type: 'open-folder' } },
         {
           id: 'open-recent',
           label: 'Open Recent',
           submenu: [
-            { id: 'recent-folders', label: 'Folders', submenu: recentWorkspaceItems },
+            { id: 'recent-folders', label: 'Projects', submenu: recentWorkspaceItems },
             { id: 'recent-files', label: 'Files', submenu: recentFileItems },
           ],
         },
@@ -948,7 +948,7 @@ void loop() {
     },
     {
       id: 'sketch',
-      label: 'Sketch',
+      label: 'Project',
       items: [
         { id: 'compile', label: 'Verify / Compile', shortcut: 'Ctrl R', action: { type: 'compile' } },
         { id: 'upload', label: 'Upload', shortcut: 'Ctrl U', action: { type: 'upload-local' } },
@@ -1082,12 +1082,12 @@ void loop() {
             type="button"
             onClick={onOpenWorkspaceSearch}
             disabled={!workspaceSearchAvailable}
-            title={workspaceSearchAvailable ? 'Search workspace' : 'Open a folder to search'}
+            title={workspaceSearchAvailable ? 'Search Project' : 'Open a Project to search'}
             aria-haspopup="dialog"
             aria-expanded={workspaceSearchOpen}
           >
             <Search size={14} />
-            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open folder to search'}</span>
+            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open Project to search'}</span>
             <kbd>Ctrl Shift F</kbd>
           </button>
         ) : (

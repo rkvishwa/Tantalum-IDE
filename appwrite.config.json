@@ -123,13 +123,13 @@
             "path": "functions/agent-settings",
             "entrypoint": "src/main.js",
             "execute": [
-                "users"
+                "any"
             ],
             "enabled": true,
             "logging": true,
             "events": [],
-            "schedule": "",
-            "timeout": 30,
+            "schedule": "*/5 * * * *",
+            "timeout": 90,
             "commands": "npm install",
             "scopes": [
                 "databases.read",
@@ -281,42 +281,6 @@
                 {
                     "key": "APPWRITE_BOARD_DETECTION_USAGE_COLLECTION_ID",
                     "value": "board_detection_usage"
-                }
-            ]
-        },
-        {
-            "$id": "code-extract",
-            "name": "code-extract",
-            "runtime": "node-22",
-            "path": "functions/code-extract",
-            "entrypoint": "src/main.js",
-            "execute": [
-                "users"
-            ],
-            "enabled": true,
-            "logging": true,
-            "events": [],
-            "schedule": "",
-            "timeout": 90,
-            "commands": "npm install",
-            "scopes": [
-                "databases.read",
-                "databases.write",
-                "documents.read",
-                "documents.write"
-            ],
-            "variables": [
-                {
-                    "key": "APPWRITE_DATABASE_ID",
-                    "value": "697b8f660033fffde4be"
-                },
-                {
-                    "key": "APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID",
-                    "value": "utility_ai_model_pool"
-                },
-                {
-                    "key": "APPWRITE_CODE_EXTRACT_USAGE_COLLECTION_ID",
-                    "value": "code_extract_usage"
                 }
             ]
         }
@@ -585,6 +549,15 @@
                     "size": 1024,
                     "default": "\"\"",
                     "encrypt": false
+                },
+                {
+                    "key": "sourceCodeVisibility",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "private",
+                    "encrypt": false
                 }
             ],
             "indexes": [
@@ -774,6 +747,238 @@
                     ],
                     "orders": [
                         "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "board_source_snapshots",
+            "$permissions": [
+                "create(\"users\")"
+            ],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Board Source Snapshots",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "markerId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotFileId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotChecksum",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sourceSnapshotManifest",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 65535,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "retentionGroup",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 512,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "visibility",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "private",
+                    "encrypt": false
+                },
+                {
+                    "key": "flashedVia",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "visibilityUpdatedAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "format": ""
+                },
+                {
+                    "key": "boardId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "boardName",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "boardType",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "profileId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "fingerprint",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 512,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "port",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 128,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "uploadId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "firmwareId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 255,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null,
+                    "format": ""
+                },
+                {
+                    "key": "appliedAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "format": ""
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "source_snapshots_retention_status_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "retentionGroup",
+                        "status",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "source_snapshots_user_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "source_snapshots_retention_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "retentionGroup",
+                        "createdAt"
+                    ],
+                    "orders": [
                         "ASC",
                         "DESC"
                     ]
@@ -2247,119 +2452,6 @@
                 },
                 {
                     "key": "board_detection_usage_created",
-                    "type": "key",
-                    "status": "available",
-                    "columns": [
-                        "createdAt"
-                    ],
-                    "orders": [
-                        "DESC"
-                    ]
-                }
-            ]
-        },
-        {
-            "$id": "code_extract_usage",
-            "$permissions": [],
-            "databaseId": "697b8f660033fffde4be",
-            "name": "Code Extract Usage",
-            "enabled": true,
-            "rowSecurity": true,
-            "columns": [
-                {
-                    "key": "userId",
-                    "type": "string",
-                    "required": true,
-                    "array": false,
-                    "size": 255,
-                    "default": null,
-                    "encrypt": false
-                },
-                {
-                    "key": "boardId",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 128,
-                    "default": "",
-                    "encrypt": false
-                },
-                {
-                    "key": "boardType",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 255,
-                    "default": "",
-                    "encrypt": false
-                },
-                {
-                    "key": "status",
-                    "type": "string",
-                    "required": true,
-                    "array": false,
-                    "size": 64,
-                    "default": null,
-                    "encrypt": false
-                },
-                {
-                    "key": "model",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 255,
-                    "default": "",
-                    "encrypt": false
-                },
-                {
-                    "key": "confidence",
-                    "type": "double",
-                    "required": false,
-                    "array": false,
-                    "min": 0,
-                    "max": 1,
-                    "default": 0
-                },
-                {
-                    "key": "errorMessage",
-                    "type": "string",
-                    "required": false,
-                    "array": false,
-                    "size": 1024,
-                    "default": null,
-                    "encrypt": false
-                },
-                {
-                    "key": "createdAt",
-                    "type": "string",
-                    "required": true,
-                    "array": false,
-                    "size": 64,
-                    "default": null,
-                    "encrypt": false
-                }
-            ],
-            "indexes": [
-                {
-                    "key": "code_extract_usage_user",
-                    "type": "key",
-                    "status": "available",
-                    "columns": [
-                        "userId"
-                    ],
-                    "orders": []
-                },
-                {
-                    "key": "code_extract_usage_board",
-                    "type": "key",
-                    "status": "available",
-                    "columns": [
-                        "boardId"
-                    ],
-                    "orders": []
-                },
-                {
-                    "key": "code_extract_usage_created",
                     "type": "key",
                     "status": "available",
                     "columns": [

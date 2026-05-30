@@ -18,6 +18,7 @@ import {
   type FileTreeFsAdapter,
   type FileTreeHeaderActionRenderProps,
   type FileTreeHeaderRenderProps,
+  type FileTreeIconRenderProps,
   type FileTreeItemType,
   type FileTreeNode,
   type FileTreeTheme,
@@ -64,7 +65,7 @@ import {
 import type { editor } from 'monaco-editor';
 
 import { createBoard, deleteBoard, listBoards, rotateBoardToken, startBoardProvisioning, updateBoard } from '@/lib/boards';
-import { createAgentThreadMessage } from '@/lib/agent';
+import { createAgentThreadMessage, truncateAgentThreadMessages, type AgentThreadMessage } from '@/lib/agent';
 import { buildAgentDiffRows, previewContentForAgentChange } from '@/lib/agentDiff';
 import { appwriteConfig, hasBoardAdminFunction, hasDeviceGatewayFunction, hasRequiredCloudConfiguration } from '@/lib/config';
 import {
@@ -85,6 +86,7 @@ import {
   parentPath,
   sha256Hex,
 } from '@/lib/utils';
+import { getMaterialFileIconUrl, getMaterialFolderIconUrl } from '@/lib/materialFileIcons';
 import type {
   FileTreeNativeContextMenuRequest,
   GitStatus,
@@ -100,15 +102,19 @@ import type {
   ToolchainNotificationInput,
   ToolchainNotificationKind,
   ToolchainNotificationMetadata,
+  ToolchainSketchSource,
   StorageUploadProgressEvent,
   UsbUploadProgressEvent,
   WorkspaceReplaceChangedFile,
   WorkspaceSearchResult,
   BoardCodeProgressEvent,
+  BoardCodeSnapshotListResult,
+  BoardCodeSnapshotSummary,
   BoardCodeSourceSnapshotInput,
   BoardCodeViewResult,
+  SourceRestoreMarker,
 } from '@/types/electron';
-import type { AgentChangePreview } from '@/types/electron';
+import type { AgentChangePreview, AgentRestoredFile, AgentRestorePointSummary } from '@/types/electron';
 
 import { ConsoleTerminal } from './ConsoleTerminal';
 import { AgentPanel, type AgentEditorSelectionContext, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
@@ -170,6 +176,29 @@ type FileTab = EditorTabItem & {
   savedContent: string;
   fileState: FileTabState;
   agentPreview?: AgentPreviewState;
+};
+
+type WorkspaceSketchTreeNode = FileTreeNode & {
+  sketchSection?: 'included' | 'workspace';
+  sectionBoundary?: boolean;
+  projectEntry?: boolean;
+  lifecycleConflict?: boolean;
+};
+
+type ProjectMetadata = {
+  schemaVersion: 1;
+  entryFile: string;
+};
+
+type ProjectIntegrityState = {
+  loading: boolean;
+  entryFile: string | null;
+  lifecycleFiles: string[];
+  lifecycleFunctionFiles: string[];
+  conflictFiles: string[];
+  entryMissing: boolean;
+  metadataMissing: boolean;
+  error: string | null;
 };
 
 type StoredWorkspaceEditorTab = {
@@ -1100,7 +1129,7 @@ function getLibraryUseCases(library: LibraryEntry) {
     useCases.push('Building display and screen interfaces');
   }
   if (/(sensor|temperature|humidity|pressure|accelerometer|imu|dht)/.test(text)) {
-    useCases.push('Reading sensor data in sketches');
+    useCases.push('Reading sensor data in Projects');
   }
   if (/(led|neopixel|fastled|rgb|addressable)/.test(text)) {
     useCases.push('Controlling LEDs and light animations');
@@ -1119,10 +1148,10 @@ function getLibraryUseCases(library: LibraryEntry) {
   }
 
   if (library.category) {
-    useCases.push(`${library.category} sketches and prototypes`);
+    useCases.push(`${library.category} Projects and prototypes`);
   }
 
-  return uniqueNonEmpty(useCases.length ? useCases : ['Arduino sketches that use this package API']).slice(0, 6);
+  return uniqueNonEmpty(useCases.length ? useCases : ['Arduino Projects that use this package API']).slice(0, 6);
 }
 
 function getPlatformVersionOptions(platform: BoardPlatform) {
@@ -1195,22 +1224,22 @@ function getPlatformUseCases(platform: BoardPlatform) {
     useCases.push('Wireless and IoT device firmware');
   }
   if (/(avr|uno|nano|mega|classic)/.test(text)) {
-    useCases.push('Classic Arduino sketch builds and uploads');
+    useCases.push('Classic Arduino Project builds and uploads');
   }
   if (/(samd|mbed|renesas|portenta|mkr)/.test(text)) {
     useCases.push('Modern Arduino board projects');
   }
   if (/(rp2040|pico)/.test(text)) {
-    useCases.push('RP2040 and Pico-compatible sketches');
+    useCases.push('RP2040 and Pico-compatible Projects');
   }
   if (/(stm32|stmicroelectronics)/.test(text)) {
     useCases.push('STM32 microcontroller development');
   }
   if (/(nrf|nordic|ble|bluetooth)/.test(text)) {
-    useCases.push('Bluetooth and low-power device sketches');
+    useCases.push('Bluetooth and low-power device Projects');
   }
 
-  return uniqueNonEmpty(useCases.length ? useCases : [`Compiling and uploading sketches for ${platform.name}`]).slice(0, 5);
+  return uniqueNonEmpty(useCases.length ? useCases : [`Compiling and uploading Projects for ${platform.name}`]).slice(0, 5);
 }
 
 function applyPlatformInstalledState(platforms: BoardPlatform[], installedPlatforms: BoardPlatform[]) {
@@ -1512,16 +1541,26 @@ const SOURCE_SNAPSHOT_EXTENSIONS = new Set([
   '.hh',
   '.hpp',
   '.hxx',
+  '.ipp',
+  '.tpp',
   '.s',
   '.asm',
-  '.json',
-  '.md',
-  '.txt',
-  '.yaml',
-  '.yml',
-  '.toml',
-  '.ini',
-  '.properties',
+]);
+const WORKSPACE_MAIN_SKETCH_FILE = 'main.ino';
+const PROJECT_METADATA_DIRECTORY = '.tentalum';
+const PROJECT_METADATA_FILE = 'project.json';
+const WORKSPACE_COMPILED_ROOT_FILE_EXTENSIONS = new Set(['.ino', '.pde', '.c', '.cc', '.cpp', '.cxx', '.s', '.h', '.hh', '.hpp', '.hxx', '.ipp', '.tpp']);
+const WORKSPACE_COMPILED_ROOT_DIRECTORIES = new Set(['src']);
+const SOURCE_SNAPSHOT_PROJECT_ROOT_MARKERS = new Set([
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'tsconfig.json',
+  'vite.config.ts',
+  'vite.config.js',
+  'appwrite.config.json',
+  'electron-builder.json',
 ]);
 const SOURCE_SNAPSHOT_MAX_FILES = 80;
 const SOURCE_SNAPSHOT_MAX_FILE_BYTES = 512 * 1024;
@@ -1553,6 +1592,7 @@ type LocalBoardRow = {
   cloudLinkedAt?: string;
   lastCloudProvisionedAt?: string;
   lastCloudUsbUploadAt?: string;
+  sourceCodeVisibility?: 'private' | 'public' | string;
   portChanged?: boolean;
   stalePort?: string;
   detectionSource?: string;
@@ -1570,7 +1610,21 @@ type BoardCodeTarget = {
     profileId?: string;
     fingerprint?: string;
     cloudBoardId?: string;
+    sourceCodeVisibility?: 'private' | 'public' | string;
   };
+};
+
+type BoardCodeSnapshotRequest = {
+  target: BoardCodeTarget;
+  result: BoardCodeSnapshotListResult | null;
+  loading: boolean;
+  error: string;
+};
+
+type BoardCodeRestoreRequest = {
+  target: BoardCodeTarget;
+  snapshot: BoardCodeSnapshotSummary;
+  markerVerifiedFromFirmware: boolean;
 };
 
 type LiveLocalBoardResolution = {
@@ -1639,6 +1693,20 @@ function localBoardProfileKey(profileId: string) {
   return `profile:${profileId}`;
 }
 
+function localBoardDetectionUsageKey(detection: Pick<LocalBoardDetection, 'id' | 'fingerprint' | 'port' | 'path'>) {
+  return [
+    detection.fingerprint || detection.id || '',
+    detection.port || detection.path || '',
+  ]
+    .map((value) => normalizeLocalBoardHardwareValue(value))
+    .filter(Boolean)
+    .join('|');
+}
+
+function localBoardDetectedKey(detection: Pick<LocalBoardDetection, 'id' | 'fingerprint' | 'port' | 'path'>) {
+  return `detected:${localBoardDetectionUsageKey(detection) || normalizeLocalBoardHardwareValue(detection.id)}`;
+}
+
 function editorLocalBoardValue(profileId: string) {
   return `${EDITOR_BOARD_LOCAL_PREFIX}${profileId}`;
 }
@@ -1692,7 +1760,8 @@ function writeStoredSelectedLocalBoardId(profileId: string) {
   }
 }
 
-const DEFAULT_TAB_CONTENT = `// Start writing firmware in ${new Date().getFullYear()}
+const DEFAULT_TAB_CONTENT = '';
+const DEFAULT_PROJECT_ENTRY_CONTENT = `// Start writing firmware in ${new Date().getFullYear()}
 
 void setup() {
   // Put your setup code here.
@@ -1702,6 +1771,17 @@ void loop() {
   // Put your main code here.
 }
 `;
+
+const EMPTY_PROJECT_INTEGRITY: ProjectIntegrityState = {
+  loading: false,
+  entryFile: null,
+  lifecycleFiles: [],
+  lifecycleFunctionFiles: [],
+  conflictFiles: [],
+  entryMissing: false,
+  metadataMissing: true,
+  error: null,
+};
 
 const FILE_TREE_INTERNAL_TRASH_DIR = '.tantalum-file-tree-trash';
 const AGENT_LIVE_REVIEW_STORAGE_PREFIX = 'tantalum-agent-live-review:';
@@ -1975,10 +2055,11 @@ async function validateStoredAgentReview(workspacePath: string, review: AgentPen
   return review;
 }
 
-const FILE_TREE_CONTEXT_MENU_ICONS: Record<FileTreeContextMenuActionId, LucideIcon> = {
+const FILE_TREE_CONTEXT_MENU_ICONS: Partial<Record<FileTreeContextMenuActionId | string, LucideIcon>> = {
   'new-file': FilePlus2,
   'new-folder': FolderPlus,
   'open-in-file-manager': FolderOpen,
+  'make-entry-point': CheckCircle2,
   cut: Scissors,
   copy: Copy,
   paste: Clipboard,
@@ -2377,7 +2458,7 @@ function normalizePanelSizes(sizes: PanelSizes): PanelSizes {
   return { left, right, bottom };
 }
 
-function createUntitledTab(name = 'sketch.ino', content = DEFAULT_TAB_CONTENT): FileTab {
+function createUntitledTab(name = 'untitled.txt', content = DEFAULT_TAB_CONTENT): FileTab {
   untitledTabCounter += 1;
   const path = `untitled:${Date.now()}-${untitledTabCounter}`;
 
@@ -2625,6 +2706,7 @@ export function IDEWorkspace({
   const [panelSizes, setPanelSizes] = useState<PanelSizes>(() => normalizePanelSizes(DEFAULT_PANEL_SIZES));
   const [activeResizePanel, setActiveResizePanel] = useState<ResizablePanel | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
+  const [projectIntegrity, setProjectIntegrity] = useState<ProjectIntegrityState>(EMPTY_PROJECT_INTEGRITY);
   const [gitHasChanges, setGitHasChanges] = useState(false);
   const [fileTreeRefreshKey, setFileTreeRefreshKey] = useState(0);
   const [tabs, setTabs] = useState<FileTab[]>([]);
@@ -2635,6 +2717,7 @@ export function IDEWorkspace({
   const [pendingAgentReview, setPendingAgentReview] = useState<AgentPendingReview | null>(null);
   const [resolvingAgentReview, setResolvingAgentReview] = useState(false);
   const [agentReviewNotice, setAgentReviewNotice] = useState<AgentReviewResolutionNotice | null>(null);
+  const [agentRestorePoints, setAgentRestorePoints] = useState<AgentRestorePointSummary[]>([]);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>(() => [
     { id: Date.now(), level: 'info', message: 'Ready. Open a folder or start writing firmware.' },
   ]);
@@ -2665,10 +2748,12 @@ export function IDEWorkspace({
   const [boardModalOpen, setBoardModalOpen] = useState(false);
   const [provisionModalOpen, setProvisionModalOpen] = useState(false);
   const [releaseModalOpen, setReleaseModalOpen] = useState(false);
-  const [boardCodeDestinationRequest, setBoardCodeDestinationRequest] = useState<BoardCodeTarget | null>(null);
+  const [boardCodeSnapshotRequest, setBoardCodeSnapshotRequest] = useState<BoardCodeSnapshotRequest | null>(null);
+  const [boardCodeRestoreRequest, setBoardCodeRestoreRequest] = useState<BoardCodeRestoreRequest | null>(null);
   const [boardForm, setBoardForm] = useState<BoardInput>({
     name: '',
     boardType: 'esp32:esp32:esp32',
+    sourceCodeVisibility: 'private',
   });
   const [selectedLinkLocalProfileId, setSelectedLinkLocalProfileId] = useState('');
   const [pendingSelectedLocalCloudLink, setPendingSelectedLocalCloudLink] = useState<{ profileId: string; boardId: string } | null>(null);
@@ -2790,8 +2875,8 @@ export function IDEWorkspace({
   const activeTabScrollPath = activeTab?.path ?? null;
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
   const localBoardRows = useMemo<LocalBoardRow[]>(() => {
-    const usedDetectionFingerprints = new Set<string>();
-    const availableDetections = () => detectedLocalBoards.filter((detection) => !usedDetectionFingerprints.has(detection.fingerprint || detection.id));
+    const usedDetectionKeys = new Set<string>();
+    const availableDetections = () => detectedLocalBoards.filter((detection) => !usedDetectionKeys.has(localBoardDetectionUsageKey(detection)));
 
     const takeDetection = (identity: LocalBoardHardwareIdentity, selectedPortPath?: string) => {
       const exactPort = normalizeLocalBoardHardwareValue(selectedPortPath || localBoardIdentityPort(identity));
@@ -2800,7 +2885,7 @@ export function IDEWorkspace({
         : null;
       const detection = exactDetection ?? pickBestLocalBoardHardwareMatch(availableDetections(), identity);
       if (detection) {
-        usedDetectionFingerprints.add(detection.fingerprint || detection.id);
+        usedDetectionKeys.add(localBoardDetectionUsageKey(detection));
       }
       return detection;
     };
@@ -2850,6 +2935,7 @@ export function IDEWorkspace({
         cloudLinkedAt: profile?.cloudLinkedAt || '',
         lastCloudProvisionedAt: profile?.lastCloudProvisionedAt || '',
         lastCloudUsbUploadAt: profile?.lastCloudUsbUploadAt || '',
+        sourceCodeVisibility: profile?.sourceCodeVisibility || 'private',
         portChanged,
         stalePort: portChanged ? savedPort : '',
         detectionSource: detection?.detectionSource,
@@ -2858,13 +2944,20 @@ export function IDEWorkspace({
       };
     };
 
-    return [
+    const rows = [
       ...localBoardProfiles.map((profile) => {
         const key = localBoardProfileKey(profile.id);
         return createRow(key, profile, localBoardEdits[key] ?? {}, 'saved');
       }),
       ...manualLocalBoardKeys.map((key) => createRow(key, null, localBoardEdits[key] ?? {}, 'manual')),
     ];
+
+    for (const detection of availableDetections()) {
+      const key = localBoardDetectedKey(detection);
+      rows.push(createRow(key, null, localBoardEdits[key] ?? { fqbn: detection.fqbn, boardLabel: detection.boardLabel, port: detection.port }, 'detected'));
+    }
+
+    return rows;
   }, [detectedLocalBoards, localBoardEdits, localBoardPorts, localBoardProfiles, manualLocalBoardKeys]);
   const selectedLocalBoard = localBoardRows.find((row) => row.profileId && row.profileId === selectedLocalBoardId)
     ?? localBoardRows.find((row) => row.profileId && canUploadLocalBoard(row))
@@ -2964,10 +3057,12 @@ export function IDEWorkspace({
   const editorSelectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const agentDiffDecorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
   const agentDiffViewZoneIdsRef = useRef<string[]>([]);
+  const projectProblemWidgetOpenedRef = useRef(new Set<string>());
   const tabsRef = useRef<FileTab[]>(tabs);
   const activeTabIdRef = useRef<string | null>(activeTabId);
   const editorTabsScrollHostRef = useRef<HTMLDivElement | null>(null);
   const workspacePathRef = useRef<string | null>(workspacePath);
+  const projectIntegrityRef = useRef<ProjectIntegrityState>(projectIntegrity);
   const editorValueRef = useRef(editorValue);
   const workspaceActiveRef = useRef(active);
   const saveInProgressRef = useRef(false);
@@ -3155,8 +3250,8 @@ export function IDEWorkspace({
     if (unsavedTabs.length > 0) {
       const tabLabel = unsavedTabs.length === 1 ? 'tab has' : 'tabs have';
       const message = currentWorkspacePath
-        ? `Switch workspaces? ${unsavedTabs.length} unsaved ${tabLabel} changes. They will be kept with ${fileNameFromPath(currentWorkspacePath)} and restored when you reopen it.`
-        : `Open workspace? ${unsavedTabs.length} unsaved ${tabLabel} changes outside a workspace. They will be closed if you continue.`;
+        ? `Switch Projects? ${unsavedTabs.length} unsaved ${tabLabel} changes. They will be kept with ${fileNameFromPath(currentWorkspacePath)} and restored when you reopen it.`
+        : `Open Project? ${unsavedTabs.length} unsaved ${tabLabel} changes outside a Project. They will be closed if you continue.`;
 
       if (!window.confirm(message)) {
         return false;
@@ -3484,6 +3579,18 @@ export function IDEWorkspace({
     setGitHasChanges(nextStatus.state === 'repository' && nextStatus.hasChanges);
   }, [active, workspacePath]);
 
+  const refreshAgentRestorePoints = useCallback(async (targetWorkspacePath = workspacePath) => {
+    if (!active || !targetWorkspacePath) {
+      setAgentRestorePoints([]);
+      return;
+    }
+
+    const result = await window.tantalum.agent.listRestorePoints({ workspacePath: targetWorkspacePath });
+    if (result.success) {
+      setAgentRestorePoints(result.restorePoints);
+    }
+  }, [active, workspacePath]);
+
   function handleGitStatusChange(nextStatus: GitStatus) {
     setGitHasChanges(nextStatus.state === 'repository' && nextStatus.hasChanges);
   }
@@ -3496,6 +3603,10 @@ export function IDEWorkspace({
 
     return () => window.clearInterval(interval);
   }, [refreshGitChangeIndicator]);
+
+  useEffect(() => {
+    void refreshAgentRestorePoints();
+  }, [refreshAgentRestorePoints]);
 
   const gitController = useGitWorkspaceController({
     active,
@@ -3578,6 +3689,14 @@ export function IDEWorkspace({
     return SOURCE_SNAPSHOT_EXTENSIONS.has(`.${fileNameFromPath(filePath).split('.').pop()?.toLowerCase() || ''}`);
   }
 
+  function sanitizeSourceSnapshotPathPart(part: string) {
+    const safePart = Array.from(part).map((character) => {
+      const codePoint = character.charCodeAt(0);
+      return codePoint < 32 || '<>:"/\\|?*'.includes(character) ? '-' : character;
+    }).join('');
+    return safePart.replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'file';
+  }
+
   function sanitizeSourceSnapshotRelativePath(filePath: string, fallback = 'sketch.ino') {
     const normalized = filePath.replace(/\\/g, '/');
     const parts = normalized
@@ -3585,7 +3704,7 @@ export function IDEWorkspace({
       .map((part) => part.trim())
       .filter(Boolean)
       .filter((part) => part !== '.' && part !== '..')
-      .map((part) => part.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '-').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'file');
+      .map(sanitizeSourceSnapshotPathPart);
     return parts.join('/') || fallback;
   }
 
@@ -3594,7 +3713,343 @@ export function IDEWorkspace({
   }
 
   function shouldSkipSourceSnapshotDirectory(name: string) {
-    return ['.git', '.tantalum-trash', 'node_modules', 'dist', 'build', '.next', '.vite'].includes(name.toLowerCase());
+    const normalized = name.toLowerCase();
+    return normalized.startsWith('.')
+      || ['.git', '.tantalum-trash', 'node_modules', 'dist', 'build', '.next', '.vite', 'out', 'target', 'extracted-board-code'].includes(normalized);
+  }
+
+  function isArduinoSketchFilePath(filePath: string) {
+    return /\.(ino|pde)$/i.test(fileNameFromPath(filePath));
+  }
+
+  function stripArduinoCodeForLifecycleScan(code: string) {
+    return code
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/[^\r\n]*/g, ' ')
+      .replace(/"(?:\\.|[^"\\])*"/g, '""')
+      .replace(/'(?:\\.|[^'\\])*'/g, "''");
+  }
+
+  function hasArduinoLifecycleFunction(code: string) {
+    const stripped = stripArduinoCodeForLifecycleScan(code);
+    return /\bvoid\s+(setup|loop)\s*\(/.test(stripped);
+  }
+
+  function hasArduinoLifecyclePair(code: string) {
+    const stripped = stripArduinoCodeForLifecycleScan(code);
+    return /\bvoid\s+setup\s*\(/.test(stripped) && /\bvoid\s+loop\s*\(/.test(stripped);
+  }
+
+  function normalizeProjectEntryFileName(value: string | null | undefined) {
+    const candidate = String(value || '').trim();
+    if (!candidate || candidate.includes('/') || candidate.includes('\\')) {
+      return null;
+    }
+    const hasUnsafeCharacter = Array.from(candidate).some((character) => {
+      const codePoint = character.charCodeAt(0);
+      return codePoint < 32 || '<>:"/\\|?*'.includes(character);
+    });
+    if (hasUnsafeCharacter || !/\.ino$/i.test(candidate) || candidate.replace(/\.ino$/i, '').trim().length === 0) {
+      return null;
+    }
+    return candidate;
+  }
+
+  function projectMetadataPath(rootPath: string) {
+    return joinPath(joinPath(rootPath, PROJECT_METADATA_DIRECTORY), PROJECT_METADATA_FILE);
+  }
+
+  function isRootInoProjectFile(filePath: string, rootPath = workspacePathRef.current) {
+    if (!rootPath || !isPathInsideRoot(filePath, rootPath)) {
+      return false;
+    }
+    const relativePath = relativePathFromRoot(filePath, rootPath);
+    const parts = relativePath?.replace(/\\/g, '/').split('/').filter(Boolean) ?? [];
+    return parts.length === 1 && /\.ino$/i.test(parts[0]);
+  }
+
+  function rootProjectFileName(filePath: string, rootPath = workspacePathRef.current) {
+    if (!rootPath || !isRootInoProjectFile(filePath, rootPath)) {
+      return null;
+    }
+    const relativePath = relativePathFromRoot(filePath, rootPath);
+    return relativePath?.replace(/\\/g, '/') ?? null;
+  }
+
+  function findOpenTabForPath(filePath: string) {
+    return tabsRef.current.map(syncFileTabDirtyState).find((tab) => !isTemporaryFileTab(tab) && isSameFileTabPath(tab.path, filePath)) ?? null;
+  }
+
+  function readOpenTabContent(filePath: string) {
+    const openTab = findOpenTabForPath(filePath);
+    if (!openTab) {
+      return null;
+    }
+    return openTab.id === activeTabIdRef.current ? editorRef.current?.getValue() ?? editorValueRef.current : openTab.content;
+  }
+
+  async function readProjectMetadata(rootPath: string): Promise<{ entryFile: string | null; missing: boolean; error: string | null }> {
+    const result = await window.tantalum.fs.readFile(projectMetadataPath(rootPath));
+    if (!result.success) {
+      return { entryFile: null, missing: true, error: null };
+    }
+
+    try {
+      const parsed = JSON.parse(result.content) as Partial<ProjectMetadata>;
+      const entryFile = parsed.schemaVersion === 1 ? normalizeProjectEntryFileName(parsed.entryFile) : null;
+      return { entryFile, missing: false, error: entryFile ? null : 'Project metadata has an invalid entry file.' };
+    } catch {
+      return { entryFile: null, missing: false, error: 'Project metadata is not valid JSON.' };
+    }
+  }
+
+  async function writeProjectMetadata(rootPath: string, entryFile: string) {
+    const metadataDirectoryResult = await window.tantalum.fs.createFolder(rootPath, PROJECT_METADATA_DIRECTORY);
+    if (!metadataDirectoryResult.success && !/exist|already/i.test(metadataDirectoryResult.error)) {
+      throw new Error(metadataDirectoryResult.error);
+    }
+
+    const metadata: ProjectMetadata = {
+      schemaVersion: 1,
+      entryFile,
+    };
+    const writeResult = await window.tantalum.fs.writeFile(projectMetadataPath(rootPath), `${JSON.stringify(metadata, null, 2)}\n`);
+    if (!writeResult.success) {
+      throw new Error(writeResult.error);
+    }
+  }
+
+  async function readRootInoLifecycleFiles(rootPath: string) {
+    const directory = await window.tantalum.fs.readDirectory(rootPath);
+    if (!directory.success) {
+      throw new Error(directory.error);
+    }
+
+    const rootInoFiles = directory.items
+      .filter((item) => !item.isDirectory && /\.ino$/i.test(item.name))
+      .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
+    const lifecycleFiles: string[] = [];
+    const lifecycleFunctionFiles: string[] = [];
+    const rootFileNames = rootInoFiles.map((item) => item.name);
+
+    for (const item of rootInoFiles) {
+      const openContent = readOpenTabContent(item.path);
+      let fileContent = openContent;
+      if (fileContent === null) {
+        const fileResult = await window.tantalum.fs.readFile(item.path);
+        fileContent = fileResult.success ? fileResult.content : '';
+      }
+      if (hasArduinoLifecycleFunction(fileContent)) {
+        lifecycleFunctionFiles.push(item.name);
+      }
+      if (hasArduinoLifecyclePair(fileContent)) {
+        lifecycleFiles.push(item.name);
+      }
+    }
+
+    return { rootFileNames, lifecycleFiles, lifecycleFunctionFiles };
+  }
+
+  async function refreshProjectIntegrity(rootPath = workspacePathRef.current) {
+    if (!rootPath) {
+      projectIntegrityRef.current = EMPTY_PROJECT_INTEGRITY;
+      setProjectIntegrity(EMPTY_PROJECT_INTEGRITY);
+      return EMPTY_PROJECT_INTEGRITY;
+    }
+
+    try {
+      const [metadata, lifecycle] = await Promise.all([
+        readProjectMetadata(rootPath),
+        readRootInoLifecycleFiles(rootPath),
+      ]);
+      const rootFileNameSet = new Set(lifecycle.rootFileNames.map((name) => name.toLowerCase()));
+      let entryFile = metadata.entryFile && rootFileNameSet.has(metadata.entryFile.toLowerCase()) ? metadata.entryFile : null;
+      let metadataMissing = metadata.missing;
+      let metadataError = metadata.error;
+      const entryMissing = Boolean(metadata.entryFile && !entryFile);
+
+      if (!entryFile && lifecycle.lifecycleFiles.length === 1) {
+        entryFile = lifecycle.lifecycleFiles[0];
+        await writeProjectMetadata(rootPath, entryFile);
+        metadataMissing = false;
+        metadataError = null;
+      }
+
+      const conflictFiles = lifecycle.lifecycleFunctionFiles.filter((name) => !entryFile || name.toLowerCase() !== entryFile.toLowerCase());
+      const nextIntegrity: ProjectIntegrityState = {
+        loading: false,
+        entryFile,
+        lifecycleFiles: lifecycle.lifecycleFiles,
+        lifecycleFunctionFiles: lifecycle.lifecycleFunctionFiles,
+        conflictFiles,
+        entryMissing,
+        metadataMissing,
+        error: metadataError,
+      };
+      projectIntegrityRef.current = nextIntegrity;
+      setProjectIntegrity(nextIntegrity);
+      return nextIntegrity;
+    } catch (error) {
+      const nextIntegrity: ProjectIntegrityState = {
+        ...EMPTY_PROJECT_INTEGRITY,
+        error: error instanceof Error ? error.message : 'Unable to inspect Project entry point.',
+      };
+      projectIntegrityRef.current = nextIntegrity;
+      setProjectIntegrity(nextIntegrity);
+      return nextIntegrity;
+    }
+  }
+
+  function isWorkspaceMainSketchFileName(name: string) {
+    return name.toLowerCase() === WORKSPACE_MAIN_SKETCH_FILE;
+  }
+
+  function isWorkspaceEntrySketchFileName(name: string) {
+    return Boolean(projectIntegrity.entryFile && name.toLowerCase() === projectIntegrity.entryFile.toLowerCase());
+  }
+
+  function isWorkspaceCompiledRootFileName(name: string) {
+    const extension = `.${name.split('.').pop()?.toLowerCase() || ''}`;
+    return WORKSPACE_COMPILED_ROOT_FILE_EXTENSIONS.has(extension);
+  }
+
+  function isStandaloneWorkspaceSketchTab(relativePath: string, content: string, entryFileName = WORKSPACE_MAIN_SKETCH_FILE) {
+    const parts = sourceSnapshotPathParts(relativePath);
+    return parts.length === 1
+      && isArduinoSketchFilePath(parts[0])
+      && parts[0].toLowerCase() !== entryFileName.toLowerCase()
+      && hasArduinoLifecycleFunction(content);
+  }
+
+  function isWorkspaceCompiledRootDirectoryName(name: string) {
+    return WORKSPACE_COMPILED_ROOT_DIRECTORIES.has(name.toLowerCase());
+  }
+
+  function compareWorkspaceCompiledRootItems(left: { name: string }, right: { name: string }) {
+    const leftSrc = isWorkspaceCompiledRootDirectoryName(left.name);
+    const rightSrc = isWorkspaceCompiledRootDirectoryName(right.name);
+    if (leftSrc !== rightSrc) {
+      return leftSrc ? -1 : 1;
+    }
+    const leftEntry = isWorkspaceEntrySketchFileName(left.name);
+    const rightEntry = isWorkspaceEntrySketchFileName(right.name);
+    if (leftEntry !== rightEntry) {
+      return leftEntry ? -1 : 1;
+    }
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+  }
+
+  function compareWorkspaceDirectoryItems(left: { name: string; isDirectory: boolean }, right: { name: string; isDirectory: boolean }) {
+    if (left.isDirectory !== right.isDirectory) {
+      return left.isDirectory ? -1 : 1;
+    }
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+  }
+
+  function isAllowedSketchChildDirectory(name: string) {
+    const normalized = name.toLowerCase();
+    return normalized === 'src';
+  }
+
+  function sourceSnapshotPathParts(relativePath: string) {
+    const normalized = sanitizeSourceSnapshotRelativePath(relativePath).replace(/\\/g, '/');
+    return normalized.split('/').filter(Boolean);
+  }
+
+  function isWorkspaceCompiledDirectoryFileName(name: string) {
+    return !isArduinoSketchFilePath(name) && isWorkspaceCompiledRootFileName(name);
+  }
+
+  function isWorkspaceCompiledSnapshotPath(relativePath: string) {
+    const parts = sourceSnapshotPathParts(relativePath);
+    if (parts.length === 0 || parts.some((part) => shouldSkipSourceSnapshotDirectory(part))) {
+      return false;
+    }
+
+    if (parts.length === 1) {
+      return isWorkspaceCompiledRootFileName(parts[0]);
+    }
+
+    return isWorkspaceCompiledRootDirectoryName(parts[0]) && isWorkspaceCompiledDirectoryFileName(parts[parts.length - 1]);
+  }
+
+  function isSourceSnapshotPathAllowed(relativePath: string, options: { workspaceCompiled?: boolean } = {}) {
+    const normalized = sanitizeSourceSnapshotRelativePath(relativePath).replace(/\\/g, '/');
+    const parts = sourceSnapshotPathParts(normalized);
+    if (parts.length === 0 || parts.some((part) => shouldSkipSourceSnapshotDirectory(part))) {
+      return false;
+    }
+    if (options.workspaceCompiled) {
+      return isWorkspaceCompiledSnapshotPath(normalized);
+    }
+    if (parts.length === 1) {
+      return isSourceSnapshotFilePath(normalized);
+    }
+    return isAllowedSketchChildDirectory(parts[0]) && isSourceSnapshotFilePath(normalized);
+  }
+
+  async function readDirectorySketchScope(dirPath: string) {
+    const directory = await window.tantalum.fs.readDirectory(dirPath);
+    if (!directory.success) {
+      return { sketchFiles: [] as string[], hasProjectMarkers: false };
+    }
+    return {
+      sketchFiles: directory.items
+        .filter((item) => !item.isDirectory && isArduinoSketchFilePath(item.name))
+        .map((item) => item.name),
+      hasProjectMarkers: directory.items.some((item) => !item.isDirectory && SOURCE_SNAPSHOT_PROJECT_ROOT_MARKERS.has(item.name.toLowerCase())),
+    };
+  }
+
+  function fileStem(filePath: string) {
+    return fileNameFromPath(filePath).replace(/\.[^.]+$/g, '').toLowerCase();
+  }
+
+  function isStrictArduinoSketchScope(dirPath: string, sketchFiles: string[], hasProjectMarkers: boolean) {
+    if (sketchFiles.length === 0) {
+      return false;
+    }
+    const directoryName = fileNameFromPath(dirPath).toLowerCase();
+    if (sketchFiles.some((name) => isWorkspaceMainSketchFileName(name))) {
+      return true;
+    }
+    if (sketchFiles.some((name) => fileStem(name) === directoryName)) {
+      return true;
+    }
+    return sketchFiles.length === 1 && !hasProjectMarkers;
+  }
+
+  async function resolveSourceSnapshotSketchRoot(tab: FileTab) {
+    if (isTemporaryFileTab(tab)) {
+      return null;
+    }
+
+    const activeParent = parentPath(tab.path);
+    if (isArduinoSketchFilePath(tab.path)) {
+      return activeParent;
+    }
+
+    let current = activeParent;
+    const workspaceRoot = workspacePath || '';
+    const visited = new Set<string>();
+    while (current && !visited.has(normalizeTreePath(current))) {
+      visited.add(normalizeTreePath(current));
+      if (!workspaceRoot || isPathInsideRoot(current, workspaceRoot)) {
+        const scope = await readDirectorySketchScope(current);
+        if (isStrictArduinoSketchScope(current, scope.sketchFiles, scope.hasProjectMarkers)) {
+          return current;
+        }
+      }
+      if (workspaceRoot && normalizeTreePath(current) === normalizeTreePath(workspaceRoot)) {
+        break;
+      }
+      const next = parentPath(current);
+      if (!next || normalizeTreePath(next) === normalizeTreePath(current)) {
+        break;
+      }
+      current = next;
+    }
+    return null;
   }
 
   async function buildBoardCodeSourceSnapshot(boardName: string, metadata: Record<string, unknown> = {}): Promise<BoardCodeSourceSnapshotInput | null> {
@@ -3605,9 +4060,9 @@ export function IDEWorkspace({
 
     const files = new Map<string, { path: string; content: string }>();
     let totalBytes = 0;
-    const addFile = (relativePath: string, content: string) => {
+    const addFile = (relativePath: string, content: string, options: { workspaceCompiled?: boolean } = {}) => {
       const sanitizedPath = sanitizeSourceSnapshotRelativePath(relativePath);
-      if (!isSourceSnapshotFilePath(sanitizedPath)) {
+      if (!isSourceSnapshotPathAllowed(sanitizedPath, options)) {
         return;
       }
       const bytes = sourceSnapshotByteLength(content);
@@ -3627,10 +4082,83 @@ export function IDEWorkspace({
     };
 
     const activeContent = editorValueRef.current;
-    if (isTemporaryFileTab(currentTab)) {
-      addFile(currentTab.name && isSourceSnapshotFilePath(currentTab.name) ? currentTab.name : 'sketch.ino', activeContent);
+    const workspaceSnapshotRoot = !isTemporaryFileTab(currentTab) && workspacePath && isPathInsideRoot(currentTab.path, workspacePath)
+      ? workspacePath
+      : null;
+    const workspaceEntryFileName = workspaceSnapshotRoot ? resolveWorkspaceSketchEntryFileName(currentTab) : WORKSPACE_MAIN_SKETCH_FILE;
+    const sketchRoot = workspaceSnapshotRoot || await resolveSourceSnapshotSketchRoot(currentTab);
+    const snapshotScope: 'workspace-compiled' | 'sketch' | 'active-file' = workspaceSnapshotRoot ? 'workspace-compiled' : sketchRoot ? 'sketch' : 'active-file';
+    let activeRelativePath = isTemporaryFileTab(currentTab) ? currentTab.name : fileNameFromPath(currentTab.path);
+
+    if (workspaceSnapshotRoot) {
+      const visitCompiledDirectory = async (dirPath: string) => {
+        if (files.size >= SOURCE_SNAPSHOT_MAX_FILES || totalBytes >= SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
+          return;
+        }
+        const directory = await window.tantalum.fs.readDirectory(dirPath);
+        if (!directory.success) {
+          return;
+        }
+
+        const sortedItems = [...directory.items].sort(compareWorkspaceDirectoryItems);
+        for (const item of sortedItems) {
+          if (files.size >= SOURCE_SNAPSHOT_MAX_FILES || totalBytes >= SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
+            break;
+          }
+
+          const relativePath = relativePathFromRoot(item.path, workspaceSnapshotRoot) || item.name;
+          const parts = sourceSnapshotPathParts(relativePath);
+          if (parts.length === 0 || parts.some((part) => shouldSkipSourceSnapshotDirectory(part))) {
+            continue;
+          }
+
+          if (item.isDirectory) {
+            if (isWorkspaceCompiledRootDirectoryName(parts[0])) {
+              await visitCompiledDirectory(item.path);
+            }
+            continue;
+          }
+
+          if (!isSourceSnapshotPathAllowed(relativePath, { workspaceCompiled: true })) {
+            continue;
+          }
+          const file = await window.tantalum.fs.readFile(item.path);
+          if (!file.success) {
+            continue;
+          }
+          if (isStandaloneWorkspaceSketchTab(relativePath, file.content, workspaceEntryFileName)) {
+            continue;
+          }
+          addFile(relativePath, file.content, { workspaceCompiled: true });
+        }
+      };
+
+      await visitCompiledDirectory(workspaceSnapshotRoot);
+      for (const tab of tabsRef.current.map(syncFileTabDirtyState)) {
+        if (isTemporaryFileTab(tab) || !isPathInsideRoot(tab.path, workspaceSnapshotRoot)) {
+          continue;
+        }
+        const relativePath = relativePathFromRoot(tab.path, workspaceSnapshotRoot) || tab.name;
+        if (!isSourceSnapshotPathAllowed(relativePath, { workspaceCompiled: true })) {
+          continue;
+        }
+        const content = tab.id === currentTab.id ? activeContent : tab.content;
+        if (isStandaloneWorkspaceSketchTab(relativePath, content, workspaceEntryFileName)) {
+          continue;
+        }
+        addFile(relativePath, content, { workspaceCompiled: true });
+      }
+      activeRelativePath = relativePathFromRoot(currentTab.path, workspaceSnapshotRoot) || currentTab.name;
+      if (isSourceSnapshotPathAllowed(activeRelativePath, { workspaceCompiled: true })) {
+        if (!isStandaloneWorkspaceSketchTab(activeRelativePath, activeContent, workspaceEntryFileName)) {
+          addFile(activeRelativePath, activeContent, { workspaceCompiled: true });
+        }
+      }
+    } else if (!sketchRoot || isTemporaryFileTab(currentTab)) {
+      const fallbackName = currentTab.name && isSourceSnapshotFilePath(currentTab.name) ? currentTab.name : 'sketch.ino';
+      activeRelativePath = isTemporaryFileTab(currentTab) ? fallbackName : fileNameFromPath(currentTab.path);
+      addFile(activeRelativePath, activeContent);
     } else {
-      const sketchRoot = parentPath(currentTab.path);
       const visitDirectory = async (dirPath: string) => {
         if (files.size >= SOURCE_SNAPSHOT_MAX_FILES || totalBytes >= SOURCE_SNAPSHOT_MAX_TOTAL_BYTES) {
           return;
@@ -3651,32 +4179,37 @@ export function IDEWorkspace({
             break;
           }
           if (item.isDirectory) {
-            if (!shouldSkipSourceSnapshotDirectory(item.name)) {
+            const relativeDirectory = relativePathFromRoot(item.path, sketchRoot) || item.name;
+            const parts = sanitizeSourceSnapshotRelativePath(relativeDirectory).split('/').filter(Boolean);
+            if (parts.length > 0 && isAllowedSketchChildDirectory(parts[0]) && !parts.some((part) => shouldSkipSourceSnapshotDirectory(part))) {
               await visitDirectory(item.path);
             }
             continue;
           }
-          if (!isSourceSnapshotFilePath(item.name)) {
+          const relativePath = relativePathFromRoot(item.path, sketchRoot) || item.name;
+          if (!isSourceSnapshotPathAllowed(relativePath)) {
             continue;
           }
           const file = await window.tantalum.fs.readFile(item.path);
           if (!file.success) {
             continue;
           }
-          const relativePath = relativePathFromRoot(item.path, sketchRoot) || item.name;
           addFile(relativePath, file.content);
         }
       };
 
       await visitDirectory(sketchRoot);
       for (const tab of tabsRef.current.map(syncFileTabDirtyState)) {
-        if (isTemporaryFileTab(tab) || !isPathInsideRoot(tab.path, sketchRoot) || !isSourceSnapshotFilePath(tab.path)) {
+        if (isTemporaryFileTab(tab) || !isPathInsideRoot(tab.path, sketchRoot)) {
           continue;
         }
         const relativePath = relativePathFromRoot(tab.path, sketchRoot) || tab.name;
+        if (!isSourceSnapshotPathAllowed(relativePath)) {
+          continue;
+        }
         addFile(relativePath, tab.id === currentTab.id ? activeContent : tab.content);
       }
-      const activeRelativePath = relativePathFromRoot(currentTab.path, sketchRoot) || currentTab.name;
+      activeRelativePath = relativePathFromRoot(currentTab.path, sketchRoot) || currentTab.name;
       addFile(activeRelativePath, activeContent);
     }
 
@@ -3685,28 +4218,139 @@ export function IDEWorkspace({
       return null;
     }
 
+    const fileHashes: Record<string, string> = {};
+    for (const file of collectedFiles) {
+      fileHashes[file.path] = await sha256Hex(file.content);
+    }
+
     return {
       name: boardName || currentTab.name || 'sketch',
       files: collectedFiles,
       metadata: {
+        manifestVersion: 2,
         boardName,
         workspacePath,
+        sketchRoot,
+        snapshotScope,
+        ...(snapshotScope === 'workspace-compiled'
+          ? {
+              entryFileName: workspaceEntryFileName,
+              compiledRootFiles: Array.from(WORKSPACE_COMPILED_ROOT_FILE_EXTENSIONS).sort(),
+              compiledDirectories: Array.from(WORKSPACE_COMPILED_ROOT_DIRECTORIES).sort(),
+            }
+          : {}),
         activeFile: isTemporaryFileTab(currentTab) ? currentTab.name : currentTab.path,
+        activeFileRelativePath: activeRelativePath,
         activeFileDirty: Boolean(currentTab.isDirty),
+        activeEditorHash: await sha256Hex(activeContent),
+        fileHashes,
+        fileCount: collectedFiles.length,
         collectedAt: new Date().toISOString(),
         ...metadata,
       },
     };
   }
 
-  function mapDirectoryItemsToTreeNodes(items: Array<{ name: string; path: string; isDirectory: boolean; extension: string | null }>): FileTreeNode[] {
-    return items
-      .filter((item) => item.name !== FILE_TREE_INTERNAL_TRASH_DIR && !item.name.startsWith('.trash_'))
-      .map((item) => ({
+  function canPrepareCloudSourceMarker() {
+    return Boolean(appwriteConfig.firmwareSourceBucketId && appwriteConfig.sourceSnapshotsCollectionId);
+  }
+
+  async function prepareCloudSourceRestoreMarker(options: {
+    sourceSnapshot: BoardCodeSourceSnapshotInput | null;
+    identity: Record<string, unknown>;
+    operation: string;
+    uploadId: string;
+    firmwareId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<(SourceRestoreMarker & { sourceSnapshotChecksum?: string; sourceSnapshotManifest?: Record<string, unknown>; createdAt?: string }) | null> {
+    if (!options.sourceSnapshot || !canPrepareCloudSourceMarker()) {
+      return null;
+    }
+
+    const result = await window.tantalum.toolchain.prepareSourceRestoreMarker({
+      sourceSnapshot: options.sourceSnapshot,
+      identity: options.identity,
+      operation: options.operation,
+      uploadId: options.uploadId,
+      firmwareId: options.firmwareId,
+      metadata: {
+        sourceCodeVisibility: typeof options.identity.sourceCodeVisibility === 'string' ? options.identity.sourceCodeVisibility : 'private',
+        ...(options.metadata || {}),
+      },
+    });
+    if (result.success) {
+      pushConsole('Cloud source restore marker saved.');
+      return {
+        markerId: result.markerId,
+        snapshotChecksum: result.snapshotChecksum,
+        sourceSnapshotFileId: result.sourceSnapshotFileId,
+        sourceSnapshotChecksum: result.sourceSnapshotChecksum,
+        sourceSnapshotManifest: result.sourceSnapshotManifest,
+        createdAt: result.createdAt,
+        retentionGroup: result.retentionGroup,
+      };
+    }
+
+    const continueWithoutMarker = window.confirm(
+      `Tantalum could not save the cloud source restore marker:\n\n${result.error}\n\nContinue uploading without cloud exact-restore from board firmware?`,
+    );
+    if (!continueWithoutMarker) {
+      throw new Error(`Upload canceled because the cloud source restore marker could not be saved: ${result.error}`);
+    }
+    pushConsole(`Cloud source restore marker skipped: ${result.error}`, 'info');
+    return null;
+  }
+
+  function isWorkspaceCompiledRootItem(item: { name: string; isDirectory: boolean }) {
+    if (item.isDirectory) {
+      return isWorkspaceCompiledRootDirectoryName(item.name);
+    }
+    return isWorkspaceCompiledRootFileName(item.name);
+  }
+
+  function mapDirectoryItemsToTreeNodes(
+    items: Array<{ name: string; path: string; isDirectory: boolean; extension: string | null }>,
+    options: { workspaceSketchRoot?: boolean } = {},
+  ): FileTreeNode[] {
+    const visibleItems = items.filter((item) => item.name !== FILE_TREE_INTERNAL_TRASH_DIR && item.name !== PROJECT_METADATA_DIRECTORY && !item.name.startsWith('.trash_'));
+    const normalizedEntryFile = projectIntegrity.entryFile?.toLowerCase() ?? '';
+    const conflictFileNames = new Set(projectIntegrity.conflictFiles.map((name) => name.toLowerCase()));
+    const compiledRootPaths = new Set<string>();
+    if (options.workspaceSketchRoot) {
+      const classifications = visibleItems.map((item) => ({
+        path: item.path,
+        compiled: isWorkspaceCompiledRootItem(item),
+      }));
+      for (const classification of classifications) {
+        if (classification.compiled) {
+          compiledRootPaths.add(normalizeTreePath(classification.path));
+        }
+      }
+    }
+    const orderedItems = options.workspaceSketchRoot
+      ? [
+          ...visibleItems
+            .filter((item) => compiledRootPaths.has(normalizeTreePath(item.path)))
+            .sort(compareWorkspaceCompiledRootItems),
+          ...visibleItems
+            .filter((item) => !compiledRootPaths.has(normalizeTreePath(item.path)))
+            .sort(compareWorkspaceDirectoryItems),
+        ]
+      : visibleItems;
+    const includedCount = options.workspaceSketchRoot
+      ? visibleItems.filter((item) => compiledRootPaths.has(normalizeTreePath(item.path))).length
+      : 0;
+
+    return orderedItems
+      .map((item, index): WorkspaceSketchTreeNode => ({
         name: item.name,
         path: item.path,
         type: item.isDirectory ? 'directory' : 'file',
         extension: item.extension ?? undefined,
+        sketchSection: options.workspaceSketchRoot && index < includedCount ? 'included' : options.workspaceSketchRoot ? 'workspace' : undefined,
+        sectionBoundary: Boolean(options.workspaceSketchRoot && includedCount > 0 && index === includedCount),
+        projectEntry: Boolean(options.workspaceSketchRoot && !item.isDirectory && normalizedEntryFile && item.name.toLowerCase() === normalizedEntryFile),
+        lifecycleConflict: Boolean(options.workspaceSketchRoot && !item.isDirectory && conflictFileNames.has(item.name.toLowerCase())),
       }));
   }
 
@@ -3788,7 +4432,7 @@ export function IDEWorkspace({
     const result = await window.tantalum.fs.deletePath(trashPath);
 
     if (!result.success && !result.error.toLowerCase().includes('does not exist')) {
-      pushConsole(`Unable to clean workspace trash: ${result.error}`, 'error');
+      pushConsole(`Unable to clean Project trash: ${result.error}`, 'error');
     }
   }
 
@@ -3828,6 +4472,28 @@ export function IDEWorkspace({
     }
 
     return createFileResult.path;
+  }
+
+  async function makeProjectEntryPoint(filePath: string) {
+    const rootPath = workspacePathRef.current;
+    const entryFile = rootProjectFileName(filePath, rootPath);
+    if (!rootPath || !entryFile || !normalizeProjectEntryFileName(entryFile)) {
+      pushToast('Only root .ino files can be Project entry points.', 'error');
+      return;
+    }
+
+    try {
+      await writeProjectMetadata(rootPath, entryFile);
+      const integrity = await refreshProjectIntegrity(rootPath);
+      refreshFileTree();
+      const conflicts = integrity.conflictFiles.filter((name) => name.toLowerCase() !== entryFile.toLowerCase());
+      pushToast(`${entryFile} is now the Project entry point.`, 'success', undefined, conflicts.length > 0 ? {
+        detail: `${conflicts.join(', ')} still defines setup() or loop().`,
+      } : undefined);
+      refreshActiveEditorDiagnostics(activeEditorFilePath);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to update Project entry point.', 'error');
+    }
   }
 
   async function syncBoardSecrets(boardId: string) {
@@ -4036,6 +4702,7 @@ export function IDEWorkspace({
       cloudLinkedAt: row.cloudLinkedAt || profile.cloudLinkedAt,
       lastCloudProvisionedAt: row.lastCloudProvisionedAt || profile.lastCloudProvisionedAt,
       lastCloudUsbUploadAt: row.lastCloudUsbUploadAt || profile.lastCloudUsbUploadAt,
+      sourceCodeVisibility: row.sourceCodeVisibility || profile.sourceCodeVisibility || 'private',
     };
   }
 
@@ -4436,18 +5103,22 @@ export function IDEWorkspace({
     workspacePathRef.current = result.path;
     setWorkspacePath(result.path);
     setPendingAgentReview(validReview);
+    void refreshAgentRestorePoints(result.path);
 
     if (didSwitchWorkspace) {
       const storedEditorState = readStoredWorkspaceEditorTabs(result.path);
-      applyEditorTabState(
-        sanitizeRestoredEditorTabs(storedEditorState?.tabs ?? [], validReview),
-        storedEditorState?.activeTabId ?? null,
-      );
+      const restoredTabs = sanitizeRestoredEditorTabs(storedEditorState?.tabs ?? [], validReview);
+      if (restoredTabs.length > 0) {
+        applyEditorTabState(restoredTabs, storedEditorState?.activeTabId ?? null);
+      } else {
+        applyEditorTabState([], null);
+      }
     }
 
+    await refreshProjectIntegrity(result.path);
     refreshFileTree();
     void refreshGitChangeIndicator(result.path);
-    pushConsole(`Opened workspace: ${result.path}`, 'success');
+    pushConsole(`Opened Project: ${result.path}`, 'success');
     void clearInternalTrash(result.path);
     return true;
   }
@@ -4456,6 +5127,67 @@ export function IDEWorkspace({
     const result = await window.tantalum.fs.openFolder();
     if (result.success) {
       await openWorkspace(result.path);
+    }
+  }
+
+  async function promptProjectEntryFileName(rootPath: string) {
+    while (true) {
+      const requestedName = window.prompt('Project entry file name', WORKSPACE_MAIN_SKETCH_FILE);
+      if (requestedName === null) {
+        return null;
+      }
+
+      const entryFile = normalizeProjectEntryFileName(requestedName);
+      if (!entryFile) {
+        window.alert('Use a root .ino filename, for example main.ino. Folders and other extensions are not allowed.');
+        continue;
+      }
+
+      const directory = await window.tantalum.fs.readDirectory(rootPath);
+      if (!directory.success) {
+        throw new Error(directory.error);
+      }
+
+      const existing = directory.items.find((item) => !item.isDirectory && item.name.toLowerCase() === entryFile.toLowerCase());
+      if (existing) {
+        window.alert(`${entryFile} already exists. Choose a new root .ino filename.`);
+        continue;
+      }
+
+      return entryFile;
+    }
+  }
+
+  async function createNewProject() {
+    const folderResult = await window.tantalum.projects.pickFolder();
+    if (!folderResult.success) {
+      return;
+    }
+
+    const opened = await openWorkspace(folderResult.path);
+    if (!opened) {
+      return;
+    }
+
+    try {
+      const entryFile = await promptProjectEntryFileName(folderResult.path);
+      if (!entryFile) {
+        return;
+      }
+
+      const createResult = await window.tantalum.fs.createFile(folderResult.path, entryFile, DEFAULT_PROJECT_ENTRY_CONTENT);
+      if (!createResult.success) {
+        pushToast(createResult.error, 'error');
+        return;
+      }
+
+      await writeProjectMetadata(folderResult.path, entryFile);
+      await refreshProjectIntegrity(folderResult.path);
+      refreshFileTree();
+      await openFile(createResult.path, { preview: false });
+      pushToast(`Created Project entry ${entryFile}.`, 'success');
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to create Project.', 'error');
     }
   }
 
@@ -4491,7 +5223,7 @@ export function IDEWorkspace({
 
   async function addCurrentWorkspaceToProjects() {
     if (!workspacePath) {
-      pushToast('Open a workspace before adding it to My Projects.', 'info');
+      pushToast('Open a Project before adding it to My Projects.', 'info');
       return;
     }
 
@@ -4721,7 +5453,7 @@ export function IDEWorkspace({
     }
   }
 
-  function createFileTreeFs(treeRoot: string | null): FileTreeFsAdapter {
+  function createFileTreeFs(treeRoot: string | null, options: { sketchWorkspace?: boolean } = {}): FileTreeFsAdapter {
     return {
       readDirectory: async (dirPath) => {
         const result = await window.tantalum.fs.readDirectory(dirPath);
@@ -4729,7 +5461,9 @@ export function IDEWorkspace({
           throw new Error(result.error);
         }
 
-        return mapDirectoryItemsToTreeNodes(result.items);
+        return mapDirectoryItemsToTreeNodes(result.items, {
+          workspaceSketchRoot: Boolean(options.sketchWorkspace && treeRoot && normalizeTreePath(dirPath) === normalizeTreePath(treeRoot)),
+        });
       },
       readFile: async (filePath) => {
         const result = await window.tantalum.fs.readFile(filePath);
@@ -4796,8 +5530,55 @@ export function IDEWorkspace({
     };
   }
 
-  const workspaceFileTreeFs = createFileTreeFs(workspacePath);
+  const workspaceFileTreeFs = createFileTreeFs(workspacePath, { sketchWorkspace: true });
   const selectedProjectFileTreeFs = createFileTreeFs(selectedProject?.path ?? null);
+
+  function renderWorkspaceFileTreeContextMenu(props: FileTreeContextMenuRenderProps) {
+    const node = props.node;
+    const canMakeEntry = Boolean(
+      node
+      && node.type === 'file'
+      && workspacePath
+      && isRootInoProjectFile(node.path, workspacePath)
+      && (!projectIntegrity.entryFile || fileNameFromPath(node.path).toLowerCase() !== projectIntegrity.entryFile.toLowerCase()),
+    );
+
+    if (!canMakeEntry) {
+      return renderFileTreeContextMenu(props);
+    }
+
+    const makeEntryAction = {
+      id: 'make-entry-point' as FileTreeContextMenuActionId,
+      label: 'Make Entry Point',
+      onSelect: () => makeProjectEntryPoint(node!.path),
+    } satisfies FileTreeContextMenuActionItem;
+
+    return renderFileTreeContextMenu({
+      ...props,
+      groups: [[makeEntryAction], ...props.groups],
+    });
+  }
+
+  function renderWorkspaceFileTreeIcon(node: FileTreeNode, iconState: FileTreeIconRenderProps) {
+    const sketchNode = node as WorkspaceSketchTreeNode;
+    const markerClasses = [
+      'workspace-tree-node-icon',
+      sketchNode.sectionBoundary ? 'workspace-tree-section-boundary' : '',
+      sketchNode.sketchSection ? `workspace-tree-section-${sketchNode.sketchSection}` : '',
+      sketchNode.sketchSection === 'included' && node.type === 'directory' ? 'workspace-tree-compiled-directory' : '',
+      sketchNode.sketchSection === 'included' && node.type === 'file' ? 'workspace-tree-compiled-file' : '',
+      sketchNode.projectEntry ? 'workspace-tree-entry-sketch' : '',
+      sketchNode.lifecycleConflict ? 'workspace-tree-lifecycle-conflict' : '',
+    ].filter(Boolean).join(' ');
+
+    if (node.type === 'directory') {
+      const iconUrl = getMaterialFolderIconUrl(node.name || node.path, iconState.expanded);
+      return <img className={`${markerClasses} workspace-tree-folder-icon`} src={iconUrl} alt="" draggable={false} />;
+    }
+
+    const iconUrl = getMaterialFileIconUrl(node.name || node.path);
+    return <img className={`${markerClasses} workspace-tree-file-icon`} src={iconUrl} alt="" draggable={false} />;
+  }
 
   function updateTabContent(tabPath: string, nextContent: string) {
     setTabs((current) => {
@@ -4843,8 +5624,46 @@ export function IDEWorkspace({
       return;
     }
 
-    updateArduinoCppDiagnostics(monaco, model, filePath);
-  }, [activeEditorFilePath]);
+    const rootInoName = filePath && workspacePath && isRootInoProjectFile(filePath, workspacePath)
+      ? rootProjectFileName(filePath, workspacePath)
+      : null;
+    const entryFile = projectIntegrity.entryFile;
+    const isProjectEntry = Boolean(rootInoName && entryFile && rootInoName.toLowerCase() === entryFile.toLowerCase());
+    const lifecycleConflict = Boolean(
+      rootInoName
+      && hasArduinoLifecycleFunction(model.getValue())
+      && (!entryFile || rootInoName.toLowerCase() !== entryFile.toLowerCase()),
+    );
+
+    updateArduinoCppDiagnostics(monaco, model, filePath, {
+      projectEntry: isProjectEntry,
+      lifecycleConflict,
+      requireLifecycle: isProjectEntry,
+    });
+
+    const problemWidgetKey = rootInoName ? `${filePath || rootInoName}:${entryFile || ''}` : '';
+    if (!lifecycleConflict) {
+      if (problemWidgetKey) {
+        projectProblemWidgetOpenedRef.current.delete(problemWidgetKey);
+      }
+      return;
+    }
+
+    if (!problemWidgetKey || projectProblemWidgetOpenedRef.current.has(problemWidgetKey)) {
+      return;
+    }
+
+    projectProblemWidgetOpenedRef.current.add(problemWidgetKey);
+    window.setTimeout(() => {
+      const editorInstance = editorRef.current;
+      if (!editorInstance || editorInstance.getModel() !== model) {
+        return;
+      }
+
+      editorInstance.trigger('tantalum.project-problem', 'editor.action.marker.next', null);
+    }, 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEditorFilePath, projectIntegrity.entryFile, workspacePath]);
 
   async function openFile(filePath: string, options?: { preview?: boolean }) {
     const shouldPreview = options?.preview ?? true;
@@ -5060,8 +5879,8 @@ export function IDEWorkspace({
       let destinationPath = tabToSave.path;
       if (saveAs || tabToSave.path.startsWith('untitled:')) {
         const result = await window.tantalum.fs.showSaveDialog({
-          defaultPath: workspacePath ? joinPath(workspacePath, tabToSave.name || 'sketch.ino') : tabToSave.name,
-          filters: [{ name: 'Arduino Sketch', extensions: ['ino', 'cpp', 'c', 'h'] }],
+          defaultPath: workspacePath ? joinPath(workspacePath, tabToSave.name || 'untitled.txt') : tabToSave.name,
+          filters: [{ name: 'Arduino Project File', extensions: ['ino', 'cpp', 'c', 'h'] }],
         });
 
         if (!result.success) {
@@ -5110,6 +5929,17 @@ export function IDEWorkspace({
         refreshFileTree();
       }
 
+      if (workspacePath && isRootInoProjectFile(destinationPath, workspacePath)) {
+        const integrity = await refreshProjectIntegrity(workspacePath);
+        refreshFileTree();
+        const rootName = fileNameFromPath(destinationPath).toLowerCase();
+        if (integrity.conflictFiles.some((name) => name.toLowerCase() === rootName)) {
+          pushToast('Only the Project entry file can define setup() or loop().', 'error', undefined, {
+            detail: `${fileNameFromPath(destinationPath)} is not the current entry point.`,
+          });
+        }
+      }
+
       void refreshGitChangeIndicator();
     } finally {
       saveInProgressRef.current = false;
@@ -5137,7 +5967,7 @@ export function IDEWorkspace({
   function resolveVerifyBoard() {
     const compileBoard = selectedEditorCloudBoard?.boardType || selectedEditorLocalBoard?.fqbn || (localBoardProfiles.length === 0 && boards.length === 0 ? 'arduino:avr:uno' : '');
     if (!compileBoard) {
-      pushToast('Choose a local or cloud board before verifying this sketch.', 'info');
+      pushToast('Choose a local or cloud board before verifying this Project.', 'info');
       return '';
     }
 
@@ -5152,8 +5982,83 @@ export function IDEWorkspace({
     return compileBoard;
   }
 
+  function collectWorkspaceToolchainDirtyFiles(rootPath: string): Array<{ path: string; content: string }> {
+    const activeId = activeTabIdRef.current;
+    const activeEditorContent = editorRef.current?.getValue() ?? editorValueRef.current;
+    return tabsRef.current
+      .map(syncFileTabDirtyState)
+      .filter((tab) => !isTemporaryFileTab(tab) && isPathInsideRoot(tab.path, rootPath))
+      .filter((tab) => tab.isDirty || tab.id === activeId)
+      .map((tab) => ({
+        path: tab.path,
+        content: tab.id === activeId ? activeEditorContent : tab.content,
+      }));
+  }
+
+  function getProjectBuildBlocker(integrity: ProjectIntegrityState) {
+    if (integrity.error) {
+      return integrity.error;
+    }
+    if (!integrity.entryFile) {
+      if (integrity.conflictFiles.length > 1) {
+        return `Choose one Project entry point. These files define setup() or loop(): ${integrity.conflictFiles.join(', ')}.`;
+      }
+      return 'Create a Project entry point before verifying or uploading.';
+    }
+    if (integrity.conflictFiles.length > 0) {
+      return `Only ${integrity.entryFile} can define setup() or loop(). Remove lifecycle functions from ${integrity.conflictFiles.join(', ')} or make one of them the entry point.`;
+    }
+    return '';
+  }
+
+  async function ensureProjectBuildReady(sketchSource: ToolchainSketchSource) {
+    if (sketchSource.kind !== 'workspace') {
+      return true;
+    }
+
+    const integrity = await refreshProjectIntegrity(sketchSource.workspacePath);
+    refreshFileTree();
+    const blocker = getProjectBuildBlocker(integrity);
+    if (!blocker) {
+      sketchSource.entryFileName = integrity.entryFile || sketchSource.entryFileName;
+      return true;
+    }
+
+    openConsolePanel('output');
+    pushConsole(blocker, 'error');
+    pushToast('Project entry point needs attention.', 'error', undefined, { detail: blocker });
+    refreshActiveEditorDiagnostics(activeEditorFilePath);
+    return false;
+  }
+
+  function resolveWorkspaceSketchEntryFileName(tab: FileTab | null = activeTab): string {
+    void tab;
+    return projectIntegrityRef.current.entryFile || WORKSPACE_MAIN_SKETCH_FILE;
+  }
+
+  function createToolchainSketchSource(): ToolchainSketchSource {
+    const currentTab = activeTab;
+    const currentCode = editorRef.current?.getValue() ?? editorValueRef.current;
+    const activeTabInWorkspace = Boolean(currentTab && !isTemporaryFileTab(currentTab) && workspacePath && isPathInsideRoot(currentTab.path, workspacePath));
+
+    if (workspacePath && (!currentTab || activeTabInWorkspace)) {
+      return {
+        kind: 'workspace',
+        workspacePath,
+        entryFileName: resolveWorkspaceSketchEntryFileName(currentTab),
+        dirtyFiles: collectWorkspaceToolchainDirtyFiles(workspacePath),
+      };
+    }
+
+    return {
+      kind: 'inline',
+      fileName: currentTab?.name || 'sketch.ino',
+      code: currentCode,
+    };
+  }
+
   async function runVerifySketch(options: { board: string; busyAction: string; title: string; detail: string; successMessage?: string }) {
-    if (!activeTab) {
+    if (!activeTab && !workspacePath) {
       return false;
     }
 
@@ -5161,10 +6066,18 @@ export function IDEWorkspace({
       return false;
     }
 
+    const sketchSource = createToolchainSketchSource();
+    if (!(await ensureProjectBuildReady(sketchSource))) {
+      return false;
+    }
+
     verifyInProgressRef.current = true;
     setBusyAction(options.busyAction);
     openConsolePanel('output');
-    pushConsole(`Compiling ${activeTab.name} for ${getBoardOptionLabel(options.board)}...`);
+    const compileSubject = sketchSource.kind === 'workspace'
+      ? `Project ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
+      : activeTab?.name || 'current file';
+    pushConsole(`Compiling ${compileSubject} for ${getBoardOptionLabel(options.board)}...`);
     const toastId = pushToast(options.title, 'info', undefined, {
       detail: options.detail,
       persistent: true,
@@ -5175,6 +6088,7 @@ export function IDEWorkspace({
       const result = await window.tantalum.toolchain.compile({
         code: editorValue,
         board: options.board,
+        sketchSource,
       });
 
       if (!result.success) {
@@ -5191,13 +6105,13 @@ export function IDEWorkspace({
       pushConsole(normalizeOutput(result.output || 'Verification finished.'), 'success');
       finishToast(toastId, {
         message: options.successMessage || `Verified ${result.filename}`,
-        detail: 'Sketch compiled successfully.',
+        detail: 'Project compiled successfully.',
         tone: 'success',
         progress: 100,
       });
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to verify sketch.';
+      const message = error instanceof Error ? error.message : 'Unable to verify Project.';
       pushConsole(message, 'error');
       finishToast(toastId, {
         message: 'Verification failed',
@@ -5223,11 +6137,13 @@ export function IDEWorkspace({
         profileId: row.profileId,
         fingerprint: row.fingerprint,
         cloudBoardId: row.cloudBoardId,
+        sourceCodeVisibility: row.sourceCodeVisibility || 'private',
       },
     };
   }
 
   function localBoardSourceIdentity(row: LocalBoardRow) {
+    const linkedCloudBoard = row.cloudBoardId ? boards.find((board) => board.$id === row.cloudBoardId) ?? null : null;
     return {
       boardName: localBoardDisplayName(row),
       fqbn: row.fqbn,
@@ -5235,7 +6151,70 @@ export function IDEWorkspace({
       profileId: row.profileId,
       fingerprint: row.fingerprint,
       cloudBoardId: row.cloudBoardId,
+      sourceCodeVisibility: linkedCloudBoard?.sourceCodeVisibility || row.sourceCodeVisibility || 'private',
     };
+  }
+
+  async function applyBoardCodeVisibility(target: BoardCodeTarget, visibility: 'private' | 'public') {
+    const result = await window.tantalum.toolchain.setBoardCodeVisibility({
+      visibility,
+      board: target.board,
+    });
+    if (!result.success) {
+      throw new Error(result.error);
+    }
+    return result;
+  }
+
+  async function handleSetLocalBoardCodeVisibility(row: LocalBoardRow, visibility: 'private' | 'public') {
+    if (!row.profileId || !row.profile) {
+      pushToast('Save this local board before changing code visibility.', 'info');
+      return;
+    }
+    const previousVisibility = row.sourceCodeVisibility || 'private';
+    setBusyAction(`code-visibility:${row.key}`);
+    try {
+      const saveResult = await window.tantalum.toolchain.saveLocalBoardProfile({
+        ...row.profile,
+        sourceCodeVisibility: visibility,
+      });
+      if (!saveResult.success) {
+        throw new Error(saveResult.error);
+      }
+      setLocalBoardProfiles((current) => current.map((profile) => (profile.id === saveResult.profile.id ? saveResult.profile : profile)));
+      await applyBoardCodeVisibility(localBoardCodeTarget({ ...row, sourceCodeVisibility: visibility }), visibility);
+      pushToast(`Board code is now ${visibility}.`, 'success');
+    } catch (error) {
+      await window.tantalum.toolchain.saveLocalBoardProfile({
+        ...row.profile,
+        sourceCodeVisibility: previousVisibility,
+      }).catch(() => undefined);
+      const message = error instanceof Error ? error.message : 'Unable to update board code visibility.';
+      pushToast('Unable to update code visibility.', 'error', undefined, { detail: message });
+      pushConsole(message, 'error');
+    } finally {
+      setBusyAction(null);
+      await refreshLocalBoardProfiles();
+    }
+  }
+
+  async function handleSetCloudBoardCodeVisibility(board: BoardDocument, visibility: 'private' | 'public') {
+    setBusyAction(`code-visibility:${board.$id}`);
+    try {
+      await updateBoard(board.$id, {
+        sourceCodeVisibility: visibility,
+        updatedAt: new Date().toISOString(),
+      });
+      await applyBoardCodeVisibility(remoteBoardCodeTarget({ ...board, sourceCodeVisibility: visibility }, selectedBoardLinkedLocalRow), visibility);
+      await refreshBoardsList({ bypassCache: true });
+      pushToast(`Board code is now ${visibility}.`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to update board code visibility.';
+      pushToast('Unable to update code visibility.', 'error', undefined, { detail: message });
+      pushConsole(message, 'error');
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function remoteBoardCodeTarget(board: BoardDocument, linkedLocalRow: LocalBoardRow | null = null): BoardCodeTarget {
@@ -5249,6 +6228,7 @@ export function IDEWorkspace({
         profileId: linkedLocalRow?.profileId,
         fingerprint: linkedLocalRow?.fingerprint,
         cloudBoardId: board.$id,
+        sourceCodeVisibility: board.sourceCodeVisibility || 'private',
       },
     };
   }
@@ -5260,7 +6240,7 @@ export function IDEWorkspace({
       case 'local-history':
         return 'local upload source snapshot';
       case 'hardware-ai':
-        return 'reconstructed source project';
+        return 'approximate source project from firmware evidence';
       case 'hardware-binary':
         return 'firmware dump artifacts';
       default:
@@ -5292,7 +6272,7 @@ export function IDEWorkspace({
   }
 
   function openBoardCodeDestination(target: BoardCodeTarget) {
-    setBoardCodeDestinationRequest(target);
+    void handleListBoardCodeSnapshots(target);
   }
 
   async function openBoardCodeResult(result: BoardCodeViewResult, mode: 'current' | 'new') {
@@ -5311,34 +6291,42 @@ export function IDEWorkspace({
     }
   }
 
-  async function handleViewBoardCodeDestination(mode: 'current' | 'new') {
-    const target = boardCodeDestinationRequest;
-    if (!target) {
-      return;
+  function formatBoardCodeSnapshotFlash(snapshot: BoardCodeSnapshotSummary) {
+    if (snapshot.flashedVia === 'ota') {
+      return 'OTA';
     }
-
-    let destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
-    if (mode === 'current') {
-      if (!workspacePath) {
-        pushToast('Open a workspace before writing extracted code into it.', 'info');
-        return;
-      }
-      destination = { mode: 'current', workspacePath };
-    } else {
-      const folderResult = await window.tantalum.projects.pickFolder();
-      if (!folderResult.success) {
-        if (!folderResult.canceled) {
-          pushToast(folderResult.error, 'error');
-        }
-        return;
-      }
-      destination = { mode: 'new', folderPath: folderResult.path };
+    if (snapshot.flashedVia === 'usb') {
+      return 'USB';
     }
+    return 'Unknown';
+  }
 
-    setBoardCodeDestinationRequest(null);
+  function formatBoardCodeSnapshotVerification(snapshot: BoardCodeSnapshotSummary, listStatus?: string) {
+    if (snapshot.markerVerifiedFromFirmware) {
+      return 'Verified from board';
+    }
+    if (listStatus === 'available-unverified') {
+      return 'Unverified snapshot';
+    }
+    return 'Cloud snapshot';
+  }
+
+  function formatBoardCodeSnapshotDate(value?: string) {
+    if (!value) {
+      return 'Not recorded';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString();
+  }
+
+  async function handleListBoardCodeSnapshots(target: BoardCodeTarget) {
     const requestId = createToolchainTaskId('code-extraction');
-    const toastId = pushToast(`Viewing code for ${target.label}`, 'info', undefined, {
-      detail: mode === 'new' ? 'Preparing a new workspace...' : 'Preparing extraction folder...',
+    setBoardCodeSnapshotRequest({ target, result: null, loading: true, error: '' });
+    const toastId = pushToast(`Finding code snapshots for ${target.label}`, 'info', undefined, {
+      detail: target.board.port ? 'Reading the Tantalum source marker from firmware...' : 'Checking cloud source snapshots...',
       persistent: true,
       progress: null,
       notificationId: requestId,
@@ -5347,8 +6335,8 @@ export function IDEWorkspace({
     persistToolchainNotification({
       id: requestId,
       kind: 'code-extraction',
-      title: `Viewing code for ${target.label}`,
-      detail: 'Checking source snapshots and board readback options...',
+      title: `Finding code snapshots for ${target.label}`,
+      detail: 'Checking Tantalum source snapshots...',
       status: 'running',
       phase: 'start',
       progress: null,
@@ -5364,14 +6352,14 @@ export function IDEWorkspace({
     setBusyAction('view-code');
     pauseLocalBoardMonitoring();
     try {
-      const result = await window.tantalum.toolchain.viewBoardCode({
+      const result = await window.tantalum.toolchain.listBoardCodeSnapshots({
         requestId,
-        destination,
         board: target.board,
       });
       if (!result.success) {
+        setBoardCodeSnapshotRequest({ target, result: null, loading: false, error: result.error });
         finishToast(toastId, {
-          message: 'Unable to view board code',
+          message: 'Unable to find code snapshots',
           detail: result.error,
           tone: 'error',
           progress: null,
@@ -5380,23 +6368,24 @@ export function IDEWorkspace({
         return;
       }
 
-      await openBoardCodeResult(result, mode);
-      const detail = `${formatBoardCodeSource(result.source)} written to ${result.outputPath || result.workspacePath}.`;
+      setBoardCodeSnapshotRequest({ target, result, loading: false, error: '' });
+      const detail = result.message || (result.snapshots.length > 0 ? `${result.snapshots.length} snapshot${result.snapshots.length === 1 ? '' : 's'} available.` : 'No restorable source snapshots found.');
       finishToast(toastId, {
-        message: `Code view ready for ${target.label}`,
+        message: result.snapshots.length > 0 ? `Snapshots found for ${target.label}` : 'No code snapshot available',
         detail,
-        tone: result.source === 'unavailable' ? 'info' : 'success',
+        tone: result.snapshots.length > 0 ? 'success' : 'info',
         progress: 100,
         progressLabel: '100%',
       });
-      pushConsole(detail, result.source === 'unavailable' ? 'info' : 'success');
+      pushConsole(detail, result.snapshots.length > 0 ? 'success' : 'info');
       if (result.warnings.length > 0) {
         pushConsole(result.warnings.join('\n'), 'info');
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to view board code.';
+      const message = error instanceof Error ? error.message : 'Unable to find board code snapshots.';
+      setBoardCodeSnapshotRequest({ target, result: null, loading: false, error: message });
       finishToast(toastId, {
-        message: 'Unable to view board code',
+        message: 'Unable to find code snapshots',
         detail: message,
         tone: 'error',
         progress: null,
@@ -5409,8 +6398,107 @@ export function IDEWorkspace({
     }
   }
 
+  async function handleRestoreBoardCodeSnapshotDestination(mode: 'current' | 'new') {
+    const request = boardCodeRestoreRequest;
+    if (!request) {
+      return;
+    }
+    const { target, snapshot } = request;
+
+    let destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
+    if (mode === 'current') {
+      if (!workspacePath) {
+        pushToast('Open a Project before restoring code into it.', 'info');
+        return;
+      }
+      destination = { mode: 'current', workspacePath };
+    } else {
+      const folderResult = await window.tantalum.projects.pickFolder();
+      if (!folderResult.success) {
+        if (!folderResult.canceled) {
+          pushToast(folderResult.error, 'error');
+        }
+        return;
+      }
+      destination = { mode: 'new', folderPath: folderResult.path };
+    }
+
+    setBoardCodeRestoreRequest(null);
+    const requestId = createToolchainTaskId('code-extraction');
+    const toastId = pushToast(`Restoring code for ${target.label}`, 'info', undefined, {
+      detail: mode === 'new' ? 'Preparing a new Project...' : 'Preparing restore folder...',
+      persistent: true,
+      progress: null,
+      notificationId: requestId,
+    });
+    boardCodeProgressToastIdsRef.current.set(requestId, toastId);
+    persistToolchainNotification({
+      id: requestId,
+      kind: 'code-extraction',
+      title: `Restoring code for ${target.label}`,
+      detail: 'Downloading source snapshot...',
+      status: 'running',
+      phase: 'start',
+      progress: null,
+      name: target.label,
+      target: target.board.port || target.board.fqbn || target.label,
+      metadata: {
+        boardId: target.board.id || target.board.cloudBoardId,
+        boardType: target.board.fqbn,
+        port: target.board.port,
+      },
+    });
+
+    setBusyAction('view-code');
+    try {
+      const result = await window.tantalum.toolchain.restoreBoardCodeSnapshot({
+        requestId,
+        markerId: snapshot.markerId,
+        markerVerifiedFromFirmware: request.markerVerifiedFromFirmware,
+        destination,
+        board: target.board,
+      });
+      if (!result.success) {
+        finishToast(toastId, {
+          message: 'Unable to restore board code',
+          detail: result.error,
+          tone: 'error',
+          progress: null,
+        });
+        pushConsole(result.error, 'error');
+        return;
+      }
+
+      await openBoardCodeResult(result, mode);
+      const detail = `${formatBoardCodeSource(result.source)} written to ${result.outputPath || result.workspacePath}.`;
+      finishToast(toastId, {
+        message: `Code restored for ${target.label}`,
+        detail,
+        tone: 'success',
+        progress: 100,
+        progressLabel: '100%',
+      });
+      pushConsole(detail, 'success');
+      if (result.warnings.length > 0) {
+        pushConsole(result.warnings.join('\n'), 'info');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to restore board code.';
+      finishToast(toastId, {
+        message: 'Unable to restore board code',
+        detail: message,
+        tone: 'error',
+        progress: null,
+      });
+      pushConsole(message, 'error');
+    } finally {
+      boardCodeProgressToastIdsRef.current.delete(requestId);
+      setBusyAction(null);
+    }
+  }
+
   async function handleCompile() {
-    if (!activeTab) {
+    if (!activeTab && !workspacePath) {
       return;
     }
 
@@ -5426,13 +6514,13 @@ export function IDEWorkspace({
     await runVerifySketch({
       board: compileBoard,
       busyAction: 'compile',
-      title: `Verifying ${activeTab.name}`,
+      title: `Verifying ${activeTab?.name || projectIntegrity.entryFile || 'Project'}`,
       detail: `Compiling for ${getBoardOptionLabel(compileBoard)}...`,
     });
   }
 
   async function handleUploadLocal(targetLocalBoard: LocalBoardRow | null = selectedEditorLocalBoard ?? selectedLocalBoard) {
-    if (!activeTab) {
+    if (!activeTab && !workspacePath) {
       return;
     }
 
@@ -5460,8 +6548,8 @@ export function IDEWorkspace({
       const verified = await runVerifySketch({
         board: targetLocalBoard.fqbn,
         busyAction: 'verify-before-upload',
-        title: `Verifying ${activeTab.name}`,
-        detail: `Checking ${activeTab.name} before uploading to ${boardName}...`,
+        title: `Verifying ${activeTab?.name || projectIntegrity.entryFile || 'Project'}`,
+        detail: `Checking ${activeTab?.name || projectIntegrity.entryFile || 'Project'} before uploading to ${boardName}...`,
         successMessage: 'Verification passed',
       });
 
@@ -5472,7 +6560,7 @@ export function IDEWorkspace({
 
     setBusyAction('prepare-upload');
     openConsolePanel('output');
-    pushConsole(`Preparing USB upload for ${activeTab.name}...`);
+    pushConsole(`Preparing USB upload for ${activeTab?.name || projectIntegrity.entryFile || 'Project'}...`);
 
     let uploadBoard: LocalBoardRow;
     try {
@@ -5589,11 +6677,19 @@ export function IDEWorkspace({
     }
 
     const notificationId = createToolchainTaskId('usb-upload');
+    const sketchSource = createToolchainSketchSource();
+    if (!(await ensureProjectBuildReady(sketchSource))) {
+      return;
+    }
+    const uploadSubject = sketchSource.kind === 'workspace'
+      ? `Project ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
+      : activeTab?.name || 'current file';
+    const uploadFileName = activeTab?.name || (sketchSource.kind === 'workspace' ? sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE : 'current file');
     persistToolchainNotification({
       id: notificationId,
       kind: 'usb-upload',
       title: `Uploading to ${boardName}`,
-      detail: `Uploading ${activeTab.name} on ${uploadBoard.port}...`,
+      detail: `Uploading ${uploadSubject} on ${uploadBoard.port}...`,
       status: 'running',
       phase: 'upload',
       progress: null,
@@ -5602,11 +6698,11 @@ export function IDEWorkspace({
       metadata: {
         board: uploadBoard.fqbn,
         port: uploadBoard.port,
-        fileName: activeTab.name,
+        fileName: uploadFileName,
       },
     });
     const toastId = pushToast(`Uploading to ${boardName}`, 'info', undefined, {
-      detail: `Uploading ${activeTab.name} on ${uploadBoard.port}...`,
+      detail: `Uploading ${uploadSubject} on ${uploadBoard.port}...`,
       persistent: true,
       progress: null,
       notificationId,
@@ -5625,7 +6721,7 @@ export function IDEWorkspace({
       notificationMetadata: {
         board: uploadBoard.fqbn,
         port: uploadBoard.port,
-        fileName: activeTab.name,
+        fileName: uploadFileName,
       },
       progressMode: 'usb-upload',
     };
@@ -5633,30 +6729,49 @@ export function IDEWorkspace({
     pauseLocalBoardMonitoring();
     setBusyAction('upload-local');
     openConsolePanel('output');
-    pushConsole(`Uploading ${activeTab.name} to ${boardName} on ${uploadBoard.port}...`);
+    pushConsole(`Uploading ${uploadSubject} to ${boardName} on ${uploadBoard.port}...`);
 
     let sourceSnapshot: BoardCodeSourceSnapshotInput | null = null;
-    try {
-      sourceSnapshot = await buildBoardCodeSourceSnapshot(boardName, {
-        operation: 'usb-upload',
-        boardType: uploadBoard.fqbn,
-        port: uploadBoard.port,
-        profileId: uploadBoard.profileId,
-        cloudBoardId: uploadBoard.cloudBoardId,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot for upload history.';
-      pushConsole(`Source snapshot skipped: ${message}`, 'info');
+    let sourceRestoreMarker: SourceRestoreMarker | null = null;
+    const sourceSnapshotsEnabled = uiPreferences.sourceSnapshotsEnabled !== false;
+    if (sourceSnapshotsEnabled) {
+      try {
+        sourceSnapshot = await buildBoardCodeSourceSnapshot(boardName, {
+          operation: 'usb-upload',
+          boardType: uploadBoard.fqbn,
+          port: uploadBoard.port,
+          profileId: uploadBoard.profileId,
+          cloudBoardId: uploadBoard.cloudBoardId,
+          uploadId: notificationId,
+          sourceCodeVisibility: localBoardSourceIdentity(uploadBoard).sourceCodeVisibility,
+          flashedVia: 'usb',
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot for upload history.';
+        pushConsole(`Source snapshot skipped: ${message}`, 'info');
+      }
+    } else {
+      pushConsole('Source snapshots are disabled in Settings; exact View Code restore will not be available for this upload.', 'info');
     }
 
     let result;
     try {
+      if (sourceSnapshotsEnabled) {
+        sourceRestoreMarker = await prepareCloudSourceRestoreMarker({
+          sourceSnapshot,
+          identity: localBoardSourceIdentity(uploadBoard),
+          operation: 'usb-upload',
+          uploadId: notificationId,
+        });
+      }
       result = await window.tantalum.toolchain.uploadLocalSketch({
         code: editorValue,
         board: uploadBoard.fqbn,
         port: uploadBoard.port,
+        sketchSource,
         uploadId: notificationId,
         cloudRuntime: linkedCloudRuntime,
+        ...(sourceRestoreMarker ? { sourceRestoreMarker } : {}),
         ...(sourceSnapshot ? { sourceSnapshot, sourceIdentity: localBoardSourceIdentity(uploadBoard) } : {}),
       });
 
@@ -5680,7 +6795,7 @@ export function IDEWorkspace({
             metadata: {
               board: uploadBoard.fqbn,
               port: uploadBoard.port,
-              fileName: activeTab.name,
+              fileName: uploadFileName,
             },
           });
           updateToast(toastId, {
@@ -5698,16 +6813,26 @@ export function IDEWorkspace({
               notificationMetadata: {
                 board: uploadBoard.fqbn,
                 port: uploadBoard.port,
-                fileName: activeTab.name,
+                fileName: uploadFileName,
               },
             };
+          }
+          if (sourceSnapshotsEnabled) {
+            sourceRestoreMarker = await prepareCloudSourceRestoreMarker({
+              sourceSnapshot,
+              identity: localBoardSourceIdentity(uploadBoard),
+              operation: 'usb-upload',
+              uploadId: notificationId,
+            });
           }
           result = await window.tantalum.toolchain.uploadLocalSketch({
             code: editorValue,
             board: uploadBoard.fqbn,
             port: uploadBoard.port,
+            sketchSource,
             uploadId: notificationId,
             cloudRuntime: linkedCloudRuntime,
+            ...(sourceRestoreMarker ? { sourceRestoreMarker } : {}),
             ...(sourceSnapshot ? { sourceSnapshot, sourceIdentity: localBoardSourceIdentity(uploadBoard) } : {}),
           });
         }
@@ -5715,9 +6840,12 @@ export function IDEWorkspace({
     } catch (error) {
       result = {
         success: false as const,
-        error: error instanceof Error ? error.message : 'Unable to upload sketch.',
+        error: error instanceof Error ? error.message : 'Unable to upload Project.',
       };
     } finally {
+      if (sourceRestoreMarker && result && !result.success) {
+        await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker }).catch(() => undefined);
+      }
       if (localBoardUploadProgressRef.current?.uploadId === notificationId) {
         const bufferedLine = localBoardUploadProgressRef.current.lineBuffer.trim();
         if (bufferedLine) {
@@ -5762,7 +6890,7 @@ export function IDEWorkspace({
         metadata: {
           board: uploadBoard.fqbn,
           port: uploadBoard.port,
-          fileName: activeTab.name,
+          fileName: uploadFileName,
         },
       });
       if (blockerActions) {
@@ -5795,12 +6923,18 @@ export function IDEWorkspace({
       }
     }
 
-    pushConsole(result.message || 'Upload finished.', 'success');
+    const sourceRestoreDetail = sourceRestoreMarker && result.sourceRestoreMarkerEmbedded
+      ? 'Source restore marker embedded for View Code.'
+      : sourceSnapshotsEnabled
+        ? 'No firmware source marker was embedded; View Code may only show existing or unverified snapshots.'
+        : 'Source snapshots were disabled; View Code restore will not be available for this upload.';
+    const uploadSuccessDetail = [result.message || 'Upload finished.', sourceRestoreDetail].filter(Boolean).join(' ');
+    pushConsole(uploadSuccessDetail, 'success');
     persistToolchainNotification({
       id: notificationId,
       kind: 'usb-upload',
       title: `Uploaded to ${boardName}`,
-      detail: result.message || 'Upload finished.',
+      detail: uploadSuccessDetail,
       status: 'success',
       phase: 'complete',
       progress: 100,
@@ -5809,12 +6943,12 @@ export function IDEWorkspace({
       metadata: {
         board: uploadBoard.fqbn,
         port: uploadBoard.port,
-        fileName: activeTab.name,
+        fileName: uploadFileName,
       },
     });
     finishToast(toastId, {
       message: `Uploaded to ${boardName}`,
-      detail: result.message || 'Upload finished.',
+      detail: uploadSuccessDetail,
       tone: 'success',
       progress: 100,
     });
@@ -5837,6 +6971,11 @@ export function IDEWorkspace({
 
     if (targetBoard.$id !== selectedBoardId) {
       setSelectedBoardId(targetBoard.$id);
+    }
+
+    const sketchSource = createToolchainSketchSource();
+    if (!(await ensureProjectBuildReady(sketchSource))) {
+      return;
     }
 
     const boardName = targetBoard.name;
@@ -5889,17 +7028,26 @@ export function IDEWorkspace({
     pushConsole(`Building ${targetBoard.name} firmware release ${releaseVersion}...`);
 
     let releaseSourceSnapshotInput: BoardCodeSourceSnapshotInput | null = null;
-    try {
-      releaseSourceSnapshotInput = await buildBoardCodeSourceSnapshot(boardName, {
-        operation: 'firmware-release',
-        boardId: targetBoard.$id,
-        boardType: targetBoard.boardType,
-        firmwareId,
-        version: releaseVersion,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot.';
-      pushConsole(`Source snapshot skipped: ${message}`, 'info');
+    const sourceSnapshotsEnabled = uiPreferences.sourceSnapshotsEnabled !== false;
+    if (sourceSnapshotsEnabled) {
+      try {
+        releaseSourceSnapshotInput = await buildBoardCodeSourceSnapshot(boardName, {
+          operation: 'firmware-release',
+          boardId: targetBoard.$id,
+          cloudBoardId: targetBoard.$id,
+          boardType: targetBoard.boardType,
+          firmwareId,
+          version: releaseVersion,
+          uploadId: notificationId,
+          sourceCodeVisibility: targetBoard.sourceCodeVisibility || 'private',
+          flashedVia: 'ota',
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to prepare source snapshot.';
+        pushConsole(`Source snapshot skipped: ${message}`, 'info');
+      }
+    } else {
+      pushConsole('Source snapshots are disabled in Settings; exact View Code restore will not be available for this firmware release.', 'info');
     }
 
     const secretResult = await window.tantalum.secrets.getBoardSecrets(targetBoard.$id);
@@ -5919,6 +7067,48 @@ export function IDEWorkspace({
       return;
     }
 
+    let releaseSourceRestoreMarker: (SourceRestoreMarker & { sourceSnapshotChecksum?: string; sourceSnapshotManifest?: Record<string, unknown>; createdAt?: string }) | null = null;
+    if (sourceSnapshotsEnabled) {
+      try {
+        releaseSourceRestoreMarker = await prepareCloudSourceRestoreMarker({
+          sourceSnapshot: releaseSourceSnapshotInput,
+          identity: {
+            boardName,
+            fqbn: targetBoard.boardType,
+            boardType: targetBoard.boardType,
+            cloudBoardId: targetBoard.$id,
+            sourceCodeVisibility: targetBoard.sourceCodeVisibility || 'private',
+          },
+          operation: 'firmware-release',
+          uploadId: notificationId,
+          firmwareId,
+          metadata: {
+            boardId: targetBoard.$id,
+            boardName,
+            boardType: targetBoard.boardType,
+            firmwareId,
+            version: releaseVersion,
+            sourceCodeVisibility: targetBoard.sourceCodeVisibility || 'private',
+            flashedVia: 'ota',
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unable to prepare cloud source restore marker.';
+        setBusyAction(null);
+        pushConsole(message, 'error');
+        const failedProgressTask = finishFirmwareReleaseProgressTask(notificationId, {
+          detail: message,
+        }, 'error');
+        finishToast(toastId, {
+          message: 'Firmware upload canceled.',
+          detail: message,
+          tone: 'error',
+          progress: failedProgressTask?.progress ?? initialProgress,
+        });
+        return;
+      }
+    }
+
     let compileResult;
     try {
       updateFirmwareReleaseProgress(notificationId, {
@@ -5930,6 +7120,8 @@ export function IDEWorkspace({
         code: editorValue,
         board: targetBoard.boardType,
         compileId: notificationId,
+        sketchSource,
+        sourceRestoreMarker: releaseSourceRestoreMarker,
         cloudRuntime: {
           boardId: targetBoard.$id,
           boardName: targetBoard.name,
@@ -5958,6 +7150,9 @@ export function IDEWorkspace({
     }
 
     if (!compileResult.success) {
+      if (releaseSourceRestoreMarker) {
+        await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
+      }
       setBusyAction(null);
       pushConsole(compileResult.error, 'error');
       const failedProgressTask = finishFirmwareReleaseProgressTask(notificationId, {
@@ -5988,7 +7183,12 @@ export function IDEWorkspace({
       return;
     }
 
-    pushConsole(`Build complete: ${compileResult.filename} (${formatBytes(compileResult.binSize)}).`, 'success');
+    const releaseSourceRestoreDetail = releaseSourceRestoreMarker && compileResult.sourceRestoreMarkerEmbedded
+      ? 'Source restore marker embedded for View Code.'
+      : sourceSnapshotsEnabled
+        ? 'No firmware source marker was embedded; View Code may only show existing or unverified snapshots.'
+        : 'Source snapshots were disabled; View Code restore will not be available for this firmware release.';
+    pushConsole(`Build complete: ${compileResult.filename} (${formatBytes(compileResult.binSize)}). ${releaseSourceRestoreDetail}`, 'success');
     updateFirmwareReleaseProgress(notificationId, {
       phase: 'checksum',
       detail: FIRMWARE_RELEASE_PHASE_CONFIG.checksum.fallbackDetail,
@@ -6029,7 +7229,14 @@ export function IDEWorkspace({
         manifest: Record<string, unknown>;
         createdAt: string;
       } | null = null;
-      if (releaseSourceSnapshotInput && appwriteConfig.firmwareSourceBucketId) {
+      if (releaseSourceRestoreMarker?.sourceSnapshotFileId) {
+        uploadedSourceSnapshot = {
+          fileId: releaseSourceRestoreMarker.sourceSnapshotFileId,
+          checksum: releaseSourceRestoreMarker.sourceSnapshotChecksum || releaseSourceRestoreMarker.snapshotChecksum,
+          manifest: releaseSourceRestoreMarker.sourceSnapshotManifest || {},
+          createdAt: releaseSourceRestoreMarker.createdAt || new Date().toISOString(),
+        };
+      } else if (releaseSourceSnapshotInput && appwriteConfig.firmwareSourceBucketId) {
         pushConsole('Saving firmware source snapshot...');
         const snapshotResult = await window.tantalum.toolchain.createSourceSnapshot({
           sourceSnapshot: releaseSourceSnapshotInput,
@@ -6074,6 +7281,15 @@ export function IDEWorkspace({
           binSize: compileResult.binSize,
         },
       });
+      if (releaseSourceRestoreMarker) {
+        const promoteResult = await window.tantalum.toolchain.promoteSourceRestoreMarker({
+          sourceRestoreMarker: releaseSourceRestoreMarker,
+          firmwareId,
+        });
+        if (!promoteResult.success) {
+          pushConsole(`Source restore marker promotion failed: ${promoteResult.error}`, 'info');
+        }
+      }
 
       updateFirmwareReleaseProgress(notificationId, {
         phase: 'queue',
@@ -6085,11 +7301,12 @@ export function IDEWorkspace({
       setReleaseModalOpen(false);
       setReleaseNotes('');
       setReleaseVersion(nextSemver(releaseVersion));
+      const releaseUploadDetail = `Firmware uploaded to Appwrite storage and queued for OTA deployment. ${releaseSourceRestoreDetail}`;
       persistToolchainNotification({
         id: notificationId,
         kind: 'firmware-upload',
         title: `Uploaded ${boardName} ${releaseVersion}`,
-        detail: 'Firmware uploaded to Appwrite storage and queued for OTA deployment.',
+        detail: releaseUploadDetail,
         status: 'success',
         phase: 'complete',
         progress: 100,
@@ -6104,18 +7321,21 @@ export function IDEWorkspace({
       });
       finishFirmwareReleaseProgressTask(notificationId, {
         phase: 'complete',
-        detail: 'Firmware uploaded to Appwrite storage and queued for OTA deployment.',
+        detail: releaseUploadDetail,
         progress: 100,
       }, 'success');
       finishToast(toastId, {
         message: `Release ${releaseVersion} uploaded for ${boardName}`,
-        detail: 'Firmware uploaded to Appwrite storage and queued for OTA deployment.',
+        detail: releaseUploadDetail,
         tone: 'success',
         progress: 100,
         progressLabel: '100%',
       });
-      pushConsole('Firmware uploaded to Appwrite storage and queued for OTA deployment.', 'success');
+      pushConsole(releaseUploadDetail, 'success');
     } catch (error) {
+      if (releaseSourceRestoreMarker) {
+        await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
+      }
       const message = error instanceof Error ? error.message : 'Firmware upload failed.';
       pushConsole(message, 'error');
       pushToast('Firmware upload failed.', 'error', undefined, { detail: message });
@@ -6528,7 +7748,7 @@ export function IDEWorkspace({
       await refreshBoardsList();
       setSelectedBoardId(created.board.$id);
       setBoardModalOpen(false);
-      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32' });
+      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32', sourceCodeVisibility: 'private' });
       pushToast(`Added ${created.board.name}`, 'success');
       pushConsole(`Board ${created.board.name} created. Provisioning secrets stored locally on this machine.`, 'success');
     } catch (error) {
@@ -6579,7 +7799,14 @@ export function IDEWorkspace({
       const created = await createBoard({
         name: localBoardDisplayName(liveRow),
         boardType: liveRow.fqbn,
+        sourceCodeVisibility: liveRow.sourceCodeVisibility === 'public' ? 'public' : 'private',
       }, user);
+      if ((created.board.sourceCodeVisibility || 'private') !== (liveRow.sourceCodeVisibility || 'private')) {
+        created.board = await updateBoard(created.board.$id, {
+          sourceCodeVisibility: liveRow.sourceCodeVisibility === 'public' ? 'public' : 'private',
+          updatedAt: new Date().toISOString(),
+        });
+      }
 
       if (!created.apiToken || !created.commandSecret || !created.mqttTopic || !created.provisioningPop) {
         throw new Error('Cloud board secrets were not returned. Check the board-admin function configuration.');
@@ -6611,6 +7838,7 @@ export function IDEWorkspace({
         fingerprint: liveRow.fingerprint,
         cloudBoardId: created.board.$id,
         cloudLinkedAt: now,
+        sourceCodeVisibility: liveRow.sourceCodeVisibility || 'private',
       });
       if (!saveResult.success) {
         throw new Error(saveResult.error);
@@ -7009,6 +8237,9 @@ export function IDEWorkspace({
         delete next[row.key];
         return next;
       });
+      if (row.source === 'detected') {
+        setDetectedLocalBoards((current) => current.filter((detection) => localBoardDetectedKey(detection) !== row.key));
+      }
       setManualLocalBoardKeys((current) => current.filter((key) => key !== row.key));
       setExpandedLocalBoardKeys((current) => {
         const next = { ...current };
@@ -8096,7 +9327,7 @@ export function IDEWorkspace({
         break;
       case 'find-in-workspace':
         if (!workspacePath) {
-          pushToast('Open a folder before searching the workspace.', 'info');
+          pushToast('Open a Project before searching.', 'info');
           return;
         }
         onWorkspaceSearchOpenChange(true);
@@ -8413,12 +9644,15 @@ export function IDEWorkspace({
     }
 
     closeTabsForPath(targetPath, type);
+    void refreshProjectIntegrity();
+    refreshFileTree();
     pushToast(`Removed ${fileNameFromPath(targetPath)}`, 'info');
     void refreshGitChangeIndicator();
   }
 
   function handleTreeRenamed(oldPath: string, newPath: string) {
     remapOpenTabs(oldPath, newPath);
+    void refreshProjectIntegrity();
     refreshFileTree();
     void refreshGitChangeIndicator();
   }
@@ -8440,6 +9674,14 @@ export function IDEWorkspace({
     }
 
     refreshFileTree();
+    void refreshProjectIntegrity().then((integrity) => {
+      const rootName = fileNameFromPath(createdPath).toLowerCase();
+      if (integrity.conflictFiles.some((name) => name.toLowerCase() === rootName)) {
+        pushToast('Only the Project entry file can define setup() or loop().', 'error', undefined, {
+          detail: `${fileNameFromPath(createdPath)} is not the current entry point.`,
+        });
+      }
+    });
     void refreshGitChangeIndicator();
   }
 
@@ -8453,11 +9695,13 @@ export function IDEWorkspace({
       void window.tantalum.fs.addRecentFile(newPath);
     }
 
+    void refreshProjectIntegrity();
     refreshFileTree();
     void refreshGitChangeIndicator();
   }
 
   function handleTreeMoved() {
+    void refreshProjectIntegrity();
     refreshFileTree();
     void refreshGitChangeIndicator();
   }
@@ -8685,6 +9929,47 @@ export function IDEWorkspace({
     }
   }
 
+  function applyAgentRestoredFilesToEditorTabs(restoredFiles: AgentRestoredFile[]) {
+    const restoredMap = new Map(restoredFiles.map((file) => [normalizeFileTabPath(file.absolutePath), file]));
+    if (restoredMap.size === 0) {
+      return;
+    }
+
+    const nextTabs = tabsRef.current
+      .map((tab) => {
+        const restored = restoredMap.get(normalizeFileTabPath(tab.path));
+        const baseTab = stripFileTabAgentPreview(tab);
+        if (!restored) {
+          return baseTab;
+        }
+
+        if (!restored.exists || restored.isDirectory || restored.content === null) {
+          return null;
+        }
+
+        return syncFileTabDirtyState({
+          ...baseTab,
+          content: restored.content,
+          savedContent: restored.content,
+          isDirty: false,
+          isDeleted: false,
+          fileState: 'saved' as FileTabState,
+          type: 'file' as const,
+        });
+      })
+      .filter((tab): tab is FileTab => Boolean(tab));
+
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+
+    const activePath = activeTabIdRef.current;
+    const nextActiveTab = (activePath ? nextTabs.find((tab) => tab.id === activePath || isSameFileTabPath(tab.path, activePath)) : null) ?? nextTabs[0] ?? null;
+    activeTabIdRef.current = nextActiveTab?.id ?? null;
+    editorValueRef.current = nextActiveTab?.content ?? '';
+    setActiveTabId(nextActiveTab?.id ?? null);
+    setEditorValue(nextActiveTab?.content ?? '');
+  }
+
   function handleAgentChangesPrepared(review: AgentPreparedReview) {
     if (!workspacePath || review.files.length === 0) {
       return;
@@ -8720,6 +10005,23 @@ export function IDEWorkspace({
     setPendingAgentReview(nextReview);
     refreshAgentPreviewTabs(nextReview);
     openAgentReviewFilesInEditor(nextReview, review.files);
+    if (review.userMessageId) {
+      void window.tantalum.agent.recordRestorePoint({
+        workspacePath,
+        threadId: review.threadId,
+        userMessageId: review.userMessageId,
+        userMessageCreatedAt: review.userMessageCreatedAt ?? null,
+        reviewId,
+        status: 'pending',
+        files: review.files,
+      }).then((result) => {
+        if (result.success) {
+          setAgentRestorePoints(result.restorePoints);
+        } else {
+          pushToast(result.error, 'error');
+        }
+      });
+    }
     pushToast(`${nextReview.files.length} Tantalum AI ${nextReview.files.length === 1 ? 'change' : 'changes'} applied. Keep or revert them in the editor.`, 'info');
   }
 
@@ -8964,6 +10266,16 @@ export function IDEWorkspace({
 
       clearAgentPreviewTabs(review, approved);
       setPendingAgentReview(null);
+      const restoreStatusResult = await window.tantalum.agent.updateRestoreReviewStatus({
+        workspacePath,
+        reviewId: review.id,
+        status: approved ? 'kept' : 'reverted',
+      });
+      if (restoreStatusResult.success) {
+        setAgentRestorePoints(restoreStatusResult.restorePoints);
+      } else {
+        pushToast(restoreStatusResult.error, 'error');
+      }
       refreshFileTree();
       void refreshGitChangeIndicator();
 
@@ -8979,6 +10291,42 @@ export function IDEWorkspace({
     } finally {
       setResolvingAgentReview(false);
     }
+  }
+
+  async function restoreAgentThreadToMessage(message: AgentThreadMessage, currentMessages: AgentThreadMessage[]) {
+    if (!workspacePath) {
+      throw new Error('Open a Project before restoring agent changes.');
+    }
+
+    const userMessageIds = currentMessages.filter((entry) => entry.role === 'user').map((entry) => entry.id);
+    const restoreResult = await window.tantalum.agent.restoreToMessage({
+      workspacePath,
+      threadId: message.threadId,
+      messageId: message.id,
+      messageIdsInOrder: userMessageIds,
+    });
+    if (!restoreResult.success) {
+      throw new Error(restoreResult.error);
+    }
+
+    applyAgentRestoredFilesToEditorTabs(restoreResult.restoredFiles);
+    if (pendingAgentReview?.threadId === message.threadId) {
+      setPendingAgentReview(null);
+    }
+    setAgentRestorePoints(restoreResult.restorePoints);
+    refreshFileTree();
+    void refreshGitChangeIndicator();
+    const truncateResult = await truncateAgentThreadMessages(message.threadId, message.id);
+
+    const restoredCount = restoreResult.restoredFiles.length;
+    const content = `Restored ${restoredCount} agent-touched ${restoredCount === 1 ? 'file' : 'files'} and removed ${truncateResult.removedCount} later ${truncateResult.removedCount === 1 ? 'message' : 'messages'}.`;
+    pushToast(content, 'success');
+    pushConsole(content, 'success');
+
+    return {
+      messages: truncateResult.messages,
+      restorePoints: restoreResult.restorePoints,
+    };
   }
 
   const activeExplorerPath = activeTab && !activeTab.path.startsWith('untitled:') ? activeTab.path : null;
@@ -9155,6 +10503,10 @@ export function IDEWorkspace({
   }, [workspacePath]);
 
   useEffect(() => {
+    projectIntegrityRef.current = projectIntegrity;
+  }, [projectIntegrity]);
+
+  useEffect(() => {
     tabsRef.current = syncedTabs;
   }, [syncedTabs]);
 
@@ -9240,6 +10592,23 @@ export function IDEWorkspace({
       window.clearTimeout(handle);
     };
   }, [activeEditorFilePath, activeEditorLanguage, refreshActiveEditorDiagnostics]);
+
+  useEffect(() => {
+    if (!workspacePath || !activeEditorFilePath || !isRootInoProjectFile(activeEditorFilePath, workspacePath)) {
+      return;
+    }
+
+    const handle = window.setTimeout(() => {
+      void refreshProjectIntegrity(workspacePath).then(() => refreshFileTree());
+    }, 250);
+
+    return () => {
+      window.clearTimeout(handle);
+    };
+  // The integrity scanner reads current refs so the live check does not need to
+  // restart for every helper function identity change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEditorFilePath, editorValue, workspacePath]);
 
   useEffect(() => {
     handleSelectedBoardChange(selectedBoard);
@@ -9583,7 +10952,7 @@ export function IDEWorkspace({
       tabSize: uiPreferences.editorTabSize,
       wordWrap: uiPreferences.editorWordWrap,
     });
-    updateArduinoCppDiagnostics(monaco, editorInstance.getModel(), activeEditorFilePath);
+    refreshActiveEditorDiagnostics(activeEditorFilePath);
     editorSelectionDisposableRef.current?.dispose();
     editorSelectionDisposableRef.current = editorInstance.onDidChangeCursorSelection(() => {
       refreshActiveEditorSelection();
@@ -9661,6 +11030,10 @@ export function IDEWorkspace({
               <dt>Local link</dt>
               <dd>{selectedBoardLinkedLocalRow ? `${localBoardDisplayName(selectedBoardLinkedLocalRow)} on ${selectedBoardLinkedLocalRow.port || 'saved port'}` : 'Not linked'}</dd>
             </div>
+            <div>
+              <dt>Code visibility</dt>
+              <dd>{selectedBoard.sourceCodeVisibility === 'public' ? 'Public to signed-in users' : 'Private'}</dd>
+            </div>
           </dl>
           <div className="inline-banner">
             Your WiFi name and password are sent directly over USB, Bluetooth, or SoftAP to the board. They are not uploaded to Tantalum Cloud and are not stored by the IDE.
@@ -9694,6 +11067,16 @@ export function IDEWorkspace({
             >
               <FileCode2 size={14} />
               View code
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleSetCloudBoardCodeVisibility(selectedBoard, selectedBoard.sourceCodeVisibility === 'public' ? 'private' : 'public')}
+              disabled={busyAction === `code-visibility:${selectedBoard.$id}`}
+              title={selectedBoard.sourceCodeVisibility === 'public' ? 'Only your account can restore future snapshots after switching to private.' : 'Any signed-in Tantalum account can restore snapshots from this board marker after switching to public.'}
+            >
+              {busyAction === `code-visibility:${selectedBoard.$id}` ? <LoaderCircle size={14} className="spin" /> : null}
+              Code {selectedBoard.sourceCodeVisibility === 'public' ? 'public' : 'private'}
             </button>
             <button
               className="secondary-button"
@@ -10073,6 +11456,18 @@ export function IDEWorkspace({
                 <FileCode2 size={13} />
                 View code
               </button>
+              {row.profileId ? (
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  onClick={() => void handleSetLocalBoardCodeVisibility(row, row.sourceCodeVisibility === 'public' ? 'private' : 'public')}
+                  disabled={busyAction === `code-visibility:${row.key}`}
+                  title={row.sourceCodeVisibility === 'public' ? 'Only your account can restore future snapshots after switching to private.' : 'Any signed-in Tantalum account can restore snapshots from this board marker after switching to public.'}
+                >
+                  {busyAction === `code-visibility:${row.key}` ? <LoaderCircle size={13} className="spin" /> : null}
+                  Code {row.sourceCodeVisibility === 'public' ? 'public' : 'private'}
+                </button>
+              ) : null}
               <button className="primary-button compact" type="button" onClick={() => void handleSaveLocalBoard(row)} disabled={saveBusy || !canUseBoard}>
                 {saveBusy ? <LoaderCircle size={13} className="spin" /> : null}
                 {row.profileId ? 'Save' : 'Save board'}
@@ -11322,7 +12717,7 @@ export function IDEWorkspace({
             </div>
             <button className="primary-button compact my-projects-detail-open" type="button" onClick={() => void openProjectWorkspace(project)} disabled={!project.exists}>
               <FolderOpen size={15} />
-              Open workspace
+              Open Project
             </button>
           </header>
 
@@ -11359,6 +12754,7 @@ export function IDEWorkspace({
               refreshTrigger={projectTreeRefreshKey}
               headerTitle="Files"
               iconTheme="material"
+              renderIcon={renderWorkspaceFileTreeIcon}
               contextMenu={{ renderMenu: renderFileTreeContextMenu }}
               portalContainer={typeof document === 'undefined' ? null : document.body}
               footer={
@@ -11485,11 +12881,11 @@ export function IDEWorkspace({
         style={workspaceShellStyle}
       >
         <aside className={sidebar === 'explorer' || sidebar === 'my-projects' ? 'left-panel left-panel-tree' : 'left-panel'}>
-          <nav className="left-nav" aria-label="Workspace navigation">
+          <nav className="left-nav" aria-label="Project navigation">
             <div className="left-nav-primary-row">
-              <button className="left-nav-new-sketch-button" type="button" onClick={createNewTab}>
+              <button className="left-nav-new-sketch-button" type="button" onClick={() => void createNewProject()}>
                 <Plus size={16} />
-                New sketch
+                New Project
               </button>
               <button
                 className="left-nav-collapse-button"
@@ -11506,7 +12902,7 @@ export function IDEWorkspace({
             <div id="workspace-left-nav-pages" className="left-nav-pages" hidden={leftNavCollapsed}>
               <button className={sidebar === 'explorer' ? 'active' : ''} type="button" onClick={() => setSidebar('explorer')}>
                 <FolderOpen size={16} />
-                Workspace
+                Project
               </button>
               <button className={sidebar === 'boards' ? 'active' : ''} type="button" onClick={() => setSidebar('boards')}>
                 <Cpu size={16} />
@@ -11563,7 +12959,8 @@ export function IDEWorkspace({
                   refreshTrigger={fileTreeRefreshKey}
                   headerTitle={workspacePath ? fileNameFromPath(workspacePath) : 'Explorer'}
                   iconTheme="material"
-                  contextMenu={{ renderMenu: renderFileTreeContextMenu }}
+                  renderIcon={renderWorkspaceFileTreeIcon}
+                  contextMenu={{ renderMenu: renderWorkspaceFileTreeContextMenu }}
                   portalContainer={typeof document === 'undefined' ? null : document.body}
                   footer={
                     workspacePath ? (
@@ -11599,7 +12996,7 @@ export function IDEWorkspace({
                       [
                         {
                           id: 'open-workspace',
-                          label: 'Open workspace',
+                          label: 'Open Project',
                           icon: <FolderOpen aria-hidden="true" size={14} strokeWidth={1.85} />,
                           onSelect: () => void openFolderPicker(),
                         },
@@ -11909,7 +13306,9 @@ export function IDEWorkspace({
                   cursorBlinking: 'smooth',
                   detectIndentation: true,
                   dragAndDrop: true,
+                  extraEditorClassName: 'tantalum-source-editor',
                   find: { addExtraSpaceOnTop: false },
+                  fixedOverflowWidgets: false,
                   folding: true,
                   foldingHighlight: true,
                   fontFamily: uiPreferences.editorFontFamily,
@@ -12002,18 +13401,18 @@ export function IDEWorkspace({
                     <p>Select a file to edit</p>
                     <button className="secondary-button" type="button" onClick={createNewTab}>
                       <Plus size={16} />
-                      <span>New sketch</span>
+                      <span>New file</span>
                     </button>
                   </div>
                 ) : (
                   <div className="editor-empty-actions">
-                    <button className="editor-empty-action-tile" type="button" onClick={createNewTab}>
+                    <button className="editor-empty-action-tile" type="button" onClick={() => void createNewProject()}>
                       <Plus size={30} />
-                      <span>New sketch</span>
+                      <span>New Project</span>
                     </button>
                     <button className="editor-empty-action-tile" type="button" onClick={() => void openFolderPicker()}>
                       <FolderOpen size={30} />
-                      <span>Open workspace</span>
+                      <span>Open Project</span>
                     </button>
                   </div>
                 )}
@@ -12106,6 +13505,8 @@ export function IDEWorkspace({
                 resolvingReview={resolvingAgentReview}
                 reviewResolutionNotice={agentReviewNotice}
                 onAgentChangesPrepared={handleAgentChangesPrepared}
+                restorePoints={agentRestorePoints}
+                onRestoreToMessage={restoreAgentThreadToMessage}
                 onPreviewAgentFile={(relativePath) => {
                   const change = pendingAgentReview?.files.find((file) => file.path === relativePath);
                   if (change && pendingAgentReview) {
@@ -12351,7 +13752,7 @@ export function IDEWorkspace({
         </div>
       </Modal>
 
-      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current sketch and upload it to Appwrite storage." onClose={() => setReleaseModalOpen(false)}>
+      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current Project and upload it to Appwrite storage." onClose={() => setReleaseModalOpen(false)}>
         <div className="modal-form">
           <label>
             Target board
@@ -12384,25 +13785,91 @@ export function IDEWorkspace({
       </Modal>
 
       <Modal
-        open={Boolean(boardCodeDestinationRequest)}
+        open={Boolean(boardCodeSnapshotRequest)}
         title="View board code"
-        subtitle={boardCodeDestinationRequest ? `Choose where to write code files for ${boardCodeDestinationRequest.label}.` : 'Choose where to write code files.'}
-        size="sm"
-        onClose={() => setBoardCodeDestinationRequest(null)}
+        subtitle={boardCodeSnapshotRequest ? `Exact source snapshots for ${boardCodeSnapshotRequest.target.label}.` : 'Exact source snapshots.'}
+        size="md"
+        onClose={() => setBoardCodeSnapshotRequest(null)}
       >
-        {boardCodeDestinationRequest ? (
+        {boardCodeSnapshotRequest ? (
           <div className="modal-form">
             <div className="inline-banner">
-              Saved source snapshots open as exact source. Firmware readback creates raw artifacts and, when configured, a reconstructed project.
+              View Code restores only source snapshots saved during Tantalum uploads. Boards flashed outside Tantalum cannot be restored from firmware.
+            </div>
+            {boardCodeSnapshotRequest.loading ? renderManagerInlineLoading('Checking source snapshots...') : null}
+            {boardCodeSnapshotRequest.error ? renderManagerInlineError(boardCodeSnapshotRequest.error) : null}
+            {!boardCodeSnapshotRequest.loading && boardCodeSnapshotRequest.result ? (
+              boardCodeSnapshotRequest.result.snapshots.length > 0 ? (
+                <div className="release-list">
+                  {boardCodeSnapshotRequest.result.snapshots.map((snapshot) => (
+                    <article key={snapshot.markerId} className="release-item">
+                      <div>
+                        <strong>{snapshot.status === 'current' ? 'Latest snapshot' : 'Previous snapshot'}</strong>
+                        <span>{snapshot.boardName || boardCodeSnapshotRequest.target.label} • {snapshot.boardType || boardCodeSnapshotRequest.target.board.fqbn}</span>
+                        <span>{formatBoardCodeSnapshotFlash(snapshot)} • {snapshot.visibility === 'public' ? 'Public' : 'Private'} • {formatBoardCodeSnapshotVerification(snapshot, boardCodeSnapshotRequest.result?.status)}</span>
+                        <span>Created {formatBoardCodeSnapshotDate(snapshot.createdAt)}{snapshot.appliedAt ? ` • Applied ${formatBoardCodeSnapshotDate(snapshot.appliedAt)}` : ''}</span>
+                      </div>
+                      <div className="release-actions">
+                        <button
+                          className="primary-button compact"
+                          type="button"
+                          onClick={() => setBoardCodeRestoreRequest({
+                            target: boardCodeSnapshotRequest.target,
+                            snapshot,
+                            markerVerifiedFromFirmware: Boolean(snapshot.markerVerifiedFromFirmware || boardCodeSnapshotRequest.result?.markerVerifiedFromFirmware),
+                          })}
+                          disabled={busyAction === 'view-code'}
+                        >
+                          Restore
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-panel compact">
+                  <FileCode2 size={20} />
+                  <p>{boardCodeSnapshotRequest.result.message || 'No restorable Tantalum source snapshots are available for this board.'}</p>
+                </div>
+              )
+            ) : null}
+            {boardCodeSnapshotRequest.result?.warnings?.length ? (
+              <div className="inline-banner inline-banner-warning">
+                {boardCodeSnapshotRequest.result.warnings.join('\n')}
+              </div>
+            ) : null}
+            <div className="form-actions">
+              <button className="secondary-button" type="button" onClick={() => setBoardCodeSnapshotRequest(null)}>
+                Close
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void handleListBoardCodeSnapshots(boardCodeSnapshotRequest.target)} disabled={busyAction === 'view-code'}>
+                Refresh
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={Boolean(boardCodeRestoreRequest)}
+        title="Restore source snapshot"
+        subtitle={boardCodeRestoreRequest ? `Choose where to restore ${boardCodeRestoreRequest.target.label}.` : 'Choose restore destination.'}
+        size="sm"
+        onClose={() => setBoardCodeRestoreRequest(null)}
+      >
+        {boardCodeRestoreRequest ? (
+          <div className="modal-form">
+            <div className="inline-banner">
+              Restoring {boardCodeRestoreRequest.snapshot.status === 'current' ? 'the latest' : 'the previous'} {formatBoardCodeSnapshotFlash(boardCodeRestoreRequest.snapshot)} snapshot.
             </div>
             <div className="form-actions">
-              <button className="secondary-button" type="button" onClick={() => setBoardCodeDestinationRequest(null)}>
+              <button className="secondary-button" type="button" onClick={() => setBoardCodeRestoreRequest(null)}>
                 Cancel
               </button>
-              <button className="secondary-button" type="button" onClick={() => void handleViewBoardCodeDestination('current')} disabled={!workspacePath || busyAction === 'view-code'}>
+              <button className="secondary-button" type="button" onClick={() => void handleRestoreBoardCodeSnapshotDestination('current')} disabled={!workspacePath || busyAction === 'view-code'}>
                 Current workspace
               </button>
-              <button className="primary-button" type="button" onClick={() => void handleViewBoardCodeDestination('new')} disabled={busyAction === 'view-code'}>
+              <button className="primary-button" type="button" onClick={() => void handleRestoreBoardCodeSnapshotDestination('new')} disabled={busyAction === 'view-code'}>
                 New workspace
               </button>
             </div>

@@ -3524,8 +3524,70 @@ body.panel-resizing-row * {
   cursor: not-allowed;
 }
 
+.board-code-mode-group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.board-code-mode-group > span {
+  color: var(--text-soft);
+  font-size: 0.83rem;
+  font-weight: 700;
+}
+
+.board-code-mode-selector {
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.board-code-mode-selector button {
+  flex: 1 1 145px;
+  min-width: 0;
+  white-space: normal;
+}
+
 .agent-inline-banner {
   margin: 0;
+}
+
+.agent-thread-sync-banner {
+  margin: 4px 10px 8px;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.agent-cloud-sync-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-cloud-sync-banner span {
+  min-width: 0;
+}
+
+.agent-cloud-sync-banner button {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 5px;
+  border: 1px solid rgba(241, 199, 92, 0.24);
+  background: rgba(241, 199, 92, 0.1);
+  color: var(--text);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.agent-cloud-sync-banner button:hover:not(:disabled),
+.agent-cloud-sync-banner button:focus-visible:not(:disabled) {
+  background: rgba(241, 199, 92, 0.16);
+  border-color: rgba(241, 199, 92, 0.34);
+}
+
+.agent-cloud-sync-banner button:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 
 .agent-setup-note {
@@ -4097,6 +4159,7 @@ body.panel-resizing-row * {
 .markdown-renderer {
   display: grid;
   gap: 0.7rem;
+  min-width: 0;
   line-height: 1.6;
 }
 
@@ -4108,19 +4171,104 @@ body.panel-resizing-row * {
   font-size: 0.86em;
 }
 
-.markdown-code-block {
-  position: relative;
-  padding-top: 1.8rem;
+.markdown-code-frame {
+  --markdown-code-surface: color-mix(in srgb, var(--agent-bg, var(--bg-editor)) 94%, var(--agent-text, var(--text)) 6%);
+  --markdown-code-header: color-mix(in srgb, var(--markdown-code-surface) 88%, #000000 12%);
+  --markdown-code-text: #dce8f4;
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0.15rem 0 0.2rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: var(--markdown-code-surface);
+  box-shadow: none;
+}
+
+.markdown-code-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  min-width: 0;
+  padding: 0 8px 0 10px;
+  border-bottom: 0;
+  background: var(--markdown-code-header);
 }
 
 .markdown-code-language {
-  position: absolute;
-  top: 0.55rem;
-  left: 0.75rem;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #aeb9c7;
+  font-family: var(--system-font-family);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  text-transform: none;
+}
+
+.markdown-code-language svg {
+  flex: 0 0 auto;
+  color: inherit;
+}
+
+.markdown-code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #aeb9c7;
+  cursor: pointer;
+}
+
+.markdown-code-copy:hover {
+  background: color-mix(in srgb, var(--markdown-code-surface) 70%, #ffffff 12%);
+  color: #dce8f4;
+}
+
+.markdown-code-frame .markdown-code-block {
+  position: static;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 12px 13px 13px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--markdown-code-text);
+  white-space: pre;
+  word-break: normal;
+}
+
+.markdown-code-frame .markdown-code-block code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-family: "Cascadia Mono Light", "Cascadia Code Light", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 300;
+  font-variation-settings: "wght" 300;
+  font-synthesis-weight: none;
+  line-height: 1.58;
+  white-space: inherit;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .release-item {
@@ -4255,6 +4403,11 @@ body.panel-resizing-row * {
 .inline-banner-warning {
   background: rgba(241, 199, 92, 0.08);
   border-color: rgba(241, 199, 92, 0.2);
+}
+
+.inline-banner-info {
+  background: rgba(89, 166, 255, 0.08);
+  border-color: rgba(89, 166, 255, 0.2);
 }
 
 .inline-banner-error {
@@ -6097,8 +6250,72 @@ body.panel-resizing-row * {
 }
 
 .workspace-tree-panel .sft-tree-node {
+  position: relative;
   width: 100%;
   min-height: 28px;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-compiled-directory) {
+  order: 0;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-entry-sketch) {
+  order: 1;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-compiled-file) {
+  order: 2;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-section-workspace) {
+  order: 10;
+}
+
+.workspace-tree-panel .sft-tree-node-wrapper:has(.workspace-tree-lifecycle-conflict) .sft-tree-node-name,
+.workspace-tree-panel .sft-tree-node-wrapper:has(.workspace-tree-lifecycle-conflict) .sft-node-name {
+  color: var(--danger, #ff6b6b);
+}
+
+.workspace-tree-panel .workspace-tree-node-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.workspace-tree-panel .workspace-tree-file-icon,
+.workspace-tree-panel .workspace-tree-folder-icon {
+  object-fit: contain;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-section-boundary) {
+  margin-top: 28px;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-section-boundary)::before {
+  position: absolute;
+  top: -19px;
+  left: 12px;
+  z-index: 1;
+  padding: 0 7px 0 0;
+  content: "Not compiled";
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.workspace-tree-panel .sft-tree-content > .sft-tree-node-wrapper:has(.workspace-tree-section-boundary)::after {
+  position: absolute;
+  top: -12px;
+  left: 96px;
+  right: 12px;
+  height: 1px;
+  content: "";
+  background: color-mix(in srgb, var(--line) 70%, transparent);
 }
 
 .workspace-tree-panel .sft-tree-footer {
@@ -7271,6 +7488,7 @@ body.panel-resizing-row * {
   white-space: nowrap;
 }
 
+.tantalum-ai-thread-state-preparing,
 .tantalum-ai-thread-state-running,
 .tantalum-ai-thread-state-review-resolving {
   color: #4da3ff;
@@ -7310,7 +7528,8 @@ body.panel-resizing-row * {
   margin-left: 8px;
 }
 
-.tantalum-ai-thread-item:hover .tantalum-ai-thread-item-actions {
+.tantalum-ai-thread-item:hover .tantalum-ai-thread-item-actions,
+.tantalum-ai-thread-item.running .tantalum-ai-thread-item-actions {
   opacity: 1;
 }
 
@@ -7330,6 +7549,11 @@ body.panel-resizing-row * {
 .tantalum-ai-thread-item-actions button:hover {
   background: rgba(255, 255, 255, 0.12);
   color: #ffffff;
+}
+
+.tantalum-ai-thread-item-actions button:disabled {
+  cursor: progress;
+  opacity: 0.7;
 }
 
 .tantalum-ai-thread-show-more {
@@ -7631,8 +7855,7 @@ body.panel-resizing-row * {
   word-break: break-word;
 }
 
-.tantalum-ai-bubble-content pre,
-.tantalum-ai-bubble-content .markdown-code-block {
+.tantalum-ai-bubble-content pre {
   max-width: 100%;
   white-space: pre-wrap;
   overflow: visible;
@@ -7640,8 +7863,26 @@ body.panel-resizing-row * {
   word-break: break-word;
 }
 
-.tantalum-ai-bubble-content .markdown-code-block code {
+.tantalum-ai-bubble-content .markdown-code-frame {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tantalum-ai-bubble-content .markdown-code-frame .markdown-code-block {
+  width: 100%;
+  min-width: 0;
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.tantalum-ai-bubble-content .markdown-code-frame .markdown-code-block code {
   display: block;
+  width: max-content;
+  min-width: 100%;
   white-space: inherit;
 }
 
@@ -7656,38 +7897,50 @@ body.panel-resizing-row * {
   overflow-wrap: anywhere;
 }
 
+.agent-user-message-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: -2px 0 3px;
+  min-height: 18px;
+}
+
+.agent-message-restore-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: rgba(248, 251, 255, 0.72);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.agent-message-restore-btn:hover:not(:disabled),
+.agent-message-restore-btn:focus-visible:not(:disabled) {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.agent-message-restore-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
 .tantalum-ai-bubble-content .markdown-command-block,
 .markdown-command-block {
   --markdown-command-surface: color-mix(in srgb, var(--agent-bg, var(--bg-editor)) 94%, var(--agent-text, var(--text)) 6%);
-  display: grid;
-  gap: 0;
-  margin: 0.15rem 0 0.2rem;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
   background: var(--markdown-command-surface);
-  box-shadow: none;
   color: #dce8f4;
-  overflow: hidden;
-  white-space: normal;
+}
+
+.markdown-command-block .markdown-code-toolbar {
+  background: color-mix(in srgb, var(--markdown-command-surface) 88%, #000000 12%);
 }
 
 .markdown-command-block .markdown-code-language {
-  position: static;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 28px;
-  padding: 0 10px;
-  border-bottom: 0;
-  background: color-mix(in srgb, var(--markdown-command-surface) 88%, #000000 12%);
   color: #aeb9c7;
-  font-family: var(--system-font-family);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0;
-  line-height: 1;
-  text-transform: none;
 }
 
 .markdown-command-icon {
@@ -7695,32 +7948,23 @@ body.panel-resizing-row * {
   color: inherit;
 }
 
-.tantalum-ai-bubble-content .markdown-command-block code,
-.markdown-command-block code {
+.tantalum-ai-bubble-content .markdown-command-block .markdown-code-block code,
+.markdown-command-block .markdown-code-block code {
   position: relative;
   display: block;
   margin: 0;
-  padding: 10px 12px 11px 30px;
+  padding-left: 18px;
   border: 0;
   border-radius: 0;
   background: transparent;
   color: #dce8f4;
-  font-family: "Cascadia Mono Light", "Cascadia Code Light", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  font-weight: 300 !important;
-  font-variation-settings: "wght" 300;
-  font-synthesis-weight: none;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
-.markdown-command-block code::before {
+.markdown-command-block .markdown-code-block code::before {
   content: ">";
   position: absolute;
-  top: 10px;
-  left: 12px;
+  top: 0;
+  left: 0;
   color: #aeb9c7;
   font-weight: 300 !important;
   font-variation-settings: "wght" 300;
@@ -8100,6 +8344,73 @@ button.agent-message-context-chip {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.76rem;
+}
+
+.monaco-editor.tantalum-source-editor,
+.monaco-editor.tantalum-source-editor .overflow-guard,
+.monaco-editor.tantalum-source-editor .overlayWidgets,
+.monaco-editor.tantalum-source-editor .overflowingOverlayWidgets {
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+
+.monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) {
+  box-sizing: border-box;
+  max-width: 100% !important;
+  overflow: hidden;
+  contain: paint;
+}
+
+.monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) .zone-widget-container.peekview-widget {
+  box-sizing: border-box;
+  width: calc(100% - 16px) !important;
+  max-width: calc(100% - 16px) !important;
+  margin-left: 8px;
+  overflow: hidden;
+}
+
+.monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) .peekview-widget > .head,
+.monaco-editor.tantalum-source-editor .marker-widget {
+  max-width: 100% !important;
+  overflow: hidden;
+}
+
+.monaco-editor.tantalum-source-editor .marker-widget {
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+}
+
+.monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) .peekview-widget > .head,
+.monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) .peekview-widget > .body,
+.monaco-editor.tantalum-source-editor .marker-widget .monaco-scrollable-element {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+.monaco-editor.tantalum-source-editor .marker-widget .descriptioncontainer {
+  box-sizing: border-box;
+  left: 0 !important;
+  right: 0 !important;
+  width: auto !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+}
+
+.monaco-editor.tantalum-source-editor .marker-widget .descriptioncontainer .message {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.monaco-editor.tantalum-source-editor .marker-widget .descriptioncontainer .message > div,
+.monaco-editor.tantalum-source-editor .marker-widget .descriptioncontainer .message .details,
+.monaco-editor.tantalum-source-editor .marker-widget .descriptioncontainer .filename {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes agent-thinking-dot {
@@ -9749,6 +10060,7 @@ button.agent-message-context-chip {
 }
 
 .agent-panel.tantalum-ai-panel .tantalum-ai-thread-spinner,
+.agent-panel.tantalum-ai-panel .tantalum-ai-thread-state-preparing,
 .agent-panel.tantalum-ai-panel .tantalum-ai-thread-state-running,
 .agent-panel.tantalum-ai-panel .tantalum-ai-thread-state-review-resolving,
 .agent-panel.tantalum-ai-panel .tantalum-ai-thread-state-completed {

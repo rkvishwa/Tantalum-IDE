@@ -1,44 +1,10 @@
 import materialIconThemeDefinition from 'material-icon-theme/dist/material-icons.json';
-import appwriteIconSvg from 'material-icon-theme/icons/appwrite.svg?raw';
-import arduinoIconSvg from 'material-icon-theme/icons/arduino.svg?raw';
-import cIconSvg from 'material-icon-theme/icons/c.svg?raw';
-import consoleIconSvg from 'material-icon-theme/icons/console.svg?raw';
-import cppIconSvg from 'material-icon-theme/icons/cpp.svg?raw';
-import cssIconSvg from 'material-icon-theme/icons/css.svg?raw';
-import databaseIconSvg from 'material-icon-theme/icons/database.svg?raw';
-import documentIconSvg from 'material-icon-theme/icons/document.svg?raw';
-import eslintIconSvg from 'material-icon-theme/icons/eslint.svg?raw';
-import fileIconSvg from 'material-icon-theme/icons/file.svg?raw';
-import gitIconSvg from 'material-icon-theme/icons/git.svg?raw';
-import hIconSvg from 'material-icon-theme/icons/h.svg?raw';
-import hppIconSvg from 'material-icon-theme/icons/hpp.svg?raw';
-import htmlIconSvg from 'material-icon-theme/icons/html.svg?raw';
-import imageIconSvg from 'material-icon-theme/icons/image.svg?raw';
-import javascriptIconSvg from 'material-icon-theme/icons/javascript.svg?raw';
-import jsonIconSvg from 'material-icon-theme/icons/json.svg?raw';
-import keyIconSvg from 'material-icon-theme/icons/key.svg?raw';
-import licenseIconSvg from 'material-icon-theme/icons/license.svg?raw';
-import lockIconSvg from 'material-icon-theme/icons/lock.svg?raw';
-import logIconSvg from 'material-icon-theme/icons/log.svg?raw';
-import markdownIconSvg from 'material-icon-theme/icons/markdown.svg?raw';
-import nodejsIconSvg from 'material-icon-theme/icons/nodejs.svg?raw';
-import npmIconSvg from 'material-icon-theme/icons/npm.svg?raw';
-import pdfIconSvg from 'material-icon-theme/icons/pdf.svg?raw';
-import powershellIconSvg from 'material-icon-theme/icons/powershell.svg?raw';
-import prettierIconSvg from 'material-icon-theme/icons/prettier.svg?raw';
-import pythonIconSvg from 'material-icon-theme/icons/python.svg?raw';
-import reactIconSvg from 'material-icon-theme/icons/react.svg?raw';
-import reactTsIconSvg from 'material-icon-theme/icons/react_ts.svg?raw';
-import readmeIconSvg from 'material-icon-theme/icons/readme.svg?raw';
-import settingsIconSvg from 'material-icon-theme/icons/settings.svg?raw';
-import svgIconSvg from 'material-icon-theme/icons/svg.svg?raw';
-import tailwindcssIconSvg from 'material-icon-theme/icons/tailwindcss.svg?raw';
-import typescriptIconSvg from 'material-icon-theme/icons/typescript.svg?raw';
-import viteIconSvg from 'material-icon-theme/icons/vite.svg?raw';
-import wordIconSvg from 'material-icon-theme/icons/word.svg?raw';
-import xmlIconSvg from 'material-icon-theme/icons/xml.svg?raw';
-import yamlIconSvg from 'material-icon-theme/icons/yaml.svg?raw';
-import zipIconSvg from 'material-icon-theme/icons/zip.svg?raw';
+
+const materialIconSvgModules = import.meta.glob('../../../node_modules/material-icon-theme/icons/*.svg', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>;
 
 type MaterialIconDefinition = {
   iconPath?: string;
@@ -48,58 +14,26 @@ type MaterialIconTheme = {
   iconDefinitions: Record<string, MaterialIconDefinition>;
   fileExtensions?: Record<string, string>;
   fileNames?: Record<string, string>;
+  folder?: string;
+  folderExpanded?: string;
+  folderNames?: Record<string, string>;
+  folderNamesExpanded?: Record<string, string>;
   file?: string;
 };
 
 const materialIconTheme = materialIconThemeDefinition as MaterialIconTheme;
 
-const materialIconSvgsByFileName: Record<string, string> = {
-  'appwrite.svg': appwriteIconSvg,
-  'arduino.svg': arduinoIconSvg,
-  'c.svg': cIconSvg,
-  'console.svg': consoleIconSvg,
-  'cpp.svg': cppIconSvg,
-  'css.svg': cssIconSvg,
-  'database.svg': databaseIconSvg,
-  'document.svg': documentIconSvg,
-  'eslint.svg': eslintIconSvg,
-  'file.svg': fileIconSvg,
-  'git.svg': gitIconSvg,
-  'h.svg': hIconSvg,
-  'hpp.svg': hppIconSvg,
-  'html.svg': htmlIconSvg,
-  'image.svg': imageIconSvg,
-  'javascript.svg': javascriptIconSvg,
-  'json.svg': jsonIconSvg,
-  'key.svg': keyIconSvg,
-  'license.svg': licenseIconSvg,
-  'lock.svg': lockIconSvg,
-  'log.svg': logIconSvg,
-  'markdown.svg': markdownIconSvg,
-  'nodejs.svg': nodejsIconSvg,
-  'npm.svg': npmIconSvg,
-  'pdf.svg': pdfIconSvg,
-  'powershell.svg': powershellIconSvg,
-  'prettier.svg': prettierIconSvg,
-  'python.svg': pythonIconSvg,
-  'react.svg': reactIconSvg,
-  'react_ts.svg': reactTsIconSvg,
-  'readme.svg': readmeIconSvg,
-  'settings.svg': settingsIconSvg,
-  'svg.svg': svgIconSvg,
-  'tailwindcss.svg': tailwindcssIconSvg,
-  'typescript.svg': typescriptIconSvg,
-  'vite.svg': viteIconSvg,
-  'word.svg': wordIconSvg,
-  'xml.svg': xmlIconSvg,
-  'yaml.svg': yamlIconSvg,
-  'zip.svg': zipIconSvg,
-};
-
+const materialIconSvgsByFileName = Object.fromEntries(
+  Object.entries(materialIconSvgModules).map(([modulePath, svg]) => [modulePath.split(/[\\/]/).pop() ?? '', svg]),
+);
 const materialIconUrlsByFileName = Object.fromEntries(Object.entries(materialIconSvgsByFileName).map(([fileName, svg]) => [fileName, createSvgDataUrl(svg)]));
+const FALLBACK_FILE_ICON_URL = createSvgDataUrl('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#8fa3b8" d="M3 1.5h6.2L13 5.3v9.2H3z"/><path fill="#dbe7f5" d="M9 1.5v4h4z"/></svg>');
+const FALLBACK_FOLDER_ICON_URL = createSvgDataUrl('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="#d6a64b" d="M1.5 4h5l1.2 1.4H14.5v8.1h-13z"/><path fill="#e8bd63" d="M1.5 5.2h13v8.3h-13z"/></svg>');
 
 const materialFileNameIcons = createCaseInsensitiveMap(materialIconTheme.fileNames);
 const materialFileExtensionIcons = createCaseInsensitiveMap(materialIconTheme.fileExtensions);
+const materialFolderNameIcons = createCaseInsensitiveMap(materialIconTheme.folderNames);
+const materialFolderNameExpandedIcons = createCaseInsensitiveMap(materialIconTheme.folderNamesExpanded);
 const materialLanguageFileExtensionIcons = createCaseInsensitiveMap({
   cjs: 'javascript',
   cts: 'typescript',
@@ -147,12 +81,12 @@ function getExtensionCandidates(baseName: string) {
 
 function getIconFileName(iconId: string) {
   const iconPath = materialIconTheme.iconDefinitions[iconId]?.iconPath;
-  return iconPath?.split('/').pop() ?? `${iconId}.svg`;
+  return iconPath?.split(/[\\/]/).pop() ?? `${iconId}.svg`;
 }
 
-function resolveIconUrl(iconId?: string) {
+function resolveIconUrl(iconId?: string, fallbackUrl = FALLBACK_FILE_ICON_URL) {
   const iconFileName = resolveIconFileName(iconId);
-  return materialIconUrlsByFileName[iconFileName] ?? materialIconUrlsByFileName['file.svg'] ?? '';
+  return materialIconUrlsByFileName[iconFileName] ?? materialIconUrlsByFileName['file.svg'] ?? fallbackUrl;
 }
 
 function resolveIconSvg(iconId?: string) {
@@ -184,10 +118,27 @@ function getMaterialFileIconId(filePath: string) {
   return undefined;
 }
 
+function getMaterialFolderIconId(folderPath: string, expanded = false) {
+  const normalizedPath = normalizePath(folderPath).toLowerCase();
+  const baseName = getBaseName(folderPath).toLowerCase();
+  const folderIcons = expanded ? materialFolderNameExpandedIcons : materialFolderNameIcons;
+  const folderIcon = folderIcons[normalizedPath] ?? folderIcons[baseName];
+
+  if (folderIcon) {
+    return folderIcon;
+  }
+
+  return expanded ? materialIconTheme.folderExpanded ?? 'folder-open' : materialIconTheme.folder ?? 'folder';
+}
+
 export function getMaterialFileIconUrl(filePath: string) {
   return resolveIconUrl(getMaterialFileIconId(filePath));
 }
 
 export function getMaterialFileIconSvg(filePath: string) {
   return resolveIconSvg(getMaterialFileIconId(filePath));
+}
+
+export function getMaterialFolderIconUrl(folderPath: string, expanded = false) {
+  return resolveIconUrl(getMaterialFolderIconId(folderPath, expanded), FALLBACK_FOLDER_ICON_URL);
 }

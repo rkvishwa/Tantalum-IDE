@@ -728,7 +728,13 @@ export function configureArduinoCppLanguageSupport(monaco: Monaco) {
   }
 }
 
-export function updateArduinoCppDiagnostics(monaco: Monaco, model: editor.ITextModel | null, filePath?: string | null) {
+export type ArduinoCppDiagnosticOptions = {
+  projectEntry?: boolean;
+  lifecycleConflict?: boolean;
+  requireLifecycle?: boolean;
+};
+
+export function updateArduinoCppDiagnostics(monaco: Monaco, model: editor.ITextModel | null, filePath?: string | null, options: ArduinoCppDiagnosticOptions = {}) {
   if (!model) {
     return;
   }
@@ -738,10 +744,10 @@ export function updateArduinoCppDiagnostics(monaco: Monaco, model: editor.ITextM
     return;
   }
 
-  monaco.editor.setModelMarkers(model, CPP_LINT_OWNER, lintArduinoCppModel(monaco, model, filePath));
+  monaco.editor.setModelMarkers(model, CPP_LINT_OWNER, lintArduinoCppModel(monaco, model, filePath, options));
 }
 
-function lintArduinoCppModel(monaco: Monaco, model: editor.ITextModel, filePath?: string | null): LintMarker[] {
+function lintArduinoCppModel(monaco: Monaco, model: editor.ITextModel, filePath?: string | null, options: ArduinoCppDiagnosticOptions = {}): LintMarker[] {
   const sanitizedLines = sanitizeCppLines(model.getValue());
   const markers: LintMarker[] = [];
 
@@ -751,7 +757,7 @@ function lintArduinoCppModel(monaco: Monaco, model: editor.ITextModel, filePath?
   markers.push(...lintArduinoSymbolCasing(monaco, sanitizedLines));
 
   if (isArduinoSketch(filePath)) {
-    markers.push(...lintArduinoSketchShape(monaco, model));
+    markers.push(...lintArduinoSketchShape(monaco, model, options));
   }
 
   markers.push(...lintSerialSetup(monaco, model));
@@ -1061,17 +1067,21 @@ function lintArduinoSymbolCasing(monaco: Monaco, lines: SanitizedLine[]) {
   return markers;
 }
 
-function lintArduinoSketchShape(monaco: Monaco, model: editor.ITextModel) {
+function lintArduinoSketchShape(monaco: Monaco, model: editor.ITextModel, options: ArduinoCppDiagnosticOptions = {}) {
   const markers: LintMarker[] = [];
   const text = model.getValue();
   const setupMatches = [...text.matchAll(/\bvoid\s+setup\s*\(/g)];
   const loopMatches = [...text.matchAll(/\bvoid\s+loop\s*\(/g)];
 
-  if (setupMatches.length === 0) {
+  if (options.lifecycleConflict) {
+    markers.push(markerAt(monaco, 1, 1, 1, 'Only the Project entry file can define setup() or loop().', monaco.MarkerSeverity.Error));
+  }
+
+  if (options.requireLifecycle && setupMatches.length === 0) {
     markers.push(markerAt(monaco, 1, 1, 1, 'Arduino sketches usually need a void setup() function.', monaco.MarkerSeverity.Warning));
   }
 
-  if (loopMatches.length === 0) {
+  if (options.requireLifecycle && loopMatches.length === 0) {
     markers.push(markerAt(monaco, 1, 1, 1, 'Arduino sketches usually need a void loop() function.', monaco.MarkerSeverity.Warning));
   }
 

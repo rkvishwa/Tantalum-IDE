@@ -784,10 +784,16 @@ export function SettingsPage({
                 </div>
                 <div className="settings-row-list">
                   {renderToggleSetting('verifyBeforeUpload', 'Verify before upload', 'Compile and check the sketch before USB upload starts.')}
+                  {renderToggleSetting('sourceSnapshotsEnabled', 'Save source snapshots', 'Save compiled source during uploads so View code can restore exact files later.')}
                 </div>
                 {!preferences.verifyBeforeUpload ? (
                   <div className="inline-banner inline-banner-warning arduino-inline-banner">
                     Direct upload skips the separate Verify step. Bad firmware or incorrect board settings can crash, lock up, or misconfigure attached hardware. Use at your own risk.
+                  </div>
+                ) : null}
+                {!preferences.sourceSnapshotsEnabled ? (
+                  <div className="inline-banner inline-banner-warning arduino-inline-banner">
+                    View Code will only restore snapshots saved before this setting was turned off.
                   </div>
                 ) : null}
               </section>

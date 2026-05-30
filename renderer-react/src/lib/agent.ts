@@ -63,7 +63,16 @@ type SaveAgentPreferencesOptions = {
 
 type LoadAgentSettingsOptions = {
   includeUsage?: boolean;
+  bypassCache?: boolean;
 };
+
+type AgentFunctionReadOptions = {
+  bypassCache?: boolean;
+};
+
+const AGENT_SETTINGS_READ_EXECUTION_OPTIONS = {
+  retryOnSyncTimeout: true,
+} as const;
 
 export type AgentCreditAccount = {
   id: string;
@@ -106,6 +115,12 @@ export type AgentThreadSummary = {
 
 export type AgentThreadMessage = AgentUiMessage & {
   threadId: string;
+};
+
+export type AgentThreadTruncateResult = {
+  thread: AgentThreadSummary;
+  messages: AgentThreadMessage[];
+  removedCount: number;
 };
 
 export type AgentSettingsState = {
@@ -248,6 +263,7 @@ export async function loadAgentSettings(workspaceKey?: string | null, options: L
     appwriteConfig.agentSettingsFunctionId,
     { workspaceKey: workspaceKey ?? null, includeUsage: options.includeUsage !== false },
     '/bootstrap',
+    { ...AGENT_SETTINGS_READ_EXECUTION_OPTIONS, bypassCache: options.bypassCache },
   );
 }
 
@@ -313,12 +329,13 @@ export async function testCustomCredential(credentialId: string) {
   );
 }
 
-export async function listAgentThreads(workspaceKey?: string | null) {
+export async function listAgentThreads(workspaceKey?: string | null, options: AgentFunctionReadOptions = {}) {
   assertAgentSettingsFunction();
   return executeFunction<{ workspaceKey?: string | null }, AgentThreadSummary[]>(
     appwriteConfig.agentSettingsFunctionId,
     { workspaceKey: workspaceKey ?? null },
     '/threads/list',
+    { ...AGENT_SETTINGS_READ_EXECUTION_OPTIONS, bypassCache: options.bypassCache },
   );
 }
 
@@ -337,6 +354,7 @@ export async function loadAgentThreadMessages(threadId: string) {
     appwriteConfig.agentSettingsFunctionId,
     { threadId },
     '/threads/messages',
+    AGENT_SETTINGS_READ_EXECUTION_OPTIONS,
   );
 }
 
@@ -346,6 +364,15 @@ export async function createAgentThreadMessage(input: AgentThreadMessageInput) {
     appwriteConfig.agentSettingsFunctionId,
     input,
     '/threads/message/create',
+  );
+}
+
+export async function truncateAgentThreadMessages(threadId: string, afterMessageId: string) {
+  assertAgentSettingsFunction();
+  return executeFunction<{ threadId: string; afterMessageId: string }, AgentThreadTruncateResult>(
+    appwriteConfig.agentSettingsFunctionId,
+    { threadId, afterMessageId },
+    '/threads/messages/truncate',
   );
 }
 

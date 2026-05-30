@@ -51,6 +51,17 @@ function fail(res, status, error, details) {
   return json(res, status, { ok: false, error, details });
 }
 
+function health(res, extra = {}) {
+  return ok(res, {
+    service: 'agent-settings',
+    status: 'ok',
+    databaseConfigured: Boolean(APPWRITE_DATABASE_ID),
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+    ...extra,
+  });
+}
+
 function readPayload(req) {
   if (req.bodyJson && typeof req.bodyJson === 'object') {
     return req.bodyJson;
@@ -81,7 +92,9 @@ function createAdminClient(req) {
 
 function createUserClient(jwt) {
   if (!jwt) {
-    throw new Error('User JWT header is missing.');
+    const error = new Error('User JWT header is missing.');
+    error.statusCode = 401;
+    throw error;
   }
 
   return new Client()
@@ -92,11 +105,17 @@ function createUserClient(jwt) {
 
 function requestUserJwt(req) {
   const authorization = req.headers.authorization || req.headers.Authorization || '';
-  return (
+  const jwt = (
     req.headers['x-appwrite-user-jwt'] ||
     req.headers['x-appwrite-jwt'] ||
     String(authorization).replace(/^Bearer\s+/i, '').trim()
   );
+  const cleanJwt = String(jwt || '').trim();
+  if (!cleanJwt || /^(undefined|null|false)$/i.test(cleanJwt)) {
+    return '';
+  }
+
+  return cleanJwt.split('.').length === 3 ? cleanJwt : '';
 }
 
 async function resolveUser(req) {
@@ -527,15 +546,18 @@ async function ensureManagedAssignment(databases, userId) {
     return racedAssignment || databases.getDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_USER_MANAGED_KEYS_COLLECTION_ID, documentId);
   });
 
-  try {
-    if (createdAssignment) {
-      await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID, available.$id, {
+  if (createdAssignment) {
+    void databases.updateDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID,
+      available.$id,
+      {
         assignedCount: Number(available.assignedCount || 0) + 1,
         updatedAt: now,
-      });
-    }
-  } catch {
-    // Assignment is still valid if this non-critical counter update loses a race.
+      },
+    )
+      // Assignment is still valid if this non-critical counter update loses a race.
+      .catch(() => {});
   }
 
   return assignment;
@@ -664,13 +686,74 @@ async function listThreadMessages(req, res) {
   const databases = new Databases(createAdminClient(req));
   const thread = await getOwnedThread(databases, user.$id, payload.threadId);
 
-  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID, [
-    Query.equal('threadId', thread.$id),
-    Query.orderAsc('createdAt'),
-    Query.limit(200),
-  ]);
+  const documents = await listAllThreadMessageDocuments(databases, thread.$id);
 
-  return ok(res, response.documents.map(maskThreadMessage));
+  return ok(res, documents.map(maskThreadMessage));
+}
+
+async function listAllThreadMessageDocuments(databases, threadId) {
+  const documents = [];
+  let cursor = null;
+
+  while (documents.length < 1000) {
+    const queries = [
+      Query.equal('threadId', threadId),
+      Query.orderAsc('createdAt'),
+      Query.limit(100),
+    ];
+    if (cursor) {
+      queries.push(Query.cursorAfter(cursor));
+    }
+
+    const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID, queries);
+    documents.push(...response.documents);
+    if (response.documents.length < 100) {
+      break;
+    }
+    cursor = response.documents[response.documents.length - 1].$id;
+  }
+
+  return documents;
+}
+
+async function truncateThreadMessages(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  const thread = await getOwnedThread(databases, user.$id, payload.threadId);
+  const afterMessageId = String(payload.afterMessageId || '').trim();
+
+  if (!afterMessageId) {
+    return fail(res, 400, 'afterMessageId is required.');
+  }
+
+  const messages = await listAllThreadMessageDocuments(databases, thread.$id);
+  const anchorIndex = messages.findIndex((message) => message.$id === afterMessageId);
+  if (anchorIndex === -1) {
+    return fail(res, 404, 'Restore point message was not found.');
+  }
+
+  const removedMessages = messages.slice(anchorIndex + 1);
+  await Promise.all(
+    removedMessages.map((message) =>
+      databases.deleteDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID, message.$id),
+    ),
+  );
+
+  const remainingMessages = messages.slice(0, anchorIndex + 1);
+  const lastMessage = remainingMessages[remainingMessages.length - 1];
+  const updatedThread = await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_THREADS_COLLECTION_ID, thread.$id, {
+    messageCount: remainingMessages.length,
+    lastMessagePreview: cleanPreview(lastMessage?.content || ''),
+    lastMessageAt: lastMessage?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  return ok(res, {
+    thread: maskThread(updatedThread),
+    messages: remainingMessages.map(maskThreadMessage),
+    removedCount: removedMessages.length,
+  });
 }
 
 async function createThreadMessage(req, res) {
@@ -745,21 +828,34 @@ async function deleteThread(req, res) {
   return ok(res, { deleted: true });
 }
 
-async function bootstrap(req, res) {
-  const user = await resolveUser(req);
+async function timedBootstrapPhase(log, phase, task) {
+  const startedAt = Date.now();
+  try {
+    return await task();
+  } finally {
+    log(`[bootstrap] ${phase} ${Date.now() - startedAt}ms`);
+  }
+}
+
+async function bootstrap(req, res, log = () => {}) {
+  const startedAt = Date.now();
+  const user = await timedBootstrapPhase(log, 'user lookup', () => resolveUser(req));
   const payload = readPayload(req);
   const databases = new Databases(createAdminClient(req));
   const workspaceKey = String(payload.workspaceKey || '').trim() || null;
   const includeUsage = payload.includeUsage !== false;
   const [assignment, preferences, creditAccount, customCredentials, recentUsage, recentThreads] = await Promise.all([
-    ensureManagedAssignment(databases, user.$id),
-    ensurePreferences(databases, user.$id),
-    ensureCreditAccount(databases, user.$id),
-    listCustomCredentials(databases, user.$id),
-    includeUsage ? listRecentUsage(databases, user.$id) : Promise.resolve([]),
-    listThreadDocuments(databases, user.$id, workspaceKey),
+    timedBootstrapPhase(log, 'managed assignment', () => ensureManagedAssignment(databases, user.$id)),
+    timedBootstrapPhase(log, 'preferences', () => ensurePreferences(databases, user.$id)),
+    timedBootstrapPhase(log, 'credit account', () => ensureCreditAccount(databases, user.$id)),
+    timedBootstrapPhase(log, 'custom credentials', () => listCustomCredentials(databases, user.$id)),
+    timedBootstrapPhase(log, 'usage', () => (includeUsage ? listRecentUsage(databases, user.$id) : Promise.resolve([]))),
+    timedBootstrapPhase(log, 'threads', () => listThreadDocuments(databases, user.$id, workspaceKey)),
   ]);
-  const managedModelMetadata = maskManagedModelMetadata(await getManagedPoolKey(databases, assignment));
+  const managedModelMetadata = maskManagedModelMetadata(
+    await timedBootstrapPhase(log, 'pool key lookup', () => getManagedPoolKey(databases, assignment)),
+  );
+  log(`[bootstrap] complete ${Date.now() - startedAt}ms includeUsage=${includeUsage ? 'true' : 'false'} workspace=${workspaceKey ? 'true' : 'false'}`);
 
   return ok(res, {
     managedAvailable: Boolean(assignment),
@@ -979,16 +1075,24 @@ async function testCustomCredential(req, res) {
   return ok(res, { ok: true });
 }
 
-export default async function ({ req, res, error }) {
+export default async function ({ req, res, log = () => {}, error }) {
   try {
+    if (req.path === '/health' || req.path === '/warm') {
+      return health(res);
+    }
+
     if (!APPWRITE_DATABASE_ID) {
       return fail(res, 500, 'Database configuration is incomplete.');
     }
 
     switch (req.path) {
       case '/bootstrap':
+        return await bootstrap(req, res, log);
       case '/':
-        return await bootstrap(req, res);
+        if (!requestUserJwt(req)) {
+          return health(res, { warmup: true });
+        }
+        return await bootstrap(req, res, log);
       case '/preferences':
         return await savePreferences(req, res);
       case '/custom-credentials/create':
@@ -1005,6 +1109,8 @@ export default async function ({ req, res, error }) {
         return await createThread(req, res);
       case '/threads/messages':
         return await listThreadMessages(req, res);
+      case '/threads/messages/truncate':
+        return await truncateThreadMessages(req, res);
       case '/threads/message/create':
         return await createThreadMessage(req, res);
       case '/threads/rename':
@@ -1016,6 +1122,11 @@ export default async function ({ req, res, error }) {
     }
   } catch (caughtError) {
     const message = caughtError instanceof Error ? caughtError.message : 'Unexpected agent-settings failure.';
+    const statusCode = Number(caughtError?.statusCode || caughtError?.code || 0);
+    if (statusCode === 401 || /jwt|unauthorized|missing.*user/i.test(message)) {
+      return fail(res, 401, 'Sign in again, then retry.');
+    }
+
     error(message);
     return fail(res, 500, message);
   }

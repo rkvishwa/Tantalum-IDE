@@ -41,6 +41,7 @@ class BoardService {
                     provisioningRequestedAt: null,
                     provisioningMode: '',
                     lastOtaError: '',
+                    sourceCodeVisibility: boardData.sourceCodeVisibility === 'public' ? 'public' : 'private',
                     lastSeen: null,
                     status: 'pending',
                     createdAt: new Date().toISOString()
@@ -107,7 +108,7 @@ class BoardService {
     async updateBoard(boardId, updates) {
         try {
             // Prevent updating sensitive fields
-            const allowedFields = ['name', 'status', 'lastSeen', 'firmwareVersion', 'desiredFirmwareId', 'desiredVersion', 'desiredDeploymentId', 'lastAppliedDeploymentId', 'runtimeVersion', 'lastUpdateCheckAt', 'otaStatus', 'provisioningStatus', 'provisioningRequestedAt', 'provisioningMode', 'lastOtaError'];
+            const allowedFields = ['name', 'status', 'lastSeen', 'firmwareVersion', 'desiredFirmwareId', 'desiredVersion', 'desiredDeploymentId', 'lastAppliedDeploymentId', 'runtimeVersion', 'lastUpdateCheckAt', 'otaStatus', 'provisioningStatus', 'provisioningRequestedAt', 'provisioningMode', 'lastOtaError', 'sourceCodeVisibility'];
             const safeUpdates = {};
 
             for (const key of allowedFields) {

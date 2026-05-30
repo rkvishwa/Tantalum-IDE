@@ -318,6 +318,7 @@ async function createBoard(req, res) {
       provisioningRequestedAt: null,
       provisioningMode: '',
       lastOtaError: '',
+      sourceCodeVisibility: payload.sourceCodeVisibility === 'public' ? 'public' : 'private',
       status: 'pending',
       lastSeen: null,
       lastProvisionedAt: null,

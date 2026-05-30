@@ -36,6 +36,14 @@ type ListDocumentsOptions = {
   bypassCache?: boolean;
 };
 
+type FunctionExecutionOptions = {
+  bypassCache?: boolean;
+  waitForCompletion?: boolean;
+  waitTimeoutMs?: number;
+  pollMs?: number;
+  retryOnSyncTimeout?: boolean;
+};
+
 export const account = {
   async get() {
     const result = unwrapResult(await getDesktopCloudApi().auth.getCurrentUser());
@@ -154,6 +162,7 @@ export const functions = {
     pathName = '/',
     method = 'POST',
     headers?: Record<string, string>,
+    options: FunctionExecutionOptions = {},
   ) {
     const result = unwrapResult(await getDesktopCloudApi().functions.createExecution({
       functionId,
@@ -162,6 +171,11 @@ export const functions = {
       pathName,
       method,
       headers,
+      bypassCache: options.bypassCache,
+      waitForCompletion: options.waitForCompletion,
+      waitTimeoutMs: options.waitTimeoutMs,
+      pollMs: options.pollMs,
+      retryOnSyncTimeout: options.retryOnSyncTimeout,
     }));
 
     return result.execution as Models.Execution;

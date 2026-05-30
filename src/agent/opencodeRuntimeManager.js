@@ -172,6 +172,11 @@ function normalizePrompt(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
 
+function titleFromPrompt(prompt) {
+  const compact = normalizePrompt(prompt);
+  return compact.length > 64 ? `${compact.slice(0, 61).trimEnd()}...` : compact || "New thread";
+}
+
 function isInsideRoot(targetPath, rootPath) {
   const relativePath = path.relative(rootPath, targetPath);
   return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
@@ -1019,6 +1024,92 @@ function agentSelectionContextTargets(workspaceRoot, contextItems) {
     .filter(Boolean);
 }
 
+function isCreateWriteGenerateCodePrompt(prompt) {
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
+  if (!/\b(?:create|add|write|generate|make)\b/.test(normalized) || isFolderCreateInstruction(normalized)) {
+    return false;
+  }
+
+  return /\b(?:create|add|write|generate|make)\b[^.?!\n]*\b(?:code|sketch|program|firmware|arduino|ino|\.ino|esp32|s3|board|gpio|pin|led|rgb|neopixel|fastled|servo|motor|sensor)\b/.test(
+    normalized,
+  );
+}
+
+function promptAsksForNamedNewFile(prompt) {
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
+  return /\b(?:create|add|write|generate|make)\b[^.?!\n]*\b(?:file|sketch|program|code|firmware)\b[^.?!\n]*\b(?:called|named|as)\s+[a-z0-9_.-]+/.test(
+    normalized,
+  );
+}
+
+function isFirmwareSourcePath(relativePath) {
+  return /\.(ino|pde|cpp|cxx|cc|c|h|hh|hpp|hxx)$/i.test(String(relativePath || ""));
+}
+
+function uniqueImplicitTargetResult(paths, label = "available files") {
+  const uniquePaths = [...new Set(paths.map((entry) => normalizeSafeWorkspaceRelativePath(entry)).filter(Boolean))];
+  if (uniquePaths.length === 1) {
+    return { status: "ok", path: uniquePaths[0] };
+  }
+  if (uniquePaths.length > 1) {
+    return {
+      status: "ambiguous",
+      error: `I found multiple ${label}: ${uniquePaths.slice(0, 5).join(", ")}. Please name the exact file.`,
+    };
+  }
+  return { status: "none" };
+}
+
+function implicitOpenOrAttachedEditTargetForPrompt(prompt, workspaceRoot, payload = {}) {
+  if (
+    !workspaceRoot ||
+    !isCreateWriteGenerateCodePrompt(prompt) ||
+    promptAsksForNamedNewFile(prompt) ||
+    extractPromptRelativePaths(prompt).length > 0 ||
+    agentSelectionContextTargets(workspaceRoot, payload.contextItems).length > 0
+  ) {
+    return { status: "none" };
+  }
+
+  const seen = new Set();
+  const candidates = [];
+  for (const item of Array.isArray(payload.contextItems) ? payload.contextItems : []) {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      item.kind !== "file" ||
+      item.source === "attachment"
+    ) {
+      continue;
+    }
+
+    const relativePath = agentContextRelativePath(workspaceRoot, item);
+    if (!relativePath || !isFirmwareSourcePath(relativePath)) {
+      continue;
+    }
+
+    const key = relativePath.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    candidates.push(relativePath);
+  }
+
+  const activePath = activeTabRelativePath(workspaceRoot, payload.activeTab);
+  if (activePath && isFirmwareSourcePath(activePath) && !seen.has(activePath.toLowerCase())) {
+    candidates.push(activePath);
+  }
+
+  return uniqueImplicitTargetResult(candidates, "open or attached source files");
+}
+
+function preferredImplicitEditTargetForPrompt(prompt, workspaceRoot, payload = {}) {
+  const target = implicitOpenOrAttachedEditTargetForPrompt(prompt, workspaceRoot, payload);
+  return target.status === "ok" ? target.path : "";
+}
+
 function levenshteinDistance(left, right) {
   const a = String(left || "");
   const b = String(right || "");
@@ -1530,6 +1621,7 @@ function inferEditFileTask(segment, options = {}) {
 function planAgentTaskList(prompt, actionId = null, options = {}) {
   const originalPrompt = String(prompt || "").trim();
   const canonicalPrompt = canonicalizeCommandVerbsInText(originalPrompt);
+  const preferredImplicitEditTargetPath = normalizeSafeWorkspaceRelativePath(options.preferredImplicitEditTargetPath);
   const now = new Date().toISOString();
   const segments = canonicalPrompt
     .split(/(?:[.!?]+\s+|\s+(?:and then|and|then|also)\s+)/i)
@@ -1647,6 +1739,18 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
       }
 
       const projectStructure = PROJECT_STRUCTURE_HINT.test(segment) || PROJECT_STRUCTURE_HINT.test(canonicalPrompt);
+      if (preferredImplicitEditTargetPath && !projectStructure) {
+        items.push({
+          id: createTaskId("edit"),
+          title: `Write code in ${preferredImplicitEditTargetPath}`,
+          status: "pending",
+          kind: "opencode_edit",
+          targetPath: preferredImplicitEditTargetPath,
+          instruction: segment,
+        });
+        continue;
+      }
+
       const targetPath = projectStructure ? createTarget : withDefaultSketchExtension(createTarget);
       items.push({
         id: createTaskId("create"),
@@ -1666,6 +1770,15 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
         status: "blocked",
         kind: "create_folder",
         error: "Folder-only creation is not supported by agent review yet. Ask to move files into the folder or create a file inside it.",
+      });
+    } else if (preferredImplicitEditTargetPath) {
+      items.push({
+        id: createTaskId("edit"),
+        title: `Write code in ${preferredImplicitEditTargetPath}`,
+        status: "pending",
+        kind: "opencode_edit",
+        targetPath: preferredImplicitEditTargetPath,
+        instruction: canonicalPrompt,
       });
     } else {
       items.push({
@@ -1835,6 +1948,37 @@ function shouldPreferDeterministicCreateTarget(prompt, plannerTaskList, determin
   );
 }
 
+function shouldPreferPreferredImplicitEditTarget(plannerTaskList, deterministicTaskList, preferredTargetPath) {
+  const preferred = normalizeSafeWorkspaceRelativePath(preferredTargetPath);
+  if (!preferred) {
+    return false;
+  }
+
+  const planner = normalizeTaskList(plannerTaskList);
+  const deterministic = normalizeTaskList(deterministicTaskList);
+  const deterministicHasPreferredTarget = deterministic?.items?.some(
+    (item) =>
+      item.status !== "blocked" &&
+      item.kind === "opencode_edit" &&
+      normalizeRelativePath(item.targetPath).toLowerCase() === preferred.toLowerCase() &&
+      /create|write|generate|sketch|code/i.test(`${item.title || ""} ${item.instruction || ""}`),
+  );
+  if (!deterministicHasPreferredTarget) {
+    return false;
+  }
+
+  return Boolean(
+    planner?.items?.some(
+      (item) =>
+        item.status !== "blocked" &&
+        ((item.kind === "create_file" && item.targetPath) ||
+          (item.kind === "opencode_edit" &&
+            !item.targetPath &&
+            (item.targetExtension === DEFAULT_SKETCH_EXTENSION || /create|write|generate|sketch|code/i.test(`${item.title || ""} ${item.instruction || ""}`)))),
+    ),
+  );
+}
+
 function isDeterministicTaskKind(kind) {
   return ["delete_file", "create_project_structure_doc", "rename_file", "move_file"].includes(kind);
 }
@@ -1915,6 +2059,37 @@ function buildOpenCodeRemainingWorkPrompt(originalPrompt, taskList) {
 function looksLikeConfirmationOnly(output) {
   const normalized = String(output || "").trim();
   return normalized.length > 0 && CONFIRMATION_ONLY_OUTPUT.some((pattern) => pattern.test(normalized));
+}
+
+function editableTaskTargets(taskList) {
+  const normalized = normalizeTaskList(taskList);
+  if (!normalized) {
+    return [];
+  }
+
+  return [
+    ...new Set(
+      normalized.items
+        .filter((item) => item.status !== "completed" && item.status !== "skipped" && item.kind === "opencode_edit" && item.targetPath)
+        .map((item) => normalizeRelativePath(item.targetPath))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function buildNoDiffRetryPrompt(remainingPrompt, taskList, previousOutput) {
+  const targets = editableTaskTargets(taskList);
+  const targetLine = targets.length > 0 ? `Target file${targets.length === 1 ? "" : "s"}: ${targets.join(", ")}.` : "";
+  const previous = cleanOpenCodeOutput(previousOutput);
+  return [
+    remainingPrompt,
+    "",
+    "The previous response did not modify any workspace files. Apply the requested edit now using file edit/write tools only.",
+    targetLine,
+    previous ? `Do not just show code in the chat. Incorporate the relevant code into the target file. Previous response summary: ${clampForPrompt(previous, 1200)}` : "Do not just show code in the chat. Incorporate the requested code into the target file.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function commandForPlatform(executablePath) {
@@ -2606,6 +2781,21 @@ function looksLikeUncertainWorkspaceAction(prompt) {
   );
 }
 
+function looksLikeWorkspaceDirectIntentInquiry(prompt) {
+  const normalized = normalizePrompt(prompt).toLowerCase();
+  if (!normalized || looksLikeUncertainWorkspaceAction(prompt)) {
+    return false;
+  }
+
+  if (/[?]/.test(String(prompt || "")) && !/\b(file|folder|directory|sketch|ino|workspace|project|repo|repository|code|component|function|class|module)\b/.test(normalized)) {
+    return false;
+  }
+
+  return /\b(file|folder|directory|sketch|ino|workspace|project|repo|repository|codebase|component|function|class|module|agent\.?md)\b|\.ino\b/i.test(
+    normalized,
+  );
+}
+
 function compactThreadMessagesForIntentRouter(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -2644,6 +2834,48 @@ function looksLikeReferentialFollowupPrompt(prompt) {
     ) ||
     /^(?:do all those|do those|do that|do it|apply those changes|apply that change|make those changes|make that change|yes add it)$/.test(normalized)
   );
+}
+
+function looksLikeShortFirmwareFollowupPrompt(prompt) {
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase().replace(/[.!?]+$/g, "");
+  if (!normalized || /[?]/.test(String(prompt || ""))) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 8) {
+    return false;
+  }
+
+  if (/\b(delete|remove|rm|rename|move|discard|erase|upload|flash|push|commit|stage|pull)\b/.test(normalized)) {
+    return false;
+  }
+
+  const editSignal =
+    /\b(use|switch|convert|change|update|make|set|add|with|to)\b/.test(normalized) ||
+    /^(?:neopixel|fastled|rgb|led|pwm|analogwrite|common\s+anode|common\s+cathode)\b/.test(normalized);
+  const firmwareSignal = /\b(neopixel|fastled|rgb|led|pwm|analogwrite|common\s+anode|common\s+cathode|library|pin|gpio|color|colour|blue|green|red|white)\b/.test(
+    normalized,
+  );
+
+  return editSignal && firmwareSignal;
+}
+
+function implicitFollowupTargetForPrompt(workspaceRoot, payload = {}) {
+  const contextPaths = agentContextRelativePaths(workspaceRoot, payload.contextItems).filter(isFirmwareSourcePath);
+  if (contextPaths.length > 0) {
+    return uniqueImplicitTargetResult(contextPaths, "attached source files");
+  }
+
+  const activePath = activeTabRelativePath(workspaceRoot, payload.activeTab);
+  if (activePath && isFirmwareSourcePath(activePath)) {
+    return { status: "ok", path: activePath };
+  }
+
+  const memoryPaths = normalizeThreadMemory(payload.threadMemory)
+    .files.filter((file) => file.expectedExists && isFirmwareSourcePath(file.path))
+    .map((file) => file.path);
+  return uniqueImplicitTargetResult(memoryPaths, "remembered source files");
 }
 
 function shouldRunReferentialFollowupRouter(prompt, payload = {}) {
@@ -2760,6 +2992,7 @@ class AgentRuntimeManager {
       activeTabRelativePath: activeTabRelativePath(workspaceRoot, payload.activeTab),
       contextRelativePaths,
       contextSelectionTargets: agentSelectionContextTargets(workspaceRoot, payload.contextItems),
+      preferredImplicitEditTargetPath: preferredImplicitEditTargetForPrompt(prompt, workspaceRoot, payload),
       threadMemory: payload.threadMemory,
     });
   }
@@ -3017,6 +3250,7 @@ class AgentRuntimeManager {
 
   #buildFastPlannerMessages({ prompt, payload, workspaceRoot }) {
     const contextItems = this.#plannerContextItems(workspaceRoot, payload.contextItems);
+    const preferredImplicitEditTargetPath = preferredImplicitEditTargetForPrompt(prompt, workspaceRoot, payload);
     const completedTaskReferences = isCompletedTaskReferencePrompt(prompt) ? normalizeCompletedTaskReferences(payload.completedTaskReferences) : [];
     const referenceCurrentTarget = canUseCompletedReferenceTarget(prompt, completedTaskReferences)
       ? singleCompletedTaskReferenceCurrentTarget(completedTaskReferences)
@@ -3033,6 +3267,12 @@ class AgentRuntimeManager {
           }
         : null,
       contextItems,
+      preferredImplicitEditTarget: preferredImplicitEditTargetPath
+        ? {
+            path: preferredImplicitEditTargetPath,
+            note: "The user has exactly one open or attached source file. For create/write/generate firmware requests without another named file path, update this file instead of inventing a new filename.",
+          }
+        : null,
       completedTaskReferences,
       referenceCurrentTarget,
       threadMemory: compactThreadMemoryForPlanner(payload.threadMemory),
@@ -3049,6 +3289,7 @@ class AgentRuntimeManager {
           "Rules:",
           "- For create_file tasks, use exact workspace-relative paths when the user gives one. If the user gives a descriptive sketch/program name instead, derive a safe snake_case filename in the workspace root.",
           "- Example: create the file esp32 blink led -> targetPath esp32_blink_led.ino.",
+          "- If preferredImplicitEditTarget is present and the user is creating, writing, or generating firmware code without naming a different file path, return one opencode_edit task targeting preferredImplicitEditTarget.path. Do not return create_file for that request.",
           "- For move_file tasks, use targetPath plus newPath for a named source file. If the user asks to move all .ino files to a folder, return one move_file task with targetExtension ino and newPath set to the destination folder; the runtime will expand it.",
           "- For delete_file tasks where the user asks to delete all sketch/.ino files in the root folder, return one delete_file task with targetExtension ino and rootOnly true; the runtime will expand it.",
           "- Do not represent folder creation as a create_file task. The words folder and directory name directories, not .ino sketches, unless the user explicitly says file called folder.",
@@ -3121,6 +3362,9 @@ class AgentRuntimeManager {
       }
       if (typeof item.content === "string" && item.content.trim()) {
         contextItem.content = clampForPrompt(item.content, FAST_PLANNER_CONTEXT_ITEM_CHARS);
+      }
+      if (kind === "file" && typeof item.content === "string" && item.content.trim() === "") {
+        contextItem.isEmpty = true;
       }
       items.push(contextItem);
       if (items.length >= FAST_PLANNER_MAX_CONTEXT_ITEMS) {
@@ -3235,6 +3479,7 @@ class AgentRuntimeManager {
     }
 
     const deterministicTaskList = this.#deterministicTaskList(prompt, actionId, workspaceRoot, payload);
+    const preferredImplicitEditTargetPath = preferredImplicitEditTargetForPrompt(prompt, workspaceRoot, payload);
     const folderClarification = deterministicFolderClarification(prompt, deterministicTaskList);
     if (folderClarification) {
       return { clarification: folderClarification, taskList: deterministicTaskList, riskLevel: normalizePlannerRiskLevel(planner.riskLevel) };
@@ -3243,6 +3488,7 @@ class AgentRuntimeManager {
       shouldPreferDeterministicMoveTaskList(prompt, taskList, deterministicTaskList) ||
       shouldPreferDeterministicBulkDeleteTaskList(prompt, taskList, deterministicTaskList) ||
       shouldPreferDeterministicDeleteTaskList(prompt, taskList, deterministicTaskList) ||
+      shouldPreferPreferredImplicitEditTarget(taskList, deterministicTaskList, preferredImplicitEditTargetPath) ||
       shouldPreferDeterministicCreateTarget(prompt, taskList, deterministicTaskList)
     ) {
       taskList = deterministicTaskList;
@@ -3474,6 +3720,7 @@ class AgentRuntimeManager {
     clarifyNonEdit = false,
     blockAskMode = false,
   }) {
+    const normalizedFallbackTaskList = normalizeTaskList(fallbackTaskList);
     if (payload.intent === "ask") {
       if (blockAskMode) {
         return {
@@ -3504,6 +3751,7 @@ class AgentRuntimeManager {
         userMessage: plannerClarification || blockedTask?.error || "I could not confidently understand that workspace action. Please name the operation and file path.",
         requiresUserDecision: true,
         decisionKind: "clarify",
+        taskList: normalizedFallbackTaskList || undefined,
       };
     }
 
@@ -3517,6 +3765,7 @@ class AgentRuntimeManager {
             userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer prior workspace change before changing files.",
             requiresUserDecision: true,
             decisionKind: "clarify",
+            taskList: normalizedFallbackTaskList || undefined,
           }
         : null;
     }
@@ -3530,6 +3779,7 @@ class AgentRuntimeManager {
         userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer workspace action before changing files.",
         requiresUserDecision: true,
         decisionKind: "clarify",
+        taskList: normalizedFallbackTaskList || undefined,
       };
     }
 
@@ -3547,6 +3797,7 @@ class AgentRuntimeManager {
         userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
+        taskList: normalizedFallbackTaskList || undefined,
       };
     }
 
@@ -3561,6 +3812,7 @@ class AgentRuntimeManager {
         userMessage: resolvedBlockedTask.error || classifier.clarification || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
+        taskList: checkedTaskList,
       };
     }
 
@@ -3584,16 +3836,72 @@ class AgentRuntimeManager {
     }
 
     const uncertainWorkspaceAction = looksLikeUncertainWorkspaceAction(prompt);
+    const workspaceDirectIntentInquiry = looksLikeWorkspaceDirectIntentInquiry(prompt);
+    if (!uncertainWorkspaceAction && !workspaceDirectIntentInquiry) {
+      return null;
+    }
 
     return this.#repairWorkspaceAction({
       route,
       prompt,
       workspaceRoot,
       payload,
-      reason: uncertainWorkspaceAction ? "uncertain_workspace_action_repair" : "direct_intent_inquiry",
+      reason: uncertainWorkspaceAction ? "uncertain_workspace_action_repair" : "fast_intent_router",
       forceClassifier: true,
       allowImmediateLowRisk: true,
     });
+  }
+
+  #routeShortFirmwareFollowup({ route, prompt, workspaceRoot, payload }) {
+    if (payload.intent === "ask" || route.engine !== DIRECT_LLM_ENGINE || !looksLikeShortFirmwareFollowupPrompt(prompt)) {
+      return null;
+    }
+
+    const target = implicitFollowupTargetForPrompt(workspaceRoot, payload);
+    if (target.status === "none") {
+      return null;
+    }
+
+    if (target.status === "ambiguous") {
+      return {
+        ...route,
+        engine: LOCAL_ENGINE,
+        reason: "short_firmware_followup_ambiguous_target",
+        confidence: 0.9,
+        userMessage: target.error || "Please name the exact file to update.",
+        requiresUserDecision: true,
+        decisionKind: "clarify",
+      };
+    }
+
+    const now = new Date().toISOString();
+    const taskList = normalizeTaskList({
+      id: createTaskId("tasks"),
+      actionId: null,
+      createdAt: now,
+      updatedAt: now,
+      items: [
+        {
+          id: createTaskId("edit"),
+          title: `Update ${target.path}`,
+          status: "pending",
+          kind: "opencode_edit",
+          targetPath: target.path,
+          instruction: prompt,
+        },
+      ],
+    });
+
+    return {
+      ...route,
+      engine: OPENCODE_EDIT_ENGINE,
+      reason: "short_firmware_followup",
+      confidence: 0.9,
+      persistThread: true,
+      requiresUserDecision: false,
+      decisionKind: "none",
+      taskList,
+    };
   }
 
   async #routeReferentialFollowup({ route, prompt, workspaceRoot, payload }) {
@@ -3751,6 +4059,11 @@ class AgentRuntimeManager {
 
     const routePendingAction = normalizePendingAction(route.pendingAction);
     if (!payloadPendingAction && !routePendingAction) {
+      const shortFollowupRoute = this.#routeShortFirmwareFollowup({ route, prompt, workspaceRoot, payload });
+      if (shortFollowupRoute) {
+        return shortFollowupRoute;
+      }
+
       const followupRoute = await this.#routeReferentialFollowup({ route, prompt, workspaceRoot, payload });
       if (followupRoute) {
         return followupRoute;
@@ -3815,7 +4128,7 @@ class AgentRuntimeManager {
             payload,
             reason: "planner_action_repair",
             plannerClarification: planner.clarification,
-            fallbackTaskList: planner.taskList || undefined,
+            fallbackTaskList: planner.taskList || fallbackTaskList || undefined,
           });
           if (repairedRoute) {
             return repairedRoute;
@@ -3829,6 +4142,7 @@ class AgentRuntimeManager {
             userMessage: planner.clarification,
             requiresUserDecision: true,
             decisionKind: "clarify",
+            taskList: fallbackTaskList || undefined,
           };
         }
       }
@@ -3862,6 +4176,7 @@ class AgentRuntimeManager {
         userMessage: blockedTask.error || "I need a clearer file target before changing the workspace.",
         requiresUserDecision: true,
         decisionKind: "clarify",
+        taskList: checkedTaskList,
       };
     }
 
@@ -4100,10 +4415,19 @@ class AgentRuntimeManager {
             emitActivity("completed", "Changes collected", `${changes.length} changed file${changes.length === 1 ? "" : "s"} found.`);
           }
 
-          if (intent !== "ask" && changes.length === 0 && looksLikeConfirmationOnly(output)) {
-            emitActivity("running", "Retrying without confirmation", "opencode asked for confirmation after approval; sending the approved instruction again.");
+          if (intent !== "ask" && changes.length === 0) {
+            const confirmationOnly = looksLikeConfirmationOnly(output);
+            emitActivity(
+              "running",
+              confirmationOnly ? "Retrying without confirmation" : "Retrying file edit",
+              confirmationOnly
+                ? "opencode asked for confirmation after approval; sending the approved instruction again."
+                : "opencode returned without a file diff; sending a direct file-edit retry.",
+            );
             const retryOutput = await runOpenCodeOnce(
-              `${remainingPrompt}\n\nApproval was already granted in Tantalum IDE. Do not ask for confirmation. Modify the workspace files now and finish only the remaining pending/running tasks.`,
+              confirmationOnly
+                ? `${remainingPrompt}\n\nApproval was already granted in Tantalum IDE. Do not ask for confirmation. Modify the workspace files now and finish only the remaining pending/running tasks.`
+                : buildNoDiffRetryPrompt(remainingPrompt, activeTaskList, output),
               { approvalGranted: true },
             );
             output = cleanOpenCodeOutput([output, retryOutput].filter(Boolean).join("\n\n"));
@@ -6229,9 +6553,21 @@ class AgentRuntimeManager {
 
       if (change.changeType === "delete") {
         await fsPromises.rm(targetPath, { recursive: false, force: false });
+        try {
+          await fsPromises.access(targetPath);
+          throw new Error(`${change.path} still exists after the agent delete was applied.`);
+        } catch (error) {
+          if (error?.code !== "ENOENT") {
+            throw error;
+          }
+        }
       } else {
         await fsPromises.mkdir(path.dirname(targetPath), { recursive: true });
         await fsPromises.writeFile(targetPath, change.nextContent, "utf8");
+        const writtenContent = await fsPromises.readFile(targetPath, "utf8");
+        if (writtenContent !== change.nextContent) {
+          throw new Error(`${change.path} did not match the applied agent change after writing.`);
+        }
         this.addRecentFile(targetPath);
       }
 

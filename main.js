@@ -65,6 +65,7 @@ const {
 } = require("./arduinoHandler");
 const { SecurityManager } = require("./src/agent/securityManager");
 const { AgentRuntimeManager } = require("./src/agent/opencodeRuntimeManager");
+const { AgentRestorePointStore } = require("./src/agent/restorePointStore");
 const { AgentToolRegistry } = require("./src/agent/toolRegistry");
 const { AgentToolExecutor } = require("./src/agent/toolExecutor");
 const { deriveFunctionId, getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
@@ -78,6 +79,7 @@ const APP_NAME = "Tantalum IDE";
 const APPWRITE_ENDPOINT = String(appwriteManifest.endpoint || "").replace(/\/$/, "");
 const APPWRITE_PROJECT_ID = String(appwriteManifest.projectId || "");
 const REACT_DIST_ENTRY = path.join(__dirname, "renderer-react", "dist", "index.html");
+const DEFAULT_WORKSPACE_SKETCH_FILE = "main.ino";
 const DEFAULT_EDITOR_CONTENT = `// Welcome to ${APP_NAME}
 
 void setup() {
@@ -92,9 +94,18 @@ const LOCAL_BOARD_PROFILES_KEY = "localBoardProfiles";
 const ARDUINO_STORAGE_ROOT_KEY = "arduinoStorageRoot";
 const AGENT_TOOL_SETTINGS_KEY = "agentToolSettings";
 const BOARD_DETECTION_FUNCTION_ID = deriveFunctionId(appwriteManifest, "board-detection");
-const CODE_EXTRACT_FUNCTION_ID = deriveFunctionId(appwriteManifest, "code-extract");
 const TOOLCHAIN_NOTIFICATIONS_KEY = "toolchainNotifications";
 const TOOLCHAIN_NOTIFICATIONS_LIMIT = 100;
+const BOARD_CODE_EXTRACTION_MODES = new Set(["restore-first", "force-hardware-reconstruct", "force-hardware-artifacts"]);
+const SOURCE_MARKER_STATUS_PENDING = "pending";
+const SOURCE_MARKER_STATUS_CURRENT = "current";
+const SOURCE_MARKER_STATUS_PREVIOUS = "previous";
+const SOURCE_MARKER_ALLOWED_RESTORE_STATUSES = new Set([SOURCE_MARKER_STATUS_CURRENT, SOURCE_MARKER_STATUS_PREVIOUS]);
+const SOURCE_CODE_VISIBILITY_PRIVATE = "private";
+const SOURCE_CODE_VISIBILITY_PUBLIC = "public";
+const SOURCE_CODE_VISIBILITIES = new Set([SOURCE_CODE_VISIBILITY_PRIVATE, SOURCE_CODE_VISIBILITY_PUBLIC]);
+const SOURCE_MARKER_FLASH_VIA_USB = "usb";
+const SOURCE_MARKER_FLASH_VIA_OTA = "ota";
 
 let mainWindow = null;
 let preferenceStore = null;
@@ -166,6 +177,12 @@ const agentRuntimeManager = new AgentRuntimeManager({
   listInstalledLibraries,
   emitProgress: (event) => sendRendererEvent("agent:progress", event),
 });
+const agentRestorePointStore = new AgentRestorePointStore({
+  app,
+  getWorkspaceRoot: () => currentWorkspace,
+  markWorkspaceDirty,
+  addRecentFile,
+});
 
 let pty = null;
 let cachedRipgrepPath = null;
@@ -220,7 +237,7 @@ function getRecentWorkspaces() {
 function addRecentWorkspace(workspacePath) {
   const absolutePath = path.resolve(workspacePath);
   if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isDirectory()) {
-    return { success: false, error: "The selected workspace no longer exists." };
+    return { success: false, error: "The selected Project no longer exists." };
   }
 
   const updated = [absolutePath, ...getRecentWorkspaces().filter((entry) => entry !== absolutePath)].slice(0, 10);
@@ -448,6 +465,44 @@ function createLocalBoardProfileId(profile) {
   return crypto.createHash("sha256").update(key || crypto.randomUUID()).digest("hex").slice(0, 18);
 }
 
+function createUniqueLocalBoardProfileId(profile, usedIds) {
+  const stableId = createLocalBoardProfileId(profile);
+  if (!usedIds.has(stableId)) {
+    return stableId;
+  }
+
+  const baseKey = [
+    profile?.fingerprint,
+    profile?.serialNumber,
+    profile?.pnpId,
+    profile?.locationId,
+    profile?.vendorId,
+    profile?.productId,
+    profile?.port,
+    profile?.fqbn,
+  ]
+    .map((value) => normalizeBoardText(value).toLowerCase())
+    .filter(Boolean)
+    .join("|");
+
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = crypto
+      .createHash("sha256")
+      .update(`${baseKey || stableId}|${index}`)
+      .digest("hex")
+      .slice(0, 18);
+    if (!usedIds.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 18);
+}
+
+function localBoardProfilePortKey(profile) {
+  return normalizeBoardText(profile?.port).toLowerCase();
+}
+
 function normalizeLocalBoardProfile(entry) {
   const source = entry && typeof entry === "object" ? entry : null;
   if (!source) {
@@ -482,6 +537,7 @@ function normalizeLocalBoardProfile(entry) {
     cloudLinkedAt: normalizeBoardText(source.cloudLinkedAt, 64),
     lastCloudProvisionedAt: normalizeBoardText(source.lastCloudProvisionedAt, 64),
     lastCloudUsbUploadAt: normalizeBoardText(source.lastCloudUsbUploadAt, 64),
+    sourceCodeVisibility: normalizeSourceCodeVisibility(source.sourceCodeVisibility),
     createdAt: normalizeBoardText(source.createdAt, 64) || now,
     updatedAt: now
   };
@@ -607,6 +663,7 @@ function replaceLocalBoardProfiles(profiles) {
   const existingProfiles = getLocalBoardProfiles();
   const nextProfiles = [];
   const seen = new Set();
+  const seenPorts = new Set();
   const usedExistingIds = new Set();
 
   for (const profile of profiles) {
@@ -616,7 +673,7 @@ function replaceLocalBoardProfiles(profiles) {
     }
 
     const existingProfile = findLocalBoardProfileMatch(normalized, existingProfiles, usedExistingIds, true);
-    const nextProfile = existingProfile
+    let nextProfile = existingProfile
       ? preserveLocalBoardCloudLink({
           ...existingProfile,
           ...normalized,
@@ -626,9 +683,25 @@ function replaceLocalBoardProfiles(profiles) {
           updatedAt: new Date().toISOString(),
         }, existingProfile, profile)
       : normalized;
+    const portKey = localBoardProfilePortKey(nextProfile);
+    if (portKey && seenPorts.has(portKey)) {
+      continue;
+    }
+
+    if (seen.has(nextProfile.id)) {
+      nextProfile = {
+        ...nextProfile,
+        id: createUniqueLocalBoardProfileId(nextProfile, seen),
+        createdAt: normalized.createdAt,
+        updatedAt: new Date().toISOString(),
+      };
+    }
 
     if (!seen.has(nextProfile.id)) {
       seen.add(nextProfile.id);
+      if (portKey) {
+        seenPorts.add(portKey);
+      }
       if (existingProfile) {
         usedExistingIds.add(existingProfile.id);
       }
@@ -862,7 +935,7 @@ function assertTrustedPath(targetPath, options = {}) {
   const absolutePath = path.resolve(targetPath);
 
   if (!isTrustedPath(absolutePath)) {
-    throw new Error("Blocked access to a path outside the active workspace.");
+    throw new Error("Blocked access to a path outside the active Project.");
   }
 
   if (!allowMissing && !fs.existsSync(absolutePath)) {
@@ -870,10 +943,74 @@ function assertTrustedPath(targetPath, options = {}) {
   }
 
   if (disallowWorkspaceRootDeletion && currentWorkspace && absolutePath === currentWorkspace) {
-    throw new Error("Deleting the active workspace root is not allowed.");
+    throw new Error("Deleting the active Project root is not allowed.");
   }
 
   return absolutePath;
+}
+
+function normalizeToolchainSketchSourcePayload(source) {
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+
+  if (source.kind === "inline") {
+    return {
+      kind: "inline",
+      fileName: String(source.fileName || DEFAULT_WORKSPACE_SKETCH_FILE),
+      code: String(source.code ?? DEFAULT_EDITOR_CONTENT)
+    };
+  }
+
+  if (source.kind !== "workspace") {
+    return null;
+  }
+
+  const workspacePath = assertTrustedPath(source.workspacePath);
+  const workspaceStats = fs.statSync(workspacePath);
+  if (!workspaceStats.isDirectory()) {
+    throw new Error("Project source must be a directory.");
+  }
+
+  const entryFileName = String(source.entryFileName || DEFAULT_WORKSPACE_SKETCH_FILE)
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => part !== "." && part !== "..")
+    .join("/");
+  if (entryFileName.includes("/") || !/\.(ino|pde)$/i.test(entryFileName)) {
+    throw new Error("Project entry must be a root .ino or .pde file.");
+  }
+
+  const dirtyFiles = Array.isArray(source.dirtyFiles) ? source.dirtyFiles : [];
+  const normalizedDirtyFiles = [];
+  for (const dirtyFile of dirtyFiles) {
+    if (!dirtyFile || typeof dirtyFile !== "object") {
+      continue;
+    }
+    const rawPath = String(dirtyFile.path || "").trim();
+    if (!rawPath) {
+      continue;
+    }
+    const absolutePath = path.isAbsolute(rawPath)
+      ? assertTrustedPath(rawPath, { allowMissing: true })
+      : assertTrustedPath(path.join(workspacePath, rawPath), { allowMissing: true });
+    if (!isPathInsideRoot(absolutePath, workspacePath)) {
+      continue;
+    }
+    normalizedDirtyFiles.push({
+      path: absolutePath,
+      content: String(dirtyFile.content ?? "")
+    });
+  }
+
+  return {
+    kind: "workspace",
+    workspacePath,
+    entryFileName,
+    dirtyFiles: normalizedDirtyFiles
+  };
 }
 
 function toErrorResult(error) {
@@ -1022,7 +1159,7 @@ function createGitError(message, code, details = {}) {
 
 function getGitWorkspaceRoot() {
   if (!currentWorkspace) {
-    throw createGitError("Open a workspace folder before using Git.", "NO_WORKSPACE");
+    throw createGitError("Open a Project before using Git.", "NO_WORKSPACE");
   }
 
   return currentWorkspace;
@@ -1050,7 +1187,7 @@ function classifyGitFailure(args, stdout, stderr, code) {
   }
 
   if (lowerOutput.includes("not a git repository") || lowerOutput.includes("not a git repo")) {
-    return createGitError("The active workspace is not a Git repository.", "NOT_REPOSITORY", {
+    return createGitError("The active Project is not a Git repository.", "NOT_REPOSITORY", {
       command,
       output,
       exitCode: code
@@ -1311,12 +1448,12 @@ function normalizeGitPathList(paths) {
     }
 
     if (path.isAbsolute(candidate)) {
-      throw new Error("Git file paths must be relative to the active workspace.");
+      throw new Error("Git file paths must be relative to the active Project.");
     }
 
     const absolutePath = path.resolve(rootPath, candidate);
     if (!isPathInsideRoot(absolutePath, rootPath)) {
-      throw new Error("Blocked Git access to a path outside the active workspace.");
+      throw new Error("Blocked Git access to a path outside the active Project.");
     }
 
     const relativePath = path.relative(rootPath, absolutePath).replace(/\\/g, "/");
@@ -1369,7 +1506,7 @@ async function detectGitOperation(gitDir) {
 
 async function getGitStatus() {
   if (!currentWorkspace) {
-    return createGitStatusState("no-workspace", "Open a workspace folder to use Git.");
+    return createGitStatusState("no-workspace", "Open a Project to use Git.");
   }
 
   try {
@@ -1416,7 +1553,7 @@ async function getGitStatus() {
     }
 
     if (error?.code === "NOT_REPOSITORY") {
-      return createGitStatusState("not-repository", "The active workspace is not a Git repository.");
+      return createGitStatusState("not-repository", "The active Project is not a Git repository.");
     }
 
     throw error;
@@ -1941,7 +2078,7 @@ async function discardGitPaths(payload = {}) {
     for (const relativePath of paths) {
       const absolutePath = path.resolve(rootPath, relativePath);
       if (!isPathInsideRoot(absolutePath, rootPath)) {
-        throw new Error("Blocked Git discard outside the active workspace.");
+        throw new Error("Blocked Git discard outside the active Project.");
       }
 
       if (fs.existsSync(absolutePath)) {
@@ -2059,6 +2196,7 @@ const WORKSPACE_SEARCH_DEFAULT_GLOBS = [
   "!**/node_modules/**",
   "!**/dist/**",
   "!**/build/**",
+  "!**/.tentalum/**",
   "!**/.tantalum-file-tree-trash/**",
   "!**/.trash_*/**",
 ];
@@ -2420,7 +2558,7 @@ function isSensitiveAgentContextRelativePath(relativePath) {
   const normalized = normalizeAgentContextRelativePath(relativePath);
   const parts = normalized.split("/").filter(Boolean);
   return (
-    parts.some((part) => part === ".git" || part === "node_modules" || part === "dist" || part === "build") ||
+    parts.some((part) => part === ".git" || part === ".tentalum" || part === "node_modules" || part === "dist" || part === "build") ||
     AGENT_CONTEXT_SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(parts.at(-1) || normalized))
   );
 }
@@ -2728,7 +2866,7 @@ async function readAgentContextFile(payload = {}) {
   const rootPath = ensureActiveWorkspace();
   const absolutePath = assertTrustedPath(payload.path);
   if (!isPathInsideRoot(absolutePath, rootPath)) {
-    throw new Error("Blocked access to a path outside the active workspace.");
+    throw new Error("Blocked access to a path outside the active Project.");
   }
 
   const relativePath = normalizeAgentContextRelativePath(path.relative(rootPath, absolutePath));
@@ -2767,7 +2905,7 @@ async function readAgentContextFile(payload = {}) {
 
 function ensureActiveWorkspace() {
   if (!currentWorkspace) {
-    throw new Error("Open a workspace folder before searching.");
+    throw new Error("Open a Project before searching.");
   }
 
   return currentWorkspace;
@@ -3063,7 +3201,7 @@ function sendMenuAction(action) {
 function fileDialogFilters() {
   return [
     { name: "Supported Source Files", extensions: ["ino", "cpp", "c", "h", "hpp", "js", "jsx", "ts", "tsx", "json", "md", "txt", "css", "html", "yaml", "yml", "toml", "ini"] },
-    { name: "Arduino Sketches", extensions: ["ino", "cpp", "c", "h", "hpp"] },
+    { name: "Arduino Project Files", extensions: ["ino", "cpp", "c", "h", "hpp"] },
     { name: "All Files", extensions: ["*"] }
   ];
 }
@@ -3270,10 +3408,16 @@ const APPWRITE_FIRMWARE_LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 const APPWRITE_AGENT_BOOTSTRAP_CACHE_TTL_MS = 60 * 1000;
 const APPWRITE_AGENT_THREADS_CACHE_TTL_MS = 60 * 1000;
 const APPWRITE_AGENT_MESSAGES_CACHE_TTL_MS = 30 * 1000;
+const APPWRITE_AGENT_SETTINGS_WARM_INITIAL_DELAY_MS = 5 * 1000;
+const APPWRITE_AGENT_SETTINGS_WARM_INTERVAL_MS = 4 * 60 * 1000;
+const APPWRITE_AGENT_SETTINGS_WARM_STALE_MS = 2 * 60 * 1000;
 const appwriteReadCache = new Map();
 const appwriteInflightReadCache = new Map();
 let appwriteReadCacheEpoch = 0;
 let appwriteJwtCache = { sessionKey: "", jwt: "", expiresAt: 0 };
+let agentSettingsWarmTimer = null;
+let agentSettingsWarmInFlight = null;
+let lastAgentSettingsWarmAt = 0;
 
 function cloneAppwritePayload(payload) {
   try {
@@ -3367,10 +3511,13 @@ function clearAppwriteReadCache() {
   appwriteInflightReadCache.clear();
 }
 
-async function cachedAppwriteRequest(request, { ttlMs = 0, cacheKey = "", bypassCache = false } = {}) {
+async function cachedAppwriteRequest(
+  request,
+  { ttlMs = 0, cacheKey = "", bypassCache = false, requestExecutor = appwriteRequest, shouldCachePayload = () => true } = {},
+) {
   const safeTtlMs = Number(ttlMs || 0);
   if (bypassCache || !Number.isFinite(safeTtlMs) || safeTtlMs <= 0) {
-    return appwriteRequest(request);
+    return requestExecutor(request);
   }
 
   const now = Date.now();
@@ -3388,9 +3535,16 @@ async function cachedAppwriteRequest(request, { ttlMs = 0, cacheKey = "", bypass
   }
 
   const cacheEpoch = appwriteReadCacheEpoch;
-  const promise = appwriteRequest({ ...request, invalidateCache: false })
+  const promise = requestExecutor({ ...request, invalidateCache: false })
     .then((payload) => {
-      if (cacheEpoch === appwriteReadCacheEpoch) {
+      let cacheable = false;
+      try {
+        cacheable = shouldCachePayload(payload);
+      } catch {
+        cacheable = false;
+      }
+
+      if (cacheable && cacheEpoch === appwriteReadCacheEpoch) {
         appwriteReadCache.set(key, {
           expiresAt: Date.now() + safeTtlMs,
           payload: cloneAppwritePayload(payload),
@@ -3419,7 +3573,7 @@ function defaultDatabaseListCacheTtlMs(collectionId) {
 }
 
 function functionExecutionCacheTtlMs(payload) {
-  if (payload?.async) {
+  if (payload?.async && !payload?.waitForCompletion) {
     return 0;
   }
 
@@ -3502,6 +3656,84 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   return payload;
 }
 
+async function warmAgentSettingsFunction(reason = "background") {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.agentSettingsFunctionId) {
+    return;
+  }
+
+  if (agentSettingsWarmInFlight) {
+    return agentSettingsWarmInFlight;
+  }
+
+  agentSettingsWarmInFlight = appwriteRequest({
+      method: "POST",
+      pathName: `functions/${encodeURIComponent(cloudConfig.agentSettingsFunctionId)}/executions`,
+      useSession: false,
+      invalidateCache: false,
+      body: {
+        body: JSON.stringify({ reason }),
+        async: false,
+        path: "/warm",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      },
+    })
+    .then((payload) => {
+      lastAgentSettingsWarmAt = Date.now();
+      return payload;
+    })
+    .finally(() => {
+      agentSettingsWarmInFlight = null;
+    });
+
+  try {
+    return await agentSettingsWarmInFlight;
+  } catch (error) {
+    console.warn("Agent settings warmup failed:", error?.message || error);
+    return null;
+  }
+}
+
+function isPassiveAgentSettingsRead(payload) {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.agentSettingsFunctionId || payload?.functionId !== cloudConfig.agentSettingsFunctionId) {
+    return false;
+  }
+
+  if (String(payload?.method ?? "POST").toUpperCase() !== "POST") {
+    return false;
+  }
+
+  return ["/bootstrap", "/", "/threads/list", "/threads/messages"].includes(String(payload?.pathName ?? "/"));
+}
+
+async function warmAgentSettingsFunctionIfStale(reason = "preflight") {
+  if (Date.now() - lastAgentSettingsWarmAt < APPWRITE_AGENT_SETTINGS_WARM_STALE_MS) {
+    return;
+  }
+
+  await warmAgentSettingsFunction(reason);
+}
+
+function startAgentSettingsWarmLoop() {
+  if (agentSettingsWarmTimer) {
+    clearInterval(agentSettingsWarmTimer);
+  }
+
+  setTimeout(() => {
+    void warmAgentSettingsFunction("startup");
+  }, APPWRITE_AGENT_SETTINGS_WARM_INITIAL_DELAY_MS);
+
+  agentSettingsWarmTimer = setInterval(() => {
+    void warmAgentSettingsFunction("interval");
+  }, APPWRITE_AGENT_SETTINGS_WARM_INTERVAL_MS);
+
+  if (typeof agentSettingsWarmTimer.unref === "function") {
+    agentSettingsWarmTimer.unref();
+  }
+}
+
 function cloudFirmwarePermissions(userId) {
   return [
     Permission.read(Role.user(userId)),
@@ -3526,10 +3758,50 @@ function cloudFirmwareSourceFilePermissions(userId) {
   ];
 }
 
+function normalizeSourceCodeVisibility(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return SOURCE_CODE_VISIBILITIES.has(normalized) ? normalized : SOURCE_CODE_VISIBILITY_PRIVATE;
+}
+
+function sourceCodePublicReadRole() {
+  return Role.users();
+}
+
+function cloudSourceSnapshotPermissions(userId, visibility = SOURCE_CODE_VISIBILITY_PRIVATE) {
+  const readRole = normalizeSourceCodeVisibility(visibility) === SOURCE_CODE_VISIBILITY_PUBLIC
+    ? sourceCodePublicReadRole()
+    : Role.user(userId);
+  return [
+    Permission.read(readRole),
+    Permission.update(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
+}
+
+function normalizeSourceMarkerFlashedVia(value, operation = "") {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === SOURCE_MARKER_FLASH_VIA_USB || normalized === SOURCE_MARKER_FLASH_VIA_OTA) {
+    return normalized;
+  }
+  const normalizedOperation = String(operation || "").trim().toLowerCase();
+  if (normalizedOperation === "firmware-release" || normalizedOperation === "ota" || normalizedOperation === "cloud-release") {
+    return SOURCE_MARKER_FLASH_VIA_OTA;
+  }
+  return SOURCE_MARKER_FLASH_VIA_USB;
+}
+
 function requireCloudConfigForSourceSnapshots() {
   const cloudConfig = requireCloudConfigForFirmware();
   if (!cloudConfig.firmwareSourceBucketId) {
     throw new Error("Cloud firmware source snapshot storage is not configured.");
+  }
+  return cloudConfig;
+}
+
+function requireCloudConfigForSourceMarkers() {
+  const cloudConfig = requireCloudConfigForSourceSnapshots();
+  if (!cloudConfig.sourceSnapshotsCollectionId) {
+    throw new Error("Cloud source marker storage is not configured.");
   }
   return cloudConfig;
 }
@@ -3555,6 +3827,379 @@ function parseSourceSnapshotManifest(value) {
   }
 }
 
+function normalizeSourceRestoreMarker(value = null) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const markerId = String(value.markerId || "").trim();
+  const snapshotChecksum = String(value.snapshotChecksum || value.sourceSnapshotChecksum || "").trim().toLowerCase();
+  if (!/^source_[a-z0-9_-]{8,80}$/i.test(markerId) || !/^[a-f0-9]{64}$/.test(snapshotChecksum)) {
+    return null;
+  }
+  return { markerId, snapshotChecksum };
+}
+
+function sourceMarkerRetentionGroup(identity = {}) {
+  if (identity.cloudBoardId || identity.id) {
+    return `cloud:${identity.cloudBoardId || identity.id}`;
+  }
+  if (identity.fingerprint) {
+    return `fingerprint:${identity.fingerprint}`;
+  }
+  if (identity.profileId) {
+    return `profile:${identity.profileId}`;
+  }
+  if (identity.port && identity.fqbn) {
+    return `port:${identity.port}|${identity.fqbn}`;
+  }
+  return "";
+}
+
+function sourceSnapshotManifestMarkerId(manifest = null) {
+  const metadata = manifest && typeof manifest === "object" && manifest.metadata && typeof manifest.metadata === "object"
+    ? manifest.metadata
+    : {};
+  return String(
+    metadata.sourceMarkerId ||
+    metadata.sourceRestoreMarkerId ||
+    metadata.sourceMarker?.markerId ||
+    metadata.sourceRestoreMarker?.markerId ||
+    "",
+  ).trim();
+}
+
+function sourceMarkerDocumentSummary(document = null) {
+  if (!document || typeof document !== "object") {
+    return null;
+  }
+  return {
+    id: document.$id || document.markerId || "",
+    markerId: document.markerId || document.$id || "",
+    status: document.status || "",
+    retentionGroup: document.retentionGroup || "",
+    boardId: document.boardId || "",
+    boardName: document.boardName || "",
+    boardType: document.boardType || "",
+    profileId: document.profileId || "",
+    fingerprint: document.fingerprint || "",
+    port: document.port || "",
+    uploadId: document.uploadId || "",
+    firmwareId: document.firmwareId || "",
+    createdAt: document.createdAt || "",
+    appliedAt: document.appliedAt || "",
+    sourceSnapshotFileId: document.sourceSnapshotFileId || "",
+    visibility: normalizeSourceCodeVisibility(document.visibility),
+    flashedVia: document.flashedVia || "",
+    visibilityUpdatedAt: document.visibilityUpdatedAt || "",
+  };
+}
+
+async function createPendingSourceRestoreMarker(payload = {}) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  const sourceSnapshot = payload.sourceSnapshot || {};
+  if (!Array.isArray(sourceSnapshot.files) || sourceSnapshot.files.length === 0) {
+    throw new Error("No source files were available for the cloud source marker.");
+  }
+
+  const user = await appwriteRequest({ pathName: "account" });
+  const identity = normalizeBoardCodeIdentity(payload.identity || payload.sourceIdentity || payload.board || {});
+  const markerId = payload.markerId || `source_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+  const retentionGroup = String(payload.retentionGroup || sourceMarkerRetentionGroup(identity)).trim();
+  if (!retentionGroup) {
+    throw new Error("Cloud source marker requires a board identity.");
+  }
+  const operation = payload.operation || sourceSnapshot.metadata?.operation || "source-marker-upload";
+  const visibility = normalizeSourceCodeVisibility(payload.visibility || payload.sourceCodeVisibility || payload.metadata?.sourceCodeVisibility || identity.sourceCodeVisibility);
+  const flashedVia = normalizeSourceMarkerFlashedVia(payload.flashedVia || payload.metadata?.flashedVia, operation);
+
+  let snapshot = null;
+  try {
+    snapshot = await createAndUploadSourceSnapshot({
+      fileId: markerId,
+      sourceSnapshot,
+      visibility,
+      metadata: {
+        operation,
+        ...(payload.metadata || {}),
+        sourceMarkerId: markerId,
+        sourceMarkerVersion: 1,
+        retentionGroup,
+        sourceCodeVisibility: visibility,
+        flashedVia,
+        boardId: identity.cloudBoardId || identity.id || "",
+        boardName: identity.boardName || sourceSnapshot.metadata?.boardName || "",
+        boardType: identity.fqbn || "",
+        profileId: identity.profileId || "",
+        fingerprint: identity.fingerprint || "",
+        port: identity.port || "",
+        uploadId: payload.uploadId || sourceSnapshot.metadata?.uploadId || "",
+        firmwareId: payload.firmwareId || "",
+      },
+    });
+
+    const now = new Date().toISOString();
+    const documentData = {
+      userId: user.$id,
+      markerId,
+      sourceSnapshotFileId: snapshot.fileId,
+      sourceSnapshotChecksum: snapshot.checksum,
+      sourceSnapshotManifest: sourceSnapshotManifestValue(snapshot.manifest),
+      status: SOURCE_MARKER_STATUS_PENDING,
+      retentionGroup,
+      visibility,
+      flashedVia,
+      visibilityUpdatedAt: now,
+      boardId: identity.cloudBoardId || identity.id || "",
+      boardName: identity.boardName || sourceSnapshot.metadata?.boardName || "",
+      boardType: identity.fqbn || "",
+      profileId: identity.profileId || "",
+      fingerprint: identity.fingerprint || "",
+      port: identity.port || "",
+      uploadId: payload.uploadId || sourceSnapshot.metadata?.uploadId || "",
+      firmwareId: payload.firmwareId || "",
+      createdAt: now,
+      appliedAt: null,
+    };
+    const document = await appwriteRequest({
+      method: "POST",
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents`,
+      body: {
+        documentId: markerId,
+        data: documentData,
+        permissions: cloudSourceSnapshotPermissions(user.$id, visibility),
+      },
+    });
+
+    return {
+      markerId,
+      snapshotChecksum: snapshot.checksum,
+      sourceSnapshotFileId: snapshot.fileId,
+      sourceSnapshotChecksum: snapshot.checksum,
+      sourceSnapshotManifest: snapshot.manifest,
+      createdAt: snapshot.createdAt,
+      retentionGroup,
+      document,
+      status: SOURCE_MARKER_STATUS_PENDING,
+    };
+  } catch (error) {
+    if (snapshot?.fileId) {
+      await deleteAppwriteFileQuiet(cloudConfig.firmwareSourceBucketId, snapshot.fileId);
+    }
+    throw error;
+  }
+}
+
+async function getSourceMarkerDocument(markerId) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  const normalizedMarkerId = String(markerId || "").trim();
+  if (!normalizedMarkerId) {
+    return null;
+  }
+  try {
+    return await appwriteRequest({
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents/${encodeURIComponent(normalizedMarkerId)}`,
+    });
+  } catch (error) {
+    if (error?.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function deleteAppwriteFileQuiet(bucketId, fileId) {
+  if (!bucketId || !fileId) {
+    return;
+  }
+  try {
+    await appwriteRequest({
+      method: "DELETE",
+      pathName: `storage/buckets/${encodeURIComponent(bucketId)}/files/${encodeURIComponent(fileId)}`,
+    });
+  } catch (error) {
+    if (error?.status !== 404) {
+      console.warn("Unable to delete source marker file:", error.message || error);
+    }
+  }
+}
+
+async function updateAppwriteFilePermissionsQuiet(bucketId, fileId, permissions = []) {
+  if (!bucketId || !fileId || !Array.isArray(permissions) || permissions.length === 0) {
+    return;
+  }
+  try {
+    await appwriteRequest({
+      method: "PUT",
+      pathName: `storage/buckets/${encodeURIComponent(bucketId)}/files/${encodeURIComponent(fileId)}`,
+      body: {
+        permissions,
+      },
+    });
+  } catch (error) {
+    console.warn("Unable to update source snapshot file permissions:", error.message || error);
+  }
+}
+
+async function deleteSourceMarkerDocumentQuiet(cloudConfig, documentId) {
+  if (!documentId) {
+    return;
+  }
+  try {
+    await appwriteRequest({
+      method: "DELETE",
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents/${encodeURIComponent(documentId)}`,
+    });
+  } catch (error) {
+    if (error?.status !== 404) {
+      console.warn("Unable to delete source marker document:", error.message || error);
+    }
+  }
+}
+
+async function discardSourceRestoreMarker(payload = {}) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  const markerId = String(payload.markerId || payload.sourceRestoreMarker?.markerId || "").trim();
+  if (!markerId) {
+    return { discarded: false };
+  }
+  const document = await getSourceMarkerDocument(markerId);
+  if (!document) {
+    return { discarded: false };
+  }
+  if (document.status === SOURCE_MARKER_STATUS_PENDING) {
+    await deleteAppwriteFileQuiet(cloudConfig.firmwareSourceBucketId, document.sourceSnapshotFileId);
+    await deleteSourceMarkerDocumentQuiet(cloudConfig, document.$id || markerId);
+    clearAppwriteReadCache();
+    return { discarded: true };
+  }
+  return { discarded: false, reason: `Source marker is ${document.status || "not pending"}.` };
+}
+
+async function listSourceMarkerDocuments(retentionGroup, queries = []) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  if (!retentionGroup) {
+    return [];
+  }
+  const response = await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents`,
+    queries: [
+      Query.equal("retentionGroup", retentionGroup),
+      ...queries,
+    ],
+  });
+  return Array.isArray(response.documents) ? response.documents : [];
+}
+
+async function applySourceMarkerRetention(cloudConfig, retentionGroup, currentMarkerId) {
+  const documents = await listSourceMarkerDocuments(retentionGroup, [
+    Query.orderDesc("createdAt"),
+    Query.limit(25),
+  ]);
+  const currentDocuments = documents
+    .filter((document) => document.status === SOURCE_MARKER_STATUS_CURRENT && document.$id !== currentMarkerId)
+    .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
+  const previousDocuments = documents
+    .filter((document) => document.status === SOURCE_MARKER_STATUS_PREVIOUS)
+    .sort((left, right) => String(right.appliedAt || right.createdAt || "").localeCompare(String(left.appliedAt || left.createdAt || "")));
+
+  if (currentDocuments[0]) {
+    await appwriteRequest({
+      method: "PATCH",
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents/${encodeURIComponent(currentDocuments[0].$id)}`,
+      body: {
+        data: {
+          status: SOURCE_MARKER_STATUS_PREVIOUS,
+        },
+      },
+    });
+  }
+
+  const keepPreviousId = currentDocuments[0]?.$id || previousDocuments[0]?.$id || "";
+  const deleteCandidates = [
+    ...currentDocuments.slice(1),
+    ...previousDocuments.filter((document) => document.$id !== keepPreviousId),
+    ...documents.filter((document) => document.status === SOURCE_MARKER_STATUS_PENDING && document.$id !== currentMarkerId),
+  ];
+  for (const document of deleteCandidates) {
+    await deleteAppwriteFileQuiet(cloudConfig.firmwareSourceBucketId, document.sourceSnapshotFileId);
+    await deleteSourceMarkerDocumentQuiet(cloudConfig, document.$id);
+  }
+}
+
+async function promoteSourceRestoreMarker(payload = {}) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  const markerId = String(payload.markerId || payload.sourceRestoreMarker?.markerId || "").trim();
+  if (!markerId) {
+    return { promoted: false };
+  }
+  const document = await getSourceMarkerDocument(markerId);
+  if (!document) {
+    throw new Error("Cloud source marker was not found.");
+  }
+  if (document.status !== SOURCE_MARKER_STATUS_PENDING && document.status !== SOURCE_MARKER_STATUS_CURRENT) {
+    throw new Error(`Cloud source marker cannot be promoted from status ${document.status}.`);
+  }
+
+  const appliedAt = new Date().toISOString();
+  await appwriteRequest({
+    method: "PATCH",
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents/${encodeURIComponent(document.$id || markerId)}`,
+    body: {
+      data: {
+        status: SOURCE_MARKER_STATUS_CURRENT,
+        appliedAt,
+        firmwareId: String(payload.firmwareId || document.firmwareId || ""),
+      },
+    },
+  });
+  await applySourceMarkerRetention(cloudConfig, document.retentionGroup, document.$id || markerId);
+  clearAppwriteReadCache();
+  return { promoted: true, markerId, appliedAt };
+}
+
+async function setBoardCodeVisibility(payload = {}) {
+  const cloudConfig = requireCloudConfigForSourceMarkers();
+  const visibility = normalizeSourceCodeVisibility(payload.visibility);
+  const identity = normalizeBoardCodeIdentity(payload.identity || payload.board || payload.sourceIdentity || {});
+  const retentionGroup = String(payload.retentionGroup || sourceMarkerRetentionGroup(identity)).trim();
+  if (!retentionGroup) {
+    throw new Error("Board code visibility requires a board identity.");
+  }
+
+  const user = await appwriteRequest({ pathName: "account" });
+  const permissions = cloudSourceSnapshotPermissions(user.$id, visibility);
+  const now = new Date().toISOString();
+  const documents = await listSourceMarkerDocuments(retentionGroup, [
+    Query.equal("status", [SOURCE_MARKER_STATUS_CURRENT, SOURCE_MARKER_STATUS_PREVIOUS]),
+    Query.orderDesc("createdAt"),
+    Query.limit(10),
+  ]);
+
+  let updated = 0;
+  for (const document of documents) {
+    await appwriteRequest({
+      method: "PATCH",
+      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.sourceSnapshotsCollectionId)}/documents/${encodeURIComponent(document.$id)}`,
+      body: {
+        data: {
+          visibility,
+          visibilityUpdatedAt: now,
+        },
+        permissions,
+      },
+    });
+    await updateAppwriteFilePermissionsQuiet(cloudConfig.firmwareSourceBucketId, document.sourceSnapshotFileId, permissions);
+    updated += 1;
+  }
+  clearAppwriteReadCache();
+  return {
+    visibility,
+    updated,
+    retentionGroup,
+    updatedAt: now,
+  };
+}
+
 async function createAndUploadSourceSnapshot(payload = {}) {
   const cloudConfig = requireCloudConfigForSourceSnapshots();
   const sourceSnapshot = payload.sourceSnapshot || {};
@@ -3571,7 +4216,7 @@ async function createAndUploadSourceSnapshot(payload = {}) {
   const multipart = buildMultipartBody({
     fields: [
       ["fileId", fileId],
-      ...cloudFirmwareSourceFilePermissions(user.$id).map((permission) => ["permissions[]", permission]),
+      ...cloudSourceSnapshotPermissions(user.$id, payload.visibility).map((permission) => ["permissions[]", permission]),
     ],
     files: [
       {
@@ -3630,24 +4275,65 @@ function firmwareSourceSnapshotFields(snapshot) {
   };
 }
 
-async function fetchFirmwareForBoardCode(cloudConfig, boardId, firmwareId = "") {
-  const desiredFirmwareId = String(firmwareId || "").trim();
-  if (desiredFirmwareId) {
-    return await appwriteRequest({
-      pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents/${encodeURIComponent(desiredFirmwareId)}`,
-    });
+async function fetchFirmwareDocument(cloudConfig, firmwareId = "") {
+  const normalizedFirmwareId = String(firmwareId || "").trim();
+  if (!normalizedFirmwareId) {
+    return null;
+  }
+  return await appwriteRequest({
+    pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents/${encodeURIComponent(normalizedFirmwareId)}`,
+  });
+}
+
+async function listFirmwareDocumentsForBoard(cloudConfig, boardId, { deployedOnly = false, limit = 25 } = {}) {
+  const queries = [
+    Query.equal("boardId", boardId),
+    Query.orderDesc("uploadedAt"),
+    Query.limit(limit),
+  ];
+  if (deployedOnly) {
+    queries.splice(1, 0, Query.equal("deployed", true));
   }
 
-  const deployed = await appwriteRequest({
+  const response = await appwriteRequest({
     pathName: `databases/${encodeURIComponent(cloudConfig.databaseId)}/collections/${encodeURIComponent(cloudConfig.firmwareCollectionId)}/documents`,
-    queries: [
-      Query.equal("boardId", boardId),
-      Query.equal("deployed", true),
-      Query.orderDesc("uploadedAt"),
-      Query.limit(1),
-    ],
+    queries,
   });
-  return Array.isArray(deployed.documents) ? deployed.documents[0] || null : null;
+  return Array.isArray(response.documents) ? response.documents : [];
+}
+
+async function fetchFirmwareForBoardCode(cloudConfig, boardId, firmwareId = "") {
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (firmware) => {
+    if (!firmware?.$id || seen.has(firmware.$id)) {
+      return;
+    }
+    seen.add(firmware.$id);
+    candidates.push(firmware);
+  };
+
+  try {
+    addCandidate(await fetchFirmwareDocument(cloudConfig, firmwareId));
+  } catch {
+    // Fall back to board history below when the requested firmware is unavailable.
+  }
+  try {
+    for (const firmware of await listFirmwareDocumentsForBoard(cloudConfig, boardId, { deployedOnly: true })) {
+      addCandidate(firmware);
+    }
+  } catch {
+    // Continue with the broader firmware-history query.
+  }
+  try {
+    for (const firmware of await listFirmwareDocumentsForBoard(cloudConfig, boardId, { deployedOnly: false })) {
+      addCandidate(firmware);
+    }
+  } catch {
+    // Returning the candidates already collected is still better than failing restore entirely.
+  }
+
+  return candidates.find((firmware) => firmware.sourceSnapshotFileId) || candidates[0] || null;
 }
 
 async function restoreCloudSourceSnapshot(boardPayload = {}) {
@@ -3678,51 +4364,490 @@ async function restoreCloudSourceSnapshot(boardPayload = {}) {
   }
 
   const restored = await boardCodeService.readZipEntriesFromBuffer(snapshotBuffer);
+  const manifest = restored.manifest || parseSourceSnapshotManifest(firmware.sourceSnapshotManifest);
+  const identity = normalizeBoardCodeIdentity({
+    ...boardPayload,
+    cloudBoardId: boardId,
+    id: boardId,
+    fqbn: board.boardType || boardPayload.fqbn || boardPayload.boardType,
+  });
+  const validation = boardCodeService.validateSourceSnapshotManifestForIdentity(manifest, identity, { source: "snapshot" });
   return {
     files: restored.files,
-    manifest: restored.manifest || parseSourceSnapshotManifest(firmware.sourceSnapshotManifest),
+    manifest,
+    validation,
     board,
     firmware,
   };
 }
 
-async function executeCodeExtractAi(payload) {
-  if (!CODE_EXTRACT_FUNCTION_ID) {
+async function restoreSourceMarkerSnapshotDocument(document = null, boardPayload = {}, options = {}) {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.firmwareSourceBucketId || !document?.sourceSnapshotFileId) {
     return null;
   }
 
-  const headers = { "content-type": "application/json" };
-  try {
-    const jwt = await getCurrentAppwriteJwt();
-    if (jwt) {
-      headers["X-Appwrite-JWT"] = jwt;
-    }
-  } catch {
-    // The function will reject the request if user context is required and unavailable.
+  const markerId = String(document.markerId || document.$id || options.marker?.markerId || "").trim();
+  const expectedMarker = normalizeSourceRestoreMarker(options.marker || {
+    markerId,
+    snapshotChecksum: document.sourceSnapshotChecksum,
+  });
+  if (!SOURCE_MARKER_ALLOWED_RESTORE_STATUSES.has(String(document.status || ""))) {
+    throw new Error(`Source marker ${markerId || document.$id || ""} is not current or previous.`);
+  }
+  if (expectedMarker && document.sourceSnapshotChecksum && expectedMarker.snapshotChecksum !== String(document.sourceSnapshotChecksum).trim().toLowerCase()) {
+    throw new Error("Source marker checksum does not match the cloud source snapshot record.");
   }
 
-  const execution = await appwriteRequest({
-    method: "POST",
-    pathName: `functions/${encodeURIComponent(CODE_EXTRACT_FUNCTION_ID)}/executions`,
-    body: {
-      body: JSON.stringify(payload),
-      async: false,
-      path: "/",
-      method: "POST",
-      headers,
+  const snapshotBuffer = await downloadAppwriteFileBuffer(cloudConfig.firmwareSourceBucketId, document.sourceSnapshotFileId);
+  const actualChecksum = crypto.createHash("sha256").update(snapshotBuffer).digest("hex");
+  if (document.sourceSnapshotChecksum && actualChecksum !== String(document.sourceSnapshotChecksum).trim().toLowerCase()) {
+    throw new Error("Saved source marker snapshot checksum does not match the cloud record.");
+  }
+  if (expectedMarker && actualChecksum !== expectedMarker.snapshotChecksum) {
+    throw new Error("Saved source marker snapshot checksum does not match the firmware marker.");
+  }
+
+  const restored = await boardCodeService.readZipEntriesFromBuffer(snapshotBuffer);
+  const manifest = restored.manifest || parseSourceSnapshotManifest(document.sourceSnapshotManifest);
+  const manifestMarkerId = sourceSnapshotManifestMarkerId(manifest);
+  if (!manifestMarkerId || manifestMarkerId !== markerId) {
+    throw new Error("Saved source snapshot manifest does not match the firmware source marker.");
+  }
+
+  const identity = normalizeBoardCodeIdentity({
+    ...boardPayload,
+    cloudBoardId: boardPayload.cloudBoardId || boardPayload.id || document.boardId,
+    id: boardPayload.id || document.boardId,
+    fqbn: boardPayload.fqbn || boardPayload.boardType || document.boardType,
+    boardType: boardPayload.boardType || document.boardType,
+    profileId: boardPayload.profileId || document.profileId,
+    fingerprint: boardPayload.fingerprint || document.fingerprint,
+    port: boardPayload.port || document.port,
+    name: boardPayload.name || document.boardName,
+  });
+  const validation = boardCodeService.validateSourceSnapshotManifestForIdentity(manifest, identity, { source: "source-marker" });
+  if (validation.unsafeScope) {
+    throw new Error(validation.reason || "Cloud source marker snapshot was rejected because it contains a broad Project snapshot.");
+  }
+  if (!options.verifiedFromFirmware && !validation.accepted) {
+    throw new Error(validation.reason || "Cloud source marker snapshot did not match this board.");
+  }
+
+  return {
+    files: restored.files,
+    manifest,
+    validation,
+    marker: expectedMarker || { markerId, snapshotChecksum: actualChecksum },
+    markerDocument: document,
+    verifiedFromFirmware: Boolean(options.verifiedFromFirmware),
+    restoreStatus: options.verifiedFromFirmware
+      ? "firmware-marker-restored"
+      : "current-marker-restored-without-firmware-verification",
+  };
+}
+
+async function restoreSourceMarkerSnapshot(marker = null, boardPayload = {}, options = {}) {
+  const normalizedMarker = normalizeSourceRestoreMarker(marker);
+  if (!normalizedMarker) {
+    return null;
+  }
+  const document = await getSourceMarkerDocument(normalizedMarker.markerId);
+  if (!document) {
+    throw new Error("Firmware source marker was found, but no matching cloud source snapshot exists.");
+  }
+  return restoreSourceMarkerSnapshotDocument(document, boardPayload, {
+    ...options,
+    marker: normalizedMarker,
+    verifiedFromFirmware: true,
+  });
+}
+
+async function restoreCurrentSourceMarkerSnapshotForBoard(boardPayload = {}) {
+  const cloudConfig = getRendererCloudConfig();
+  if (!cloudConfig.databaseId || !cloudConfig.sourceSnapshotsCollectionId || !cloudConfig.firmwareSourceBucketId) {
+    return null;
+  }
+  const identity = normalizeBoardCodeIdentity(boardPayload);
+  const boardId = identity.cloudBoardId || boardPayload.id || "";
+  if (!boardId) {
+    return null;
+  }
+  const retentionGroup = `cloud:${boardId}`;
+  const documents = await listSourceMarkerDocuments(retentionGroup, [
+    Query.equal("status", SOURCE_MARKER_STATUS_CURRENT),
+    Query.orderDesc("createdAt"),
+    Query.limit(1),
+  ]);
+  if (!documents[0]) {
+    return null;
+  }
+  return restoreSourceMarkerSnapshotDocument(documents[0], {
+    ...boardPayload,
+    cloudBoardId: boardId,
+    id: boardId,
+  }, {
+    verifiedFromFirmware: false,
+  });
+}
+
+function sourceMarkerSnapshotSummary(document = {}, options = {}) {
+  return {
+    id: document.$id || document.markerId || "",
+    markerId: document.markerId || document.$id || "",
+    status: document.status || "",
+    visibility: normalizeSourceCodeVisibility(document.visibility),
+    flashedVia: document.flashedVia || "",
+    boardId: document.boardId || "",
+    boardName: document.boardName || "",
+    boardType: document.boardType || "",
+    profileId: document.profileId || "",
+    fingerprint: document.fingerprint || "",
+    port: document.port || "",
+    uploadId: document.uploadId || "",
+    firmwareId: document.firmwareId || "",
+    createdAt: document.createdAt || "",
+    appliedAt: document.appliedAt || "",
+    visibilityUpdatedAt: document.visibilityUpdatedAt || "",
+    markerVerifiedFromFirmware: Boolean(options.markerVerifiedFromFirmware),
+    firmwareMarkerMatched: Boolean(options.firmwareMarkerMatched),
+    sourceSnapshotChecksum: document.sourceSnapshotChecksum || "",
+  };
+}
+
+function sourceMarkerScanDiagnostic(scan = null) {
+  if (!scan || typeof scan !== "object") {
+    return "";
+  }
+  const details = [
+    scan.reason || "",
+    scan.scope ? `scope=${scan.scope}` : "",
+    Number.isFinite(Number(scan.scannedBytes)) ? `scanned=${Number(scan.scannedBytes)} bytes` : "",
+    scan.baseAddress !== null && scan.baseAddress !== undefined ? `base=0x${Number(scan.baseAddress).toString(16)}` : "",
+  ].filter(Boolean);
+  return details.length ? `Source marker scan: ${details.join("; ")}.` : "";
+}
+
+function sortSourceMarkerSnapshots(left, right) {
+  const statusRank = (value) => {
+    if (value === SOURCE_MARKER_STATUS_CURRENT) {
+      return 0;
+    }
+    if (value === SOURCE_MARKER_STATUS_PREVIOUS) {
+      return 1;
+    }
+    return 2;
+  };
+  const rankDelta = statusRank(left.status) - statusRank(right.status);
+  if (rankDelta !== 0) {
+    return rankDelta;
+  }
+  return String(right.appliedAt || right.createdAt || "").localeCompare(String(left.appliedAt || left.createdAt || ""));
+}
+
+async function listReadableSourceMarkerSnapshots(retentionGroup, options = {}) {
+  const documents = await listSourceMarkerDocuments(retentionGroup, [
+    Query.equal("status", [SOURCE_MARKER_STATUS_CURRENT, SOURCE_MARKER_STATUS_PREVIOUS]),
+    Query.orderDesc("createdAt"),
+    Query.limit(10),
+  ]);
+  return documents
+    .filter((document) => SOURCE_MARKER_ALLOWED_RESTORE_STATUSES.has(String(document.status || "")))
+    .filter((document) => !options.ownerUserId || document.userId === options.ownerUserId)
+    .sort(sortSourceMarkerSnapshots)
+    .slice(0, 2)
+    .map((document) => sourceMarkerSnapshotSummary(document, options));
+}
+
+async function listBoardCodeSnapshots(payload = {}, eventSender = null) {
+  const requestId = String(payload.requestId || `board-code-list:${crypto.randomUUID()}`);
+  const boardPayload = payload.board || {};
+  const identity = normalizeBoardCodeIdentity(boardPayload);
+  const boardName = identity.boardName || "board";
+  const warnings = [];
+  const restoreAttempts = [];
+  let hardwareTempDir = "";
+  const emitProgress = (patch = {}) => {
+    const event = {
+      requestId,
+      phase: patch.phase || "running",
+      message: patch.message || "Checking board code snapshots...",
+      progress: patch.progress ?? null,
+    };
+    eventSender?.send?.("toolchain:board-code-progress", event);
+    upsertToolchainNotification({
+      id: requestId,
+      kind: "code-extraction",
+      title: patch.title || `Finding code snapshots for ${boardName}`,
+      detail: event.message,
+      status: patch.status || "running",
+      phase: event.phase,
+      progress: event.progress,
+      name: boardName,
+      target: identity.port || identity.fqbn || boardName,
+      metadata: {
+        boardId: boardPayload.id || identity.cloudBoardId,
+        boardType: identity.fqbn,
+        port: identity.port,
+      },
+    });
+  };
+
+  const finish = (result, status = "success", message = "Board code snapshots checked.") => {
+    emitProgress({ phase: "complete", message, progress: 100, status, title: `Code snapshots for ${boardName}` });
+    return {
+      status: result.status || "available",
+      board: {
+        id: boardPayload.id || identity.cloudBoardId || "",
+        name: boardName,
+        fqbn: identity.fqbn,
+        port: identity.port,
+        profileId: identity.profileId,
+        fingerprint: identity.fingerprint,
+        cloudBoardId: identity.cloudBoardId,
+      },
+      snapshots: Array.isArray(result.snapshots) ? result.snapshots : [],
+      warnings,
+      restoreAttempts,
+      markerVerifiedFromFirmware: Boolean(result.markerVerifiedFromFirmware),
+      sourceMarker: result.sourceMarker || null,
+      markerScan: result.sourceMarker || null,
+      message,
+    };
+  };
+
+  try {
+    if (identity.fqbn && identity.port) {
+      emitProgress({ phase: "source-marker", message: "Reading Tantalum source marker from board firmware...", progress: 10 });
+      const portKey = identity.port.toLowerCase();
+      if (activeLocalUploadPorts.has(portKey)) {
+        throw new Error(`A USB upload is already running on ${identity.port}. Wait for it to finish before viewing code.`);
+      }
+      if (activeSerialMonitorPorts.has(portKey)) {
+        throw new Error(`Serial Monitor is open on ${identity.port}. Disconnect it before viewing code.`);
+      }
+      if (activeBoardCodePorts.has(portKey)) {
+        throw new Error(`Code extraction is already running on ${identity.port}.`);
+      }
+
+      hardwareTempDir = boardCodeService.tempExtractionDir();
+      activeBoardCodePorts.add(portKey);
+      let hardware = null;
+      try {
+        hardware = await boardCodeService.readHardwareFirmware({
+          board: identity.fqbn,
+          port: identity.port,
+          outputDir: hardwareTempDir,
+          onProgress: (progressEvent = {}) => emitProgress({
+            phase: progressEvent.phase || "source-marker",
+            message: progressEvent.message || "Reading Tantalum source marker from board firmware...",
+            progress: progressEvent.progress ?? null,
+          }),
+        });
+      } finally {
+        activeBoardCodePorts.delete(portKey);
+      }
+
+      const markerScan = hardware?.sourceMarkers || null;
+      if (markerScan?.status === "found" && markerScan.marker) {
+        restoreAttempts.push({ source: "source-marker", status: "found", reason: markerScan.reason, marker: markerScan.marker, scan: markerScan });
+        let document = null;
+        try {
+          document = await getSourceMarkerDocument(markerScan.marker.markerId);
+        } catch (error) {
+          if (![401, 403, 404].includes(Number(error?.status))) {
+            throw error;
+          }
+        }
+        if (!document) {
+          const message = "This board was flashed through Tantalum, but its code snapshot is private to the account that flashed it.";
+          warnings.push(message);
+          restoreAttempts.push({ source: "source-marker", status: "private", reason: message });
+          return finish({ status: "private", snapshots: [], sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", message);
+        }
+        if (!SOURCE_MARKER_ALLOWED_RESTORE_STATUSES.has(String(document.status || ""))) {
+          const message = `This board has a Tantalum source marker, but its snapshot is ${document.status || "not ready"}.`;
+          warnings.push(message);
+          restoreAttempts.push({ source: "source-marker", status: "unavailable", reason: message });
+          return finish({ status: "unavailable", snapshots: [], sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", message);
+        }
+
+        const snapshots = await listReadableSourceMarkerSnapshots(document.retentionGroup, {
+          markerVerifiedFromFirmware: true,
+          firmwareMarkerMatched: true,
+        });
+        if (snapshots.length === 0) {
+          const message = "This board was flashed through Tantalum, but no readable source snapshots are available.";
+          warnings.push(message);
+          return finish({ status: "private", snapshots: [], sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", message);
+        }
+        return finish({ status: "available", snapshots, sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", "Source snapshots are available.");
+      }
+
+      if (markerScan?.status === "ambiguous") {
+        const message = markerScan.reason || "Multiple Tantalum source markers were found in firmware. Exact restore is blocked.";
+        warnings.push(message);
+        const diagnostic = sourceMarkerScanDiagnostic(markerScan);
+        if (diagnostic) {
+          warnings.push(diagnostic);
+        }
+        restoreAttempts.push({ source: "source-marker", status: "rejected", reason: message, scan: markerScan });
+        return finish({ status: "unavailable", snapshots: [], sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", message);
+      }
+
+      const diagnostic = sourceMarkerScanDiagnostic(markerScan);
+      if (diagnostic) {
+        warnings.push(diagnostic);
+      }
+      const retentionGroup = sourceMarkerRetentionGroup(identity);
+      if (retentionGroup) {
+        const account = await appwriteRequest({ pathName: "account" }).catch(() => null);
+        if (account?.$id) {
+          const snapshots = await listReadableSourceMarkerSnapshots(retentionGroup, {
+            markerVerifiedFromFirmware: false,
+            firmwareMarkerMatched: false,
+            ownerUserId: account.$id,
+          });
+          if (snapshots.length > 0) {
+            const message = "Tantalum could not verify a source marker in board flash. Showing unverified source snapshots saved for this board.";
+            warnings.push(message);
+            restoreAttempts.push({ source: "source-marker", status: "unverified-fallback", reason: markerScan?.reason || message, scan: markerScan, retentionGroup });
+            return finish({
+              status: "available-unverified",
+              snapshots,
+              sourceMarker: markerScan,
+              markerVerifiedFromFirmware: false,
+            }, "success", message);
+          }
+        }
+      }
+
+      const message = "This board was not flashed through Tantalum, so exact source restore is unavailable.";
+      warnings.push(message);
+      restoreAttempts.push({ source: "source-marker", status: "miss", reason: markerScan?.reason || message });
+      return finish({ status: "not-tantalum-flashed", snapshots: [], sourceMarker: markerScan, markerVerifiedFromFirmware: true }, "success", message);
+    }
+
+    if (identity.cloudBoardId || boardPayload.id) {
+      emitProgress({ phase: "source-marker", message: "Checking cloud source snapshots...", progress: 15 });
+      const retentionGroup = `cloud:${identity.cloudBoardId || boardPayload.id}`;
+      const snapshots = await listReadableSourceMarkerSnapshots(retentionGroup, {
+        markerVerifiedFromFirmware: false,
+        firmwareMarkerMatched: false,
+      });
+      if (snapshots.length === 0) {
+        const message = "No source snapshots are available for this cloud board.";
+        warnings.push(message);
+        restoreAttempts.push({ source: "source-marker", status: "miss", reason: message });
+        return finish({ status: "unavailable", snapshots: [], markerVerifiedFromFirmware: false }, "success", message);
+      }
+      warnings.push("These cloud snapshots were not verified from connected board firmware.");
+      return finish({ status: "available", snapshots, markerVerifiedFromFirmware: false }, "success", "Source snapshots are available.");
+    }
+
+    const message = "Connect a board flashed through Tantalum or select a cloud board with source snapshots.";
+    warnings.push(message);
+    return finish({ status: "unavailable", snapshots: [], markerVerifiedFromFirmware: false }, "success", message);
+  } finally {
+    if (hardwareTempDir) {
+      fsPromises.rm(hardwareTempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
+async function restoreBoardCodeSnapshot(payload = {}, eventSender = null) {
+  const requestId = String(payload.requestId || `board-code-restore:${crypto.randomUUID()}`);
+  const boardPayload = payload.board || {};
+  const identity = normalizeBoardCodeIdentity(boardPayload);
+  const markerId = String(payload.markerId || payload.snapshotId || payload.snapshot?.markerId || payload.snapshot?.id || "").trim();
+  if (!markerId) {
+    throw new Error("Choose a source snapshot to restore.");
+  }
+
+  const document = await getSourceMarkerDocument(markerId);
+  if (!document) {
+    throw new Error("The selected source snapshot is unavailable or private to another account.");
+  }
+
+  const boardName = document.boardName || identity.boardName || "board";
+  const destination = await resolveBoardCodeDestination(payload.destination, boardName);
+  const emitProgress = (patch = {}) => {
+    const event = {
+      requestId,
+      phase: patch.phase || "restore",
+      message: patch.message || "Restoring board code snapshot...",
+      progress: patch.progress ?? null,
+    };
+    eventSender?.send?.("toolchain:board-code-progress", event);
+    upsertToolchainNotification({
+      id: requestId,
+      kind: "code-extraction",
+      title: patch.title || `Restoring code for ${boardName}`,
+      detail: event.message,
+      status: patch.status || "running",
+      phase: event.phase,
+      progress: event.progress,
+      name: boardName,
+      target: identity.port || identity.fqbn || boardName,
+      metadata: {
+        boardId: boardPayload.id || identity.cloudBoardId || document.boardId,
+        boardType: identity.fqbn || document.boardType,
+        port: identity.port || document.port,
+      },
+    });
+  };
+
+  emitProgress({ phase: "snapshot", message: "Downloading source snapshot...", progress: 20 });
+  const markerSnapshot = await restoreSourceMarkerSnapshotDocument(document, boardPayload, {
+    verifiedFromFirmware: Boolean(payload.markerVerifiedFromFirmware),
+  });
+  if (!markerSnapshot?.files?.length) {
+    throw new Error("The selected source snapshot did not contain restorable files.");
+  }
+
+  emitProgress({ phase: "write", message: "Writing source files...", progress: 70 });
+  const warnings = [];
+  if (!payload.markerVerifiedFromFirmware) {
+    warnings.push("Restored snapshot was not verified from connected board firmware.");
+  }
+  const result = await writeBoardCodeOutput({
+    outputDir: destination.outputDir,
+    workspacePath: destination.workspacePath,
+    boardName: document.boardName || boardName,
+    board: document.boardType || identity.fqbn,
+    source: "snapshot",
+    sourceFiles: markerSnapshot.files,
+    warnings,
+    notes: payload.markerVerifiedFromFirmware
+      ? "Restored exact source using the Tantalum source marker embedded in the board firmware."
+      : "Restored exact source from a saved Tantalum source snapshot for this cloud board.",
+    metadata: {
+      identity,
+      extractionMode: "snapshot-only",
+      restoreAttempts: [{
+        source: "source-marker",
+        status: "accepted",
+        reason: markerSnapshot.restoreStatus,
+        validation: markerSnapshot.validation,
+        marker: markerSnapshot.marker,
+      }],
+      sourceSnapshotManifest: markerSnapshot.manifest,
+      snapshotAccepted: true,
+      snapshotRejectReason: "",
+      reconstructionRequested: false,
+      sourceMarker: {
+        ...markerSnapshot.marker,
+        document: sourceMarkerDocumentSummary(markerSnapshot.markerDocument),
+      },
+      markerVerifiedFromFirmware: Boolean(payload.markerVerifiedFromFirmware),
+      markerRestoreStatus: markerSnapshot.restoreStatus,
+      snapshot: sourceMarkerSnapshotSummary(document, {
+        markerVerifiedFromFirmware: Boolean(payload.markerVerifiedFromFirmware),
+      }),
     },
   });
-  const responseBody = functionExecutionResponseBody(execution);
-  const parsed = safeJsonParse(responseBody || "{}", {
-    ok: false,
-    error: functionExecutionDiagnostic(execution) || "Code extraction AI returned an empty response.",
-  });
-
-  if (functionExecutionResponseStatusCode(execution) >= 400 || !parsed.ok) {
-    throw new Error(parsed.error || responseBody || functionExecutionDiagnostic(execution) || "Code extraction AI failed.");
-  }
-
-  return parsed.data || null;
+  emitProgress({ phase: "complete", message: "Source snapshot restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+  return result;
 }
 
 async function resolveBoardCodeDestination(destination = {}, boardName = "board") {
@@ -3730,7 +4855,7 @@ async function resolveBoardCodeDestination(destination = {}, boardName = "board"
   if (mode === "new") {
     const folderPath = String(destination.folderPath || "").trim();
     if (!folderPath) {
-      throw new Error("Choose a folder for the new workspace.");
+    throw new Error("Choose a folder for the new Project.");
     }
     const workspacePath = path.resolve(folderPath);
     await fsPromises.mkdir(workspacePath, { recursive: true });
@@ -3744,12 +4869,12 @@ async function resolveBoardCodeDestination(destination = {}, boardName = "board"
 
   const rawWorkspacePath = String(destination.workspacePath || currentWorkspace || "").trim();
   if (!rawWorkspacePath) {
-    throw new Error("Open a workspace before writing extracted code into the current workspace.");
+    throw new Error("Open a Project before writing extracted code into the current Project.");
   }
   const workspacePath = path.resolve(rawWorkspacePath);
   const stats = await fsPromises.stat(workspacePath);
   if (!stats.isDirectory()) {
-    throw new Error("Current workspace path is not a directory.");
+    throw new Error("Current Project path is not a directory.");
   }
   const outputDir = path.join(workspacePath, "extracted-board-code", boardCodeService.defaultExtractionFolderName(boardName));
   await fsPromises.mkdir(outputDir, { recursive: true });
@@ -3760,11 +4885,113 @@ async function resolveBoardCodeDestination(destination = {}, boardName = "board"
   };
 }
 
-function primaryBoardCodeFile(files = []) {
-  return files.find((file) => /\.(ino|cpp|c|h|hpp)$/i.test(file.relativePath || file.path || ""))
-    || files.find((file) => /readme\.md$/i.test(file.relativePath || file.path || ""))
+function normalizeBoardCodeExtractionMode(value) {
+  if (value === "force-hardware-reconstruct") {
+    return "force-hardware-artifacts";
+  }
+  return BOARD_CODE_EXTRACTION_MODES.has(value) ? value : "restore-first";
+}
+
+function hasReconstructionEvidence(metadata = {}) {
+  return Array.isArray(metadata.evidenceUsed) && metadata.evidenceUsed.length > 0;
+}
+
+function primaryBoardCodeFile(files = [], source = "", confidence = null, metadata = {}) {
+  const readme = files.find((file) => /^readme\.md$/i.test(file.relativePath || file.path || ""));
+  const codeFile = files.find((file) => /\.(ino|cpp|c|h|hpp)$/i.test(file.relativePath || file.path || ""));
+  if (source === "hardware-ai" || source === "hardware-binary") {
+    const confidentReconstruction = Number(confidence || 0) >= 0.65 && hasReconstructionEvidence(metadata);
+    return confidentReconstruction ? (codeFile || readme || files[0] || null) : (readme || files[0] || null);
+  }
+
+  return codeFile
+    || readme
     || files[0]
     || null;
+}
+
+function compactEspPartition(partition = null) {
+  if (!partition || typeof partition !== "object") {
+    return null;
+  }
+  return {
+    index: Number.isFinite(Number(partition.index)) ? Number(partition.index) : null,
+    label: String(partition.label || ""),
+    type: Number.isFinite(Number(partition.type)) ? Number(partition.type) : null,
+    subtype: Number.isFinite(Number(partition.subtype)) ? Number(partition.subtype) : null,
+    typeName: String(partition.typeName || ""),
+    subtypeName: String(partition.subtypeName || ""),
+    offset: Number.isFinite(Number(partition.offset)) ? Number(partition.offset) : null,
+    size: Number.isFinite(Number(partition.size)) ? Number(partition.size) : null,
+    end: Number.isFinite(Number(partition.end)) ? Number(partition.end) : null,
+    flags: Number.isFinite(Number(partition.flags)) ? Number(partition.flags) : null,
+  };
+}
+
+function compactEspImage(image = null) {
+  if (!image || typeof image !== "object") {
+    return null;
+  }
+  return {
+    valid: Boolean(image.valid),
+    error: String(image.error || ""),
+    partition: compactEspPartition(image.partition),
+    header: image.header && typeof image.header === "object" ? {
+      magic: image.header.magic,
+      segmentCount: image.header.segmentCount,
+      flashMode: image.header.flashMode,
+      flashSizeFrequency: image.header.flashSizeFrequency,
+      entryPoint: image.header.entryPoint,
+      headerLength: image.header.headerLength,
+    } : null,
+    segments: Array.isArray(image.segments)
+      ? image.segments.map((segment) => ({
+          index: segment.index,
+          loadAddress: segment.loadAddress,
+          length: segment.length,
+          fileOffset: segment.fileOffset,
+          flashOffset: segment.flashOffset,
+          executable: Boolean(segment.executable),
+          classification: String(segment.classification || (segment.executable ? "executable" : "data")),
+        }))
+      : [],
+    executableSegmentCount: Number.isFinite(Number(image.executableSegmentCount)) ? Number(image.executableSegmentCount) : 0,
+    imageLength: Number.isFinite(Number(image.imageLength)) ? Number(image.imageLength) : null,
+  };
+}
+
+function compactEspOtaEntry(entry = null) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  return {
+    index: entry.index,
+    offset: entry.offset,
+    otaSeq: entry.otaSeq,
+    otaState: entry.otaState,
+    crc: entry.crc,
+    usable: Boolean(entry.usable),
+  };
+}
+
+function summarizeEspBoardCodeEvidence(esp = null) {
+  if (!esp || typeof esp !== "object") {
+    return null;
+  }
+  return {
+    partitionTableOffset: esp.partitionTableOffset,
+    partitionErrors: Array.isArray(esp.partitionErrors) ? esp.partitionErrors : [],
+    espPartitions: Array.isArray(esp.partitions) ? esp.partitions.map(compactEspPartition).filter(Boolean) : [],
+    appPartitions: Array.isArray(esp.appPartitions) ? esp.appPartitions.map(compactEspPartition).filter(Boolean) : [],
+    otaDataPartition: compactEspPartition(esp.otaDataPartition),
+    otaEntries: Array.isArray(esp.otaEntries) ? esp.otaEntries.map(compactEspOtaEntry).filter(Boolean) : [],
+    selectedAppPartition: compactEspPartition(esp.selectedAppPartition),
+    selectedAppReason: String(esp.selectedAppReason || ""),
+    espImage: compactEspImage(esp.appImage),
+    appEvidenceAvailable: Boolean(esp.appEvidenceAvailable),
+    appPartitionSizeRead: Number.isFinite(Number(esp.appPartitionSizeRead)) ? Number(esp.appPartitionSizeRead) : 0,
+    appStringCount: Array.isArray(esp.appStrings) ? esp.appStrings.length : 0,
+  };
 }
 
 async function writeBoardCodeOutput({
@@ -3781,6 +5008,7 @@ async function writeBoardCodeOutput({
   limitations = "",
   metadata = {},
   rawArtifact = null,
+  rawArtifacts = [],
 }) {
   const readme = boardCodeService.createExtractionReadme({
     boardName,
@@ -3821,13 +5049,38 @@ async function writeBoardCodeOutput({
 
   const files = await boardCodeService.writeTextFiles(outputDir, textFiles);
   const artifacts = [];
-  if (rawArtifact?.path) {
-    const artifact = await boardCodeService.copyArtifact(outputDir, rawArtifact.path, `artifacts/${rawArtifact.filename || path.basename(rawArtifact.path)}`);
-    artifacts.push({ ...artifact, type: rawArtifact.type || rawArtifact.format || "firmware-dump" });
+  const artifactInputs = [
+    ...(rawArtifact?.path ? [rawArtifact] : []),
+    ...(Array.isArray(rawArtifacts) ? rawArtifacts : []),
+  ];
+  const copiedArtifactPaths = new Set();
+  for (const artifactInput of artifactInputs) {
+    if (!artifactInput?.path) {
+      continue;
+    }
+    const targetRelativePath = `artifacts/${artifactInput.filename || path.basename(artifactInput.path)}`;
+    const artifactKey = targetRelativePath.toLowerCase();
+    if (copiedArtifactPaths.has(artifactKey)) {
+      continue;
+    }
+    const artifact = await boardCodeService.copyArtifact(outputDir, artifactInput.path, targetRelativePath);
+    copiedArtifactPaths.add(artifactKey);
+    artifacts.push({ ...artifact, type: artifactInput.type || artifactInput.format || "firmware-dump" });
   }
 
   return {
     source,
+    exact: source === "snapshot" || source === "local-history",
+    evidenceQuality: metadata.evidenceQuality || null,
+    extractionMode: metadata.extractionMode || "restore-first",
+    restoreAttempts: Array.isArray(metadata.restoreAttempts) ? metadata.restoreAttempts : [],
+    snapshotManifest: metadata.sourceSnapshotManifest || metadata.snapshotManifest || null,
+    snapshotAccepted: metadata.snapshotAccepted ?? null,
+    snapshotRejectReason: metadata.snapshotRejectReason || "",
+    reconstructionRequested: Boolean(metadata.reconstructionRequested),
+    sourceMarker: metadata.sourceMarker || null,
+    markerVerifiedFromFirmware: Boolean(metadata.markerVerifiedFromFirmware),
+    markerRestoreStatus: metadata.markerRestoreStatus || "",
     workspacePath,
     outputPath: outputDir,
     files,
@@ -3835,7 +5088,7 @@ async function writeBoardCodeOutput({
     model,
     confidence,
     artifacts,
-    primaryFile: primaryBoardCodeFile(files),
+    primaryFile: primaryBoardCodeFile(files, source, confidence, metadata),
   };
 }
 
@@ -3847,10 +5100,11 @@ function normalizeBoardCodeIdentity(boardPayload = {}) {
     port: String(boardPayload.port || "").trim(),
     fqbn: String(boardPayload.fqbn || boardPayload.boardType || "").trim(),
     boardName: String(boardPayload.name || boardPayload.boardLabel || boardPayload.fqbn || boardPayload.id || "board").trim(),
+    sourceCodeVisibility: normalizeSourceCodeVisibility(boardPayload.sourceCodeVisibility),
   };
 }
 
-async function writeUnavailableBoardCodeResult(destination, boardPayload, warnings) {
+async function writeUnavailableBoardCodeResult(destination, boardPayload, warnings, metadata = {}) {
   const identity = normalizeBoardCodeIdentity(boardPayload);
   return writeBoardCodeOutput({
     outputDir: destination.outputDir,
@@ -3860,9 +5114,10 @@ async function writeUnavailableBoardCodeResult(destination, boardPayload, warnin
     source: "unavailable",
     warnings,
     notes: "Tantalum could not find a saved source snapshot or local upload history, and hardware readback was not available for this board.",
-    limitations: "Exact source can only be restored from a saved source snapshot. Reconstructed code requires a readable firmware dump and a configured code-extract utility model.",
+    limitations: "Exact source can only be restored from a saved source snapshot or validated local upload history. Compiled firmware readback can only produce diagnostic artifacts.",
     metadata: {
       identity,
+      ...metadata,
     },
   });
 }
@@ -3873,7 +5128,28 @@ async function viewBoardCode(payload = {}, eventSender = null) {
   const identity = normalizeBoardCodeIdentity(boardPayload);
   const boardName = identity.boardName || "board";
   const warnings = [];
+  const requestedExtractionMode = String(payload.extractionMode || "restore-first");
+  const extractionMode = normalizeBoardCodeExtractionMode(payload.extractionMode);
+  const forceHardware = extractionMode === "force-hardware-artifacts";
+  const legacyReconstructMode = requestedExtractionMode === "force-hardware-reconstruct";
+  const reconstructionRequested = false;
+  const restoreAttempts = [];
+  const snapshotList = await listBoardCodeSnapshots({ requestId, board: boardPayload }, eventSender);
+  if (snapshotList.snapshots?.[0]) {
+    return restoreBoardCodeSnapshot({
+      requestId,
+      board: boardPayload,
+      destination: payload.destination,
+      markerId: snapshotList.snapshots[0].markerId,
+      markerVerifiedFromFirmware: snapshotList.markerVerifiedFromFirmware,
+    }, eventSender);
+  }
+  throw new Error(snapshotList.message || "No Tantalum source snapshot is available for this board.");
   const destination = await resolveBoardCodeDestination(payload.destination, boardName);
+  let hardware = null;
+  let hardwareTempDir = "";
+  let hardwareReadAttempted = false;
+  let hardwareReadError = null;
   const emitProgress = (patch = {}) => {
     const event = {
       requestId,
@@ -3899,175 +5175,439 @@ async function viewBoardCode(payload = {}, eventSender = null) {
       },
     });
   };
-
-  emitProgress({ phase: "snapshot", message: "Checking saved source snapshots...", progress: 8 });
-  try {
-    const snapshot = await restoreCloudSourceSnapshot(boardPayload);
-    if (snapshot?.files?.length) {
-      const result = await writeBoardCodeOutput({
-        outputDir: destination.outputDir,
-        workspacePath: destination.workspacePath,
-        boardName: snapshot.board?.name || boardName,
-        board: snapshot.board?.boardType || identity.fqbn,
-        source: "snapshot",
-        sourceFiles: snapshot.files,
-        warnings,
-        notes: "Restored exact source from the firmware source snapshot stored with this release.",
-        metadata: {
-          identity,
-          sourceSnapshotManifest: snapshot.manifest,
-          firmware: snapshot.firmware
-            ? {
-                id: snapshot.firmware.$id,
-                version: snapshot.firmware.version,
-                fileId: snapshot.firmware.fileId,
-                sourceSnapshotFileId: snapshot.firmware.sourceSnapshotFileId,
-              }
-            : null,
-        },
-      });
-      emitProgress({ phase: "complete", message: "Source snapshot restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
-      return result;
+  const ensureHardwareRead = async () => {
+    if (hardwareReadAttempted) {
+      if (hardwareReadError) {
+        throw hardwareReadError;
+      }
+      return hardware;
     }
-  } catch (error) {
-    warnings.push(error instanceof Error ? error.message : "Unable to restore the cloud source snapshot.");
+    hardwareReadAttempted = true;
+    if (!identity.fqbn || !identity.port) {
+      throw new Error("Hardware readback requires a board FQBN and serial port.");
+    }
+
+    const portKey = identity.port.toLowerCase();
+    if (activeLocalUploadPorts.has(portKey)) {
+      throw new Error(`A USB upload is already running on ${identity.port}. Wait for it to finish before viewing code.`);
+    }
+    if (activeSerialMonitorPorts.has(portKey)) {
+      throw new Error(`Serial Monitor is open on ${identity.port}. Disconnect it before viewing code.`);
+    }
+    if (activeBoardCodePorts.has(portKey)) {
+      throw new Error(`Code extraction is already running on ${identity.port}.`);
+    }
+
+    hardwareTempDir = hardwareTempDir || boardCodeService.tempExtractionDir();
+    activeBoardCodePorts.add(portKey);
+    try {
+      hardware = await boardCodeService.readHardwareFirmware({
+        board: identity.fqbn,
+        port: identity.port,
+        outputDir: hardwareTempDir,
+        onProgress: (progressEvent = {}) => emitProgress({
+          phase: progressEvent.phase || "read-flash",
+          message: progressEvent.message || "Reading firmware from the board...",
+          progress: progressEvent.progress ?? null,
+        }),
+      });
+      return hardware;
+    } catch (error) {
+      hardwareReadError = error;
+      throw error;
+    } finally {
+      activeBoardCodePorts.delete(portKey);
+    }
+  };
+  const cleanupHardwareTempDir = () => {
+    if (!hardwareTempDir) {
+      return;
+    }
+    const dir = hardwareTempDir;
+    hardwareTempDir = "";
+    fsPromises.rm(dir, { recursive: true, force: true }).catch(() => {});
+  };
+
+  if (legacyReconstructMode) {
+    warnings.push("Binary-to-source reconstruction was removed because it produced unreliable code. Firmware artifacts will be written instead.");
   }
 
-  emitProgress({ phase: "local-history", message: "Checking local upload history...", progress: 18 });
-  try {
-    const historyEntry = boardCodeService.findSourceHistoryEntry(preferenceStore, identity);
-    if (historyEntry) {
-      const history = await boardCodeService.readLocalSourceHistory(historyEntry);
-      if (history.files?.length) {
-        const result = await writeBoardCodeOutput({
-          outputDir: destination.outputDir,
-          workspacePath: destination.workspacePath,
-          boardName: historyEntry.boardName || boardName,
-          board: historyEntry.board || identity.fqbn,
-          source: "local-history",
-          sourceFiles: history.files,
-          warnings,
-          notes: "Restored exact source from this machine's last successful USB upload snapshot.",
-          metadata: {
-            identity,
-            sourceSnapshotManifest: history.manifest,
-            localHistory: {
-              id: historyEntry.id,
-              checksum: historyEntry.checksum,
-              createdAt: historyEntry.createdAt,
+  if (forceHardware) {
+    restoreAttempts.push({ source: "snapshot", status: "skipped", reason: "User requested hardware firmware extraction." });
+    restoreAttempts.push({ source: "local-history", status: "skipped", reason: "User requested hardware firmware extraction." });
+  } else {
+    if (identity.fqbn && identity.port) {
+      emitProgress({ phase: "source-marker", message: "Reading board source marker...", progress: 8 });
+      try {
+        const markerHardware = await ensureHardwareRead();
+        const markerScan = markerHardware?.sourceMarkers || null;
+        if (markerScan?.status === "found" && markerScan.marker) {
+          restoreAttempts.push({ source: "source-marker", status: "found", reason: markerScan.reason, marker: markerScan.marker, scan: markerScan });
+          const markerSnapshot = await restoreSourceMarkerSnapshot(markerScan.marker, boardPayload, { verifiedFromFirmware: true });
+          if (markerSnapshot?.files?.length) {
+            restoreAttempts.push({
+              source: "source-marker",
+              status: "accepted",
+              reason: markerSnapshot.restoreStatus,
+              validation: markerSnapshot.validation,
+              marker: markerSnapshot.marker,
+            });
+            if (markerSnapshot.validation && !markerSnapshot.validation.accepted && markerSnapshot.validation.reason) {
+              warnings.push(`Firmware marker matched a source snapshot; board identity validation note: ${markerSnapshot.validation.reason}`);
+            }
+            const result = await writeBoardCodeOutput({
+              outputDir: destination.outputDir,
+              workspacePath: destination.workspacePath,
+              boardName: markerSnapshot.markerDocument?.boardName || boardName,
+              board: markerSnapshot.markerDocument?.boardType || identity.fqbn,
+              source: "snapshot",
+              sourceFiles: markerSnapshot.files,
+              warnings,
+              notes: "Restored exact source using the Tantalum source marker embedded in the board firmware.",
+              metadata: {
+                identity,
+                extractionMode,
+                restoreAttempts,
+                sourceSnapshotManifest: markerSnapshot.manifest,
+                snapshotAccepted: true,
+                snapshotRejectReason: "",
+                reconstructionRequested: false,
+                sourceMarker: {
+                  ...markerSnapshot.marker,
+                  document: sourceMarkerDocumentSummary(markerSnapshot.markerDocument),
+                  scan: markerScan,
+                },
+                markerVerifiedFromFirmware: true,
+                markerRestoreStatus: markerSnapshot.restoreStatus,
+              },
+            });
+            emitProgress({ phase: "complete", message: "Firmware source marker restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+            cleanupHardwareTempDir();
+            return result;
+          }
+        } else if (markerScan?.status === "ambiguous") {
+          const reason = markerScan.reason || "Multiple source markers were found in firmware.";
+          restoreAttempts.push({ source: "source-marker", status: "rejected", reason, scan: markerScan });
+          warnings.push(reason);
+        } else {
+          restoreAttempts.push({ source: "source-marker", status: "miss", reason: markerScan?.reason || "No firmware source marker was found." });
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "Unable to restore firmware source marker.";
+        restoreAttempts.push({ source: "source-marker", status: "error", reason });
+        warnings.push(reason);
+      }
+    } else if (identity.cloudBoardId || boardPayload.id) {
+      emitProgress({ phase: "source-marker", message: "Checking cloud source marker...", progress: 8 });
+      try {
+        const markerSnapshot = await restoreCurrentSourceMarkerSnapshotForBoard(boardPayload);
+        if (markerSnapshot?.files?.length) {
+          restoreAttempts.push({
+            source: "source-marker",
+            status: "accepted",
+            reason: markerSnapshot.restoreStatus,
+            validation: markerSnapshot.validation,
+            marker: markerSnapshot.marker,
+          });
+          warnings.push("Restored the current cloud source marker without firmware verification because no local board port was available.");
+          const result = await writeBoardCodeOutput({
+            outputDir: destination.outputDir,
+            workspacePath: destination.workspacePath,
+            boardName: markerSnapshot.markerDocument?.boardName || boardName,
+            board: markerSnapshot.markerDocument?.boardType || identity.fqbn,
+            source: "snapshot",
+            sourceFiles: markerSnapshot.files,
+            warnings,
+            notes: "Restored exact source from the current cloud source marker for this board. The board firmware was not read because no local port was available.",
+            metadata: {
+              identity,
+              extractionMode,
+              restoreAttempts,
+              sourceSnapshotManifest: markerSnapshot.manifest,
+              snapshotAccepted: true,
+              snapshotRejectReason: "",
+              reconstructionRequested: false,
+              sourceMarker: {
+                ...markerSnapshot.marker,
+                document: sourceMarkerDocumentSummary(markerSnapshot.markerDocument),
+              },
+              markerVerifiedFromFirmware: false,
+              markerRestoreStatus: markerSnapshot.restoreStatus,
             },
-          },
-        });
-        emitProgress({ phase: "complete", message: "Local source history restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
-        return result;
+          });
+          emitProgress({ phase: "complete", message: "Cloud source marker restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+          cleanupHardwareTempDir();
+          return result;
+        }
+        restoreAttempts.push({ source: "source-marker", status: "miss", reason: "No current cloud source marker was available." });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "Unable to restore the current cloud source marker.";
+        restoreAttempts.push({ source: "source-marker", status: "error", reason });
+        warnings.push(reason);
       }
     }
-  } catch (error) {
-    warnings.push(error instanceof Error ? error.message : "Unable to restore local source history.");
+
+    emitProgress({ phase: "snapshot", message: "Checking saved source snapshots...", progress: 8 });
+    try {
+      const snapshot = await restoreCloudSourceSnapshot(boardPayload);
+      if (snapshot?.files?.length) {
+        if (!snapshot.validation?.accepted) {
+          const reason = snapshot.validation?.reason || "Saved source snapshot did not match this board.";
+          restoreAttempts.push({ source: "snapshot", status: "rejected", reason, validation: snapshot.validation });
+          warnings.push(reason);
+        } else {
+          restoreAttempts.push({ source: "snapshot", status: "accepted", reason: snapshot.validation.reason, validation: snapshot.validation });
+          const result = await writeBoardCodeOutput({
+            outputDir: destination.outputDir,
+            workspacePath: destination.workspacePath,
+            boardName: snapshot.board?.name || boardName,
+            board: snapshot.board?.boardType || identity.fqbn,
+            source: "snapshot",
+            sourceFiles: snapshot.files,
+            warnings,
+            notes: "Restored exact source from the firmware source snapshot stored with this release.",
+            metadata: {
+              identity,
+              extractionMode,
+              restoreAttempts,
+              sourceSnapshotManifest: snapshot.manifest,
+              snapshotAccepted: true,
+              snapshotRejectReason: "",
+              reconstructionRequested: false,
+              firmware: snapshot.firmware
+                ? {
+                    id: snapshot.firmware.$id,
+                    version: snapshot.firmware.version,
+                    fileId: snapshot.firmware.fileId,
+                    sourceSnapshotFileId: snapshot.firmware.sourceSnapshotFileId,
+                  }
+                : null,
+            },
+          });
+          emitProgress({ phase: "complete", message: "Source snapshot restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+          cleanupHardwareTempDir();
+          return result;
+        }
+      } else {
+        restoreAttempts.push({ source: "snapshot", status: "miss", reason: "No cloud source snapshot was available." });
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unable to restore the cloud source snapshot.";
+      restoreAttempts.push({ source: "snapshot", status: "error", reason });
+      warnings.push(reason);
+    }
+
+    emitProgress({ phase: "local-history", message: "Checking local upload history...", progress: 18 });
+    try {
+      const historyEntries = boardCodeService.findSourceHistoryEntries(preferenceStore, identity);
+      if (historyEntries.length === 0) {
+        restoreAttempts.push({ source: "local-history", status: "miss", reason: "No local upload source snapshot was available." });
+      }
+      for (const historyEntry of historyEntries) {
+        const history = await boardCodeService.readLocalSourceHistory(historyEntry);
+        const validation = boardCodeService.validateSourceSnapshotManifestForIdentity(history.manifest, identity, { source: "local-history" });
+        if (!validation.accepted) {
+          const reason = validation.reason || "Local source history did not match this board.";
+          restoreAttempts.push({ source: "local-history", status: "rejected", reason, matchedKey: historyEntry.matchedKey, validation });
+          warnings.push(reason);
+          continue;
+        }
+        if (history.files?.length) {
+          restoreAttempts.push({ source: "local-history", status: "accepted", reason: validation.reason, matchedKey: historyEntry.matchedKey, validation });
+          const result = await writeBoardCodeOutput({
+            outputDir: destination.outputDir,
+            workspacePath: destination.workspacePath,
+            boardName: historyEntry.boardName || boardName,
+            board: historyEntry.board || identity.fqbn,
+            source: "local-history",
+            sourceFiles: history.files,
+            warnings,
+            notes: "Restored exact source from this machine's last successful USB upload snapshot.",
+            metadata: {
+              identity,
+              extractionMode,
+              restoreAttempts,
+              sourceSnapshotManifest: history.manifest,
+              snapshotAccepted: true,
+              snapshotRejectReason: "",
+              reconstructionRequested: false,
+              localHistory: {
+                id: historyEntry.id,
+                checksum: historyEntry.checksum,
+                createdAt: historyEntry.createdAt,
+                matchedKey: historyEntry.matchedKey,
+              },
+            },
+          });
+          emitProgress({ phase: "complete", message: "Local source history restored.", progress: 100, status: "success", title: `Restored code for ${boardName}` });
+          cleanupHardwareTempDir();
+          return result;
+        }
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unable to restore local source history.";
+      restoreAttempts.push({ source: "local-history", status: "error", reason });
+      warnings.push(reason);
+    }
   }
 
   if (!identity.fqbn || !identity.port) {
     warnings.push("Hardware readback requires a board FQBN and serial port.");
-    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings);
+    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings, {
+      extractionMode,
+      restoreAttempts,
+      reconstructionRequested,
+    });
     emitProgress({ phase: "complete", message: "Code extraction notes were written.", progress: 100, status: "success", title: `Code unavailable for ${boardName}` });
     return result;
   }
 
-  const portKey = identity.port.toLowerCase();
-  if (activeLocalUploadPorts.has(portKey)) {
-    throw new Error(`A USB upload is already running on ${identity.port}. Wait for it to finish before viewing code.`);
-  }
-  if (activeSerialMonitorPorts.has(portKey)) {
-    throw new Error(`Serial Monitor is open on ${identity.port}. Disconnect it before viewing code.`);
-  }
-  if (activeBoardCodePorts.has(portKey)) {
-    throw new Error(`Code extraction is already running on ${identity.port}.`);
-  }
-
-  const tempDir = boardCodeService.tempExtractionDir();
-  activeBoardCodePorts.add(portKey);
   try {
     emitProgress({ phase: "read-flash", message: "Reading firmware from the board...", progress: 25 });
-    const hardware = await boardCodeService.readHardwareFirmware({
-      board: identity.fqbn,
-      port: identity.port,
-      outputDir: tempDir,
-      onProgress: (progressEvent = {}) => emitProgress({
-        phase: progressEvent.phase || "read-flash",
-        message: progressEvent.message || "Reading firmware from the board...",
-        progress: progressEvent.progress ?? null,
-      }),
-    });
+    hardware = await ensureHardwareRead();
+    const espEvidence = summarizeEspBoardCodeEvidence(hardware.esp);
+    const espAppEvidenceAvailable = hardware.boardDetails?.family !== "esp" || Boolean(espEvidence?.appEvidenceAvailable);
+    if (forceHardware) {
+      warnings.push("Source snapshots and local upload history were skipped because hardware artifact extraction was selected.");
+    }
+    warnings.push("Compiled firmware cannot be converted back into exact Arduino source. Firmware readback artifacts were written for diagnostics only.");
+    if (hardware.boardDetails?.family === "esp" && !espAppEvidenceAvailable) {
+      warnings.push("No valid ESP application partition/image was found. Wrote binary artifacts only.");
+    }
+    const evidenceSummary = {
+      evidenceQuality: hardware.evidenceQuality || "none",
+      evidence: hardware.evidence || null,
+      sourceMarkers: hardware.sourceMarkers || null,
+      stringCount: hardware.strings?.length || 0,
+      flashStringCount: hardware.flashStrings?.length || 0,
+      readbackRanges: hardware.dump?.readbackRanges || [],
+      espPartitions: espEvidence?.espPartitions || [],
+      selectedAppPartition: espEvidence?.selectedAppPartition || null,
+      espImage: espEvidence?.espImage || null,
+      appEvidenceAvailable: Boolean(espEvidence?.appEvidenceAvailable),
+      disassembly: {
+        available: Boolean(hardware.disassembly?.text),
+        source: hardware.disassembly?.source || "",
+        tool: hardware.disassembly?.tool || "",
+        command: hardware.disassembly?.command || "",
+        error: hardware.disassembly?.error || "",
+        truncated: Boolean(hardware.disassembly?.truncated),
+      },
+    };
+    const espTextFiles = hardware.boardDetails?.family === "esp"
+      ? [
+          {
+            path: "artifacts/esp-partitions.json",
+            content: JSON.stringify({
+              partitionTableOffset: espEvidence?.partitionTableOffset ?? null,
+              partitionErrors: espEvidence?.partitionErrors || [],
+              partitions: espEvidence?.espPartitions || [],
+            }, null, 2),
+          },
+          {
+            path: "artifacts/esp-selected-app.json",
+            content: JSON.stringify({
+              selectedAppPartition: espEvidence?.selectedAppPartition || null,
+              selectedAppReason: espEvidence?.selectedAppReason || "",
+              appEvidenceAvailable: Boolean(espEvidence?.appEvidenceAvailable),
+              appPartitionSizeRead: espEvidence?.appPartitionSizeRead || 0,
+              appStringCount: espEvidence?.appStringCount || 0,
+              appPartitions: espEvidence?.appPartitions || [],
+              otaDataPartition: espEvidence?.otaDataPartition || null,
+              otaEntries: espEvidence?.otaEntries || [],
+              espImage: espEvidence?.espImage || null,
+            }, null, 2),
+          },
+          {
+            path: "artifacts/esp-app-strings.txt",
+            content: (hardware.esp?.appStrings || []).join("\n"),
+          },
+          {
+            path: "artifacts/esp-app-disassembly.txt",
+            content: hardware.disassembly?.source === "esp-app"
+              ? (hardware.disassembly?.text || hardware.disassembly?.error || "No ESP app disassembly was produced.")
+              : (hardware.disassembly?.error || "No ESP app disassembly was produced because no valid ESP app image was found."),
+          },
+        ]
+      : [];
     const hardwareTextFiles = [
       {
         path: "artifacts/strings.txt",
         content: (hardware.strings || []).join("\n"),
       },
       {
+        path: "artifacts/hexdump-excerpt.txt",
+        content: hardware.hexdump || "",
+      },
+      {
+        path: "artifacts/disassembly-excerpt.txt",
+        content: hardware.disassembly?.text || hardware.disassembly?.error || "Disassembly was not available for this board dump.",
+      },
+      {
         path: "artifacts/board-details.json",
         content: JSON.stringify(hardware.boardDetails || {}, null, 2),
+      },
+      {
+        path: "artifacts/evidence-summary.json",
+        content: JSON.stringify(evidenceSummary, null, 2),
       },
       {
         path: "artifacts/readback-output.txt",
         content: hardware.dump?.commandOutput || "",
       },
+      ...espTextFiles,
     ];
 
-    let aiResult = null;
-    emitProgress({ phase: "ai", message: "Reconstructing an approximate source project...", progress: 68 });
-    try {
-      aiResult = await executeCodeExtractAi({
-        board: {
-          id: boardPayload.id || identity.cloudBoardId,
-          name: boardName,
-          fqbn: identity.fqbn,
-          port: identity.port,
-          profileId: identity.profileId,
-          fingerprint: identity.fingerprint,
-        },
-        localBoard: identity,
-        firmware: {
-          format: hardware.dump?.format,
-          filename: hardware.dump?.filename,
-          size: hardware.dump?.size,
-          checksum: hardware.dump?.checksum,
-        },
-        metadata: {
-          sourceSnapshot: false,
-          boardFamily: hardware.boardDetails?.family,
-          readbackTool: hardware.boardDetails?.family === "esp" ? "esptool" : hardware.boardDetails?.family === "avr" ? "avrdude" : "unknown",
-        },
-        strings: hardware.strings,
-        notes: hardware.dump?.commandOutput ? hardware.dump.commandOutput.slice(0, 4000) : "",
-      });
-      if (!aiResult) {
-        warnings.push("code-extract function is not configured. Wrote firmware dump artifacts only.");
-      }
-    } catch (error) {
-      warnings.push(error instanceof Error ? error.message : "Code extraction AI failed.");
+    if (hardware.disassembly?.error) {
+      warnings.push(hardware.disassembly.error);
     }
-
-    const reconstructedFiles = boardCodeService.normalizeGeneratedFiles(aiResult?.files || []);
-    const source = reconstructedFiles.length > 0 ? "hardware-ai" : "hardware-binary";
     const result = await writeBoardCodeOutput({
       outputDir: destination.outputDir,
       workspacePath: destination.workspacePath,
       boardName,
       board: identity.fqbn,
-      source,
-      sourceFiles: [...reconstructedFiles, ...hardwareTextFiles],
+      source: "hardware-binary",
+      sourceFiles: hardwareTextFiles,
       warnings,
-      model: aiResult?.model || null,
-      confidence: aiResult?.confidence ?? null,
-      notes: aiResult?.notes || "Firmware readback succeeded. Source reconstruction is approximate unless a saved source snapshot exists.",
-      limitations: aiResult?.limitations || "The firmware dump and printable strings are included for inspection. Exact source cannot be recovered from a binary dump.",
+      model: null,
+      confidence: null,
+      notes: "Firmware readback succeeded. The output includes raw dump artifacts, decoded strings, hexdump, and disassembly evidence.",
+      limitations: "Exact source cannot be recovered from a binary dump. Tantalum no longer generates source from board flash because reconstructed code was unreliable.",
       metadata: {
         identity,
+        extractionMode,
+        restoreAttempts,
+        snapshotAccepted: false,
+        snapshotRejectReason: restoreAttempts.find((attempt) => attempt.status === "rejected")?.reason || "",
+        reconstructionRequested: false,
+        evidenceQuality: hardware.evidenceQuality || "none",
+        evidenceUsed: [],
+        userCodeEvidence: null,
+        inferredBehaviors: [],
+        deterministicReconstruction: null,
+        aiRejectedReason: "",
+        sourceMarker: hardware.sourceMarkers || null,
+        markerVerifiedFromFirmware: false,
+        markerRestoreStatus: hardware.sourceMarkers?.status || "",
         firmwareDump: {
           format: hardware.dump?.format,
           filename: hardware.dump?.filename,
           size: hardware.dump?.size,
           checksum: hardware.dump?.checksum,
+          readbackRanges: hardware.dump?.readbackRanges || [],
+        },
+        espPartitions: espEvidence?.espPartitions || [],
+        selectedAppPartition: espEvidence?.selectedAppPartition || null,
+        espImage: espEvidence?.espImage || null,
+        appEvidenceAvailable: Boolean(espEvidence?.appEvidenceAvailable),
+        readbackRanges: hardware.dump?.readbackRanges || [],
+        esp: espEvidence,
+        disassembly: {
+          available: Boolean(hardware.disassembly?.text),
+          source: hardware.disassembly?.source || "",
+          tool: hardware.disassembly?.tool || "",
+          command: hardware.disassembly?.command || "",
+          error: hardware.disassembly?.error || "",
         },
       },
       rawArtifact: hardware.dump
@@ -4078,17 +5618,23 @@ async function viewBoardCode(payload = {}, eventSender = null) {
             format: hardware.dump.format,
           }
         : null,
+      rawArtifacts: hardware.artifacts || [],
     });
     emitProgress({ phase: "complete", message: "Board code view is ready.", progress: 100, status: "success", title: `Viewed code for ${boardName}` });
     return result;
   } catch (error) {
     warnings.push(error instanceof Error ? error.message : "Hardware readback failed.");
-    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings);
+    const result = await writeUnavailableBoardCodeResult(destination, boardPayload, warnings, {
+      extractionMode,
+      restoreAttempts,
+      reconstructionRequested,
+    });
     emitProgress({ phase: "complete", message: "Code extraction notes were written.", progress: 100, status: "success", title: `Code unavailable for ${boardName}` });
     return result;
   } finally {
-    activeBoardCodePorts.delete(portKey);
-    fsPromises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    if (hardwareTempDir) {
+      fsPromises.rm(hardwareTempDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -4508,12 +6054,28 @@ function cleanFunctionExecutionText(value) {
 }
 
 function functionExecutionDiagnostic(execution) {
+  const status = String(execution?.status || "").toLowerCase();
+  const duration = Number(execution?.duration || 0);
+  if ((status === "timeout" || (status === "failed" && duration >= 25)) && !functionExecutionResponseBody(execution).trim()) {
+    return "Function timed out before returning a response.";
+  }
+
   return [
     cleanFunctionExecutionText(execution?.errors),
     cleanFunctionExecutionText(execution?.stderr),
     cleanFunctionExecutionText(execution?.logs),
     cleanFunctionExecutionText(execution?.stdout),
   ].find(Boolean) || "";
+}
+
+function functionExecutionIsSynchronousTimeout(execution) {
+  const status = String(execution?.status || "").toLowerCase();
+  const duration = Number(execution?.duration || 0);
+  const diagnostic = functionExecutionDiagnostic(execution);
+  return (
+    /synchronous function execution timed out|error code:\s*408/i.test(diagnostic) ||
+    ((status === "failed" || status === "timeout") && duration >= 29 && !functionExecutionResponseBody(execution).trim())
+  );
 }
 
 function normalizeFunctionExecutionShape(execution) {
@@ -4572,6 +6134,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function boundedPositiveNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, number));
+}
+
 async function waitForFunctionExecution(functionId, executionId, { timeoutMs = 125000, pollMs = 1000 } = {}) {
   const startedAt = Date.now();
 
@@ -4589,14 +6160,15 @@ async function waitForFunctionExecution(functionId, executionId, { timeoutMs = 1
     await delay(pollMs);
   }
 
-  throw new Error("Agent gateway execution did not finish before the local wait timeout.");
+  throw new Error("Function execution did not finish before the local wait timeout.");
 }
 
-async function createFunctionExecutionAndWait(functionId, body) {
+async function createFunctionExecutionAndWait(functionId, body, { timeoutMs = 125000, pollMs = 1000, invalidateCache = true } = {}) {
   const initial = normalizeFunctionExecutionShape(await appwriteRequest({
     method: "POST",
     pathName: `functions/${encodeURIComponent(functionId)}/executions`,
     body,
+    invalidateCache,
   }));
 
   if (!body?.async || functionExecutionIsTerminal(initial)) {
@@ -4608,7 +6180,7 @@ async function createFunctionExecutionAndWait(functionId, body) {
     throw new Error("Appwrite did not return an execution ID for the async function request.");
   }
 
-  return waitForFunctionExecution(functionId, executionId);
+  return waitForFunctionExecution(functionId, executionId, { timeoutMs, pollMs });
 }
 
 async function executeAgentGatewayRequest(body) {
@@ -5005,11 +6577,11 @@ function createMenu() {
       submenu: [
         { label: "New File", accelerator: "CmdOrCtrl+N", click: () => sendMenuAction({ type: "new-file" }) },
         { label: "Open File...", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction({ type: "open-file" }) },
-        { label: "Open Folder...", accelerator: "CmdOrCtrl+Shift+O", click: () => sendMenuAction({ type: "open-folder" }) },
+        { label: "Open Project...", accelerator: "CmdOrCtrl+Shift+O", click: () => sendMenuAction({ type: "open-folder" }) },
         {
           label: "Open Recent",
           submenu: [
-            { label: "Folders", submenu: recentWorkspacesSubmenu },
+            { label: "Projects", submenu: recentWorkspacesSubmenu },
             { label: "Files", submenu: recentFilesSubmenu }
           ]
         },
@@ -5018,7 +6590,7 @@ function createMenu() {
         { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction({ type: "save-file" }) },
         { label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", click: () => sendMenuAction({ type: "save-file-as" }) },
         { type: "separator" },
-        { label: "Show Sketch Folder", accelerator: "CmdOrCtrl+K", click: () => sendMenuAction({ type: "show-sketch-folder" }) },
+        { label: "Show Project Folder", accelerator: "CmdOrCtrl+K", click: () => sendMenuAction({ type: "show-sketch-folder" }) },
         { type: "separator" },
         isMac ? { role: "close" } : { role: "quit" }
       ]
@@ -5056,7 +6628,7 @@ function createMenu() {
       ]
     },
     {
-      label: "Sketch",
+      label: "Project",
       submenu: [
         { label: "Verify / Compile", accelerator: "CmdOrCtrl+R", click: () => sendMenuAction({ type: "compile" }) },
         { label: "Upload", accelerator: "CmdOrCtrl+U", click: () => sendMenuAction({ type: "upload-local" }) },
@@ -5776,6 +7348,42 @@ ipcMain.handle("agent:resolve-approval", async (_event, payload = {}) => {
   }
 });
 
+ipcMain.handle("agent:restore-points:list", async (_event, payload = {}) => {
+  try {
+    const restorePoints = await agentRestorePointStore.list(payload);
+    return { success: true, restorePoints };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("agent:restore-points:record", async (_event, payload = {}) => {
+  try {
+    const result = await agentRestorePointStore.record(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("agent:restore-points:update-review-status", async (_event, payload = {}) => {
+  try {
+    const result = await agentRestorePointStore.updateReviewStatus(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("agent:restore-points:restore-to-message", async (_event, payload = {}) => {
+  try {
+    const result = await agentRestorePointStore.restoreToMessage(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("agent:tools:list-settings", async () => {
   try {
     return {
@@ -6045,13 +7653,37 @@ ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
       },
     };
     const cacheTtlMs = functionExecutionCacheTtlMs(payload);
+    const requestExecutor = payload.waitForCompletion
+      ? (nextRequest) => createFunctionExecutionAndWait(payload.functionId, nextRequest.body, {
+          timeoutMs: boundedPositiveNumber(payload.waitTimeoutMs, 95000, 5000, 125000),
+          pollMs: boundedPositiveNumber(payload.pollMs, 1000, 250, 5000),
+          invalidateCache: nextRequest.invalidateCache !== false,
+        })
+      : appwriteRequest;
+    const functionRequestExecutor = async (nextRequest) => {
+      const execution = await requestExecutor(nextRequest);
+      const normalized = normalizeFunctionExecutionShape(execution);
+      if (!payload.retryOnSyncTimeout || !functionExecutionIsSynchronousTimeout(normalized)) {
+        return execution;
+      }
+
+      await delay(750);
+      return requestExecutor(nextRequest);
+    };
+
+    if (payload.retryOnSyncTimeout && isPassiveAgentSettingsRead(payload)) {
+      await warmAgentSettingsFunctionIfStale("read-preflight");
+    }
+
     const execution = cacheTtlMs > 0
       ? await cachedAppwriteRequest(request, {
           ttlMs: cacheTtlMs,
           cacheKey: `function:${payload.functionId}:${payload.pathName ?? "/"}:${payload.body ?? ""}`,
           bypassCache: Boolean(payload.bypassCache),
+          requestExecutor: functionRequestExecutor,
+          shouldCachePayload: (payload) => !functionExecutionIsUncacheable(normalizeFunctionExecutionShape(payload)),
         })
-      : await appwriteRequest(request);
+      : await functionRequestExecutor(request);
     const normalizedExecution = normalizeFunctionExecutionShape(execution);
 
     if (cacheTtlMs <= 0) {
@@ -6193,7 +7825,7 @@ ipcMain.handle("fs:set-workspace", async (_event, folderPath) => {
     const stats = await fsPromises.stat(absolutePath);
 
     if (!stats.isDirectory()) {
-      throw new Error("Workspace path must be a directory.");
+      throw new Error("Project path must be a directory.");
     }
 
     setCurrentWorkspace(absolutePath);
@@ -6825,8 +8457,11 @@ ipcMain.handle("toolchain:compile", async (_event, payload) => {
         }
       : undefined;
 
+    const sketchSource = normalizeToolchainSketchSourcePayload(payload?.sketchSource);
     return await compileArduino(payload?.code ?? DEFAULT_EDITOR_CONTENT, payload?.board ?? "arduino:avr:uno", {
       cloudRuntime: payload?.cloudRuntime || null,
+      sourceRestoreMarker: payload?.sourceRestoreMarker || null,
+      sketchSource,
       onProgress: emitCompileProgress,
     });
   } catch (error) {
@@ -6884,6 +8519,61 @@ ipcMain.handle("toolchain:create-source-snapshot", async (_event, payload = {}) 
   }
 });
 
+ipcMain.handle("toolchain:prepare-source-restore-marker", async (_event, payload = {}) => {
+  try {
+    const marker = await createPendingSourceRestoreMarker(payload);
+    clearAppwriteReadCache();
+    return { success: true, ...marker };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:promote-source-restore-marker", async (_event, payload = {}) => {
+  try {
+    const result = await promoteSourceRestoreMarker(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:discard-source-restore-marker", async (_event, payload = {}) => {
+  try {
+    const result = await discardSourceRestoreMarker(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:list-board-code-snapshots", async (event, payload = {}) => {
+  try {
+    const result = await listBoardCodeSnapshots(payload, event.sender);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:restore-board-code-snapshot", async (event, payload = {}) => {
+  try {
+    const result = await restoreBoardCodeSnapshot(payload, event.sender);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("toolchain:set-board-code-visibility", async (_event, payload = {}) => {
+  try {
+    const result = await setBoardCodeVisibility(payload);
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("toolchain:view-board-code", async (event, payload = {}) => {
   try {
     const result = await viewBoardCode(payload, event.sender);
@@ -6934,6 +8624,7 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
   }
 
   try {
+    const sketchSource = normalizeToolchainSketchSourcePayload(payload?.sketchSource);
     const result = await uploadLocalSketch(payload.code ?? DEFAULT_EDITOR_CONTENT, payload.board, port || payload.port, (chunk, stream) => {
       const rawChunk = textFromToolchainProgressPayload(chunk);
       _event.sender.send("toolchain:usb-upload-progress", {
@@ -6946,7 +8637,9 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
         progress: typeof chunk?.progress === "number" ? chunk.progress : extractLastCliProgressPercent(rawChunk)
       });
     }, {
-      cloudRuntime: payload?.cloudRuntime || null
+      cloudRuntime: payload?.cloudRuntime || null,
+      sourceRestoreMarker: payload?.sourceRestoreMarker || null,
+      sketchSource,
     });
     if (result?.success && payload.sourceSnapshot) {
       try {
@@ -6959,8 +8652,22 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
         console.warn("Unable to save local source history:", error instanceof Error ? error.message : error);
       }
     }
+    if (result?.success && payload.sourceRestoreMarker?.markerId) {
+      try {
+        await promoteSourceRestoreMarker({ sourceRestoreMarker: payload.sourceRestoreMarker });
+      } catch (error) {
+        console.warn("Unable to promote source restore marker:", error instanceof Error ? error.message : error);
+      }
+    }
     return result;
   } catch (error) {
+    if (payload.sourceRestoreMarker?.markerId) {
+      try {
+        await discardSourceRestoreMarker({ sourceRestoreMarker: payload.sourceRestoreMarker });
+      } catch (discardError) {
+        console.warn("Unable to discard source restore marker:", discardError instanceof Error ? discardError.message : discardError);
+      }
+    }
     return toErrorResult(error);
   } finally {
     if (portKey) {
@@ -7575,6 +9282,7 @@ ipcMain.on("serial-monitor:write", (_event, payload) => {
 app.whenReady().then(async () => {
   await initializeStores();
   createMainWindow();
+  startAgentSettingsWarmLoop();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -7592,6 +9300,10 @@ app.whenReady().then(async () => {
 app.on("before-quit", () => {
   disposeAllTerminalSessions();
   disposeAllSerialMonitorSessions();
+  if (agentSettingsWarmTimer) {
+    clearInterval(agentSettingsWarmTimer);
+    agentSettingsWarmTimer = null;
+  }
 
   if (rendererServer) {
     rendererServer.close();

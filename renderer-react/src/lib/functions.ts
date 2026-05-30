@@ -4,9 +4,20 @@ import { safeJsonParse } from './utils';
 
 type FunctionExecutionLike = Awaited<ReturnType<typeof functions.createExecution>> & {
   response?: string;
+  status?: string;
   statusCode?: number;
+  duration?: number;
   stdout?: string;
   stderr?: string;
+};
+
+type ExecuteFunctionOptions = {
+  bypassCache?: boolean;
+  async?: boolean;
+  waitForCompletion?: boolean;
+  waitTimeoutMs?: number;
+  pollMs?: number;
+  retryOnSyncTimeout?: boolean;
 };
 
 function executionResponseBody(execution: FunctionExecutionLike) {
@@ -34,6 +45,12 @@ function cleanExecutionText(value: unknown) {
 }
 
 function executionDiagnostic(execution: FunctionExecutionLike) {
+  const status = typeof execution.status === 'string' ? execution.status.toLowerCase() : '';
+  const duration = Number(execution.duration ?? 0);
+  if (status === 'timeout' || (status === 'failed' && duration >= 25 && !executionResponseBody(execution).trim())) {
+    return 'Function timed out before returning a response.';
+  }
+
   return [
     cleanExecutionText(execution.errors),
     cleanExecutionText(execution.stderr),
@@ -46,14 +63,22 @@ export async function executeFunction<TInput extends object, TOutput>(
   functionId: string,
   body: TInput,
   pathName = '/',
+  options: ExecuteFunctionOptions = {},
 ) {
   const execution = await functions.createExecution(
     functionId,
     JSON.stringify(body),
-    false,
+    options.async ?? false,
     pathName,
     'POST',
     { 'content-type': 'application/json' },
+    {
+      bypassCache: options.bypassCache,
+      waitForCompletion: options.waitForCompletion,
+      waitTimeoutMs: options.waitTimeoutMs,
+      pollMs: options.pollMs,
+      retryOnSyncTimeout: options.retryOnSyncTimeout,
+    },
   );
 
   const responseBody = executionResponseBody(execution);

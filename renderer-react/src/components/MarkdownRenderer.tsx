@@ -1,5 +1,5 @@
-import { Fragment, type ReactNode } from 'react';
-import { Terminal } from 'lucide-react';
+import { Fragment, useState, type ReactNode } from 'react';
+import { Check, Code2, Copy, Terminal } from 'lucide-react';
 
 type MarkdownRendererProps = {
   content: string;
@@ -25,12 +25,61 @@ const COMMAND_LANGUAGE_LABELS: Record<string, string> = {
   zsh: 'Zsh',
 };
 
+const LANGUAGE_LABELS: Record<string, string> = {
+  arduino: 'Arduino',
+  c: 'C',
+  cc: 'C++',
+  cpp: 'C++',
+  cxx: 'C++',
+  h: 'C/C++ Header',
+  hh: 'C++ Header',
+  hpp: 'C++ Header',
+  hxx: 'C++ Header',
+  ino: 'Arduino',
+  js: 'JavaScript',
+  jsx: 'React JSX',
+  json: 'JSON',
+  md: 'Markdown',
+  py: 'Python',
+  ts: 'TypeScript',
+  tsx: 'React TSX',
+  txt: 'Text',
+  yaml: 'YAML',
+  yml: 'YAML',
+};
+
 function normalizeLanguage(language: string) {
   return language.trim().toLowerCase();
 }
 
 function commandLanguageLabel(language: string) {
   return COMMAND_LANGUAGE_LABELS[normalizeLanguage(language)];
+}
+
+function displayLanguageLabel(language: string) {
+  const normalized = normalizeLanguage(language);
+  if (!normalized) {
+    return 'Code';
+  }
+
+  return LANGUAGE_LABELS[normalized] ?? language.trim();
+}
+
+async function writeClipboardText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
 }
 
 function renderInline(content: string) {
@@ -136,24 +185,50 @@ function parseBlocks(markdown: string) {
 
 export function MarkdownRenderer({ content }: MarkdownRendererProps) {
   const blocks = parseBlocks(content);
+  const [copiedBlockKey, setCopiedBlockKey] = useState<string | null>(null);
+
+  async function copyCodeBlock(value: string, key: string) {
+    try {
+      await writeClipboardText(value);
+      setCopiedBlockKey(key);
+      window.setTimeout(() => {
+        setCopiedBlockKey((current) => (current === key ? null : current));
+      }, 1400);
+    } catch {
+      setCopiedBlockKey(null);
+    }
+  }
 
   return (
     <div className="markdown-renderer">
       {blocks.map((block, index) => {
         if (block.type === 'code') {
           const commandLabel = commandLanguageLabel(block.language);
-          const blockClassName = commandLabel ? 'markdown-code-block markdown-command-block' : 'markdown-code-block';
+          const blockClassName = commandLabel ? 'markdown-code-frame markdown-command-block' : 'markdown-code-frame';
+          const blockKey = `code-${index}`;
+          const copied = copiedBlockKey === blockKey;
 
           return (
-            <pre key={`code-${index}`} className={blockClassName}>
-              {block.language ? (
+            <div key={blockKey} className={blockClassName}>
+              <div className="markdown-code-toolbar">
                 <span className="markdown-code-language">
-                  {commandLabel ? <Terminal className="markdown-command-icon" size={12} aria-hidden="true" /> : null}
-                  {commandLabel ?? block.language}
+                  {commandLabel ? <Terminal className="markdown-command-icon" size={12} aria-hidden="true" /> : <Code2 size={12} aria-hidden="true" />}
+                  {commandLabel ?? displayLanguageLabel(block.language)}
                 </span>
-              ) : null}
-              <code>{block.content}</code>
-            </pre>
+                <button
+                  className="markdown-code-copy"
+                  type="button"
+                  title={copied ? 'Copied' : 'Copy code'}
+                  aria-label={copied ? 'Copied code' : 'Copy code'}
+                  onClick={() => void copyCodeBlock(block.content, blockKey)}
+                >
+                  {copied ? <Check size={13} /> : <Copy size={13} />}
+                </button>
+              </div>
+              <pre className="markdown-code-block">
+                <code>{block.content}</code>
+              </pre>
+            </div>
           );
         }
 

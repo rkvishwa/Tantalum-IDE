@@ -46,7 +46,7 @@ const EMPTY_STATUS: GitStatus = {
   conflictedFiles: [],
   hasChanges: false,
   safeDirectoryRequired: false,
-  message: 'Open a workspace folder to use Git.',
+  message: 'Open a Project to use Git.',
 };
 
 function inferEditorLanguage(filePath: string | null) {

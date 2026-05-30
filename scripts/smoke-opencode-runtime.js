@@ -56,6 +56,18 @@ function fakeChatCompletion(content) {
   };
 }
 
+function workspaceFileContextItem(workspaceRoot, relativePath, content, overrides = {}) {
+  return {
+    kind: "file",
+    path: path.join(workspaceRoot, relativePath),
+    relativePath,
+    name: path.basename(relativePath),
+    content,
+    source: "workspace",
+    ...overrides,
+  };
+}
+
 async function runNormalAskSmoke() {
   await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
     const events = [];
@@ -1905,6 +1917,295 @@ async function runDefaultSketchExtensionSmoke() {
   });
 }
 
+async function runPreferredImplicitEditTargetSmoke() {
+  const prompt = "create code for s3 inbuild rgb to light blue";
+  const derivedTarget = "s3_inbuild_rgb_to_light_blue.ino";
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "", "utf8");
+
+    const events = [];
+    const gatewayRequests = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async ({ request }) => {
+        gatewayRequests.push(request);
+        return fakeChatCompletion(
+          JSON.stringify({
+            instruction: "Create the requested sketch.",
+            clarification: null,
+            riskLevel: "low",
+            tasks: [
+              {
+                kind: "create_file",
+                title: `Create ${derivedTarget}`,
+                targetPath: derivedTarget,
+              },
+            ],
+          }),
+        );
+      },
+    });
+
+    const route = await manager.route({
+      prompt,
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-preferred-implicit-edit-target",
+      contextItems: [workspaceFileContextItem(workspaceRoot, "sketch.ino", "")],
+    });
+
+    assert.ok(gatewayRequests.length > 0, "expected fast planner request");
+    assert.match(JSON.stringify(gatewayRequests), /preferredImplicitEditTarget/);
+    assert.match(JSON.stringify(gatewayRequests), /sketch\.ino/);
+    assert.equal(route.taskList.items.length, 1);
+    const editTask = route.taskList.items[0];
+    assert.equal(editTask.kind, "opencode_edit");
+    assert.equal(editTask.targetPath, "sketch.ino");
+    assert.equal(editTask.title, "Write code in sketch.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt,
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-nonempty-attached-create-target",
+      contextItems: [workspaceFileContextItem(workspaceRoot, "sketch.ino", "void setup() {}\n")],
+    });
+
+    assert.equal(route.requiresUserDecision, false);
+    assert.equal(route.decisionKind, "none");
+    assert.equal(route.taskList.items.length, 1);
+    const editTask = route.taskList.items[0];
+    assert.equal(editTask.kind, "opencode_edit");
+    assert.equal(editTask.targetPath, "sketch.ino");
+    assert.equal(editTask.title, "Write code in sketch.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt: "write for s3 builtin led to light blue",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-active-file-create-target",
+      activeTab: { path: path.join(workspaceRoot, "sketch.ino") },
+    });
+
+    assert.equal(route.requiresUserDecision, false);
+    assert.equal(route.decisionKind, "none");
+    assert.equal(route.taskList.items.length, 1);
+    const editTask = route.taskList.items[0];
+    assert.equal(editTask.kind, "opencode_edit");
+    assert.equal(editTask.targetPath, "sketch.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "other.ino"), "", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt,
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-multiple-empty-attached-create-target",
+      contextItems: [
+        workspaceFileContextItem(workspaceRoot, "sketch.ino", ""),
+        workspaceFileContextItem(workspaceRoot, "other.ino", ""),
+      ],
+    });
+
+    const createTask = route.taskList.items.find((item) => item.kind === "create_file");
+    assert.ok(createTask, "expected multiple empty attached files not to choose arbitrarily");
+    assert.equal(createTask.targetPath, derivedTarget);
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt: "create code for foo.ino",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-explicit-path-over-implicit-edit-target",
+      contextItems: [workspaceFileContextItem(workspaceRoot, "sketch.ino", "")],
+    });
+
+    const createTask = route.taskList.items.find((item) => item.kind === "create_file");
+    assert.ok(createTask, "expected explicit prompt file to win over implicit edit target");
+    assert.equal(createTask.targetPath, "foo.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt: "update this file to blink the onboard led",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-update-empty-attached-target",
+      contextItems: [workspaceFileContextItem(workspaceRoot, "sketch.ino", "")],
+    });
+
+    assert.equal(route.taskList.items.length, 1);
+    const editTask = route.taskList.items[0];
+    assert.equal(editTask.kind, "opencode_edit");
+    assert.equal(editTask.targetPath, "sketch.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt,
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-external-attachment-not-empty-target",
+      contextItems: [
+        {
+          kind: "file",
+          path: "attachment://sketch.ino",
+          name: "sketch.ino",
+          content: "",
+          source: "attachment",
+        },
+      ],
+    });
+
+    const createTask = route.taskList.items.find((item) => item.kind === "create_file");
+    assert.ok(createTask, "expected dropped external attachment not to become the create target");
+    assert.equal(createTask.targetPath, derivedTarget);
+  });
+}
+
+async function runShortFirmwareFollowupTargetSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => {
+        throw new Error("short firmware follow-up should not need the classifier");
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "use neopixel",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-short-firmware-followup",
+      threadMemory: {
+        files: [threadMemoryFile("sketch.ino", { aliases: ["s3 led sketch"] })],
+      },
+    });
+
+    assert.equal(route.engine, "opencode_edit");
+    assert.equal(route.reason, "short_firmware_followup");
+    assert.equal(route.requiresUserDecision, false);
+    assert.equal(route.decisionKind, "none");
+    assert.equal(route.taskList.items.length, 1);
+    const editTask = route.taskList.items[0];
+    assert.equal(editTask.kind, "opencode_edit");
+    assert.equal(editTask.targetPath, "sketch.ino");
+  });
+
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "sketch.ino"), "void setup() {}\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "other.ino"), "void setup() {}\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => {
+        throw new Error("ambiguous short firmware follow-up should not need the classifier");
+      },
+    });
+
+    const route = await manager.route({
+      prompt: "use neopixel",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-short-firmware-followup-ambiguous",
+      threadMemory: {
+        files: [threadMemoryFile("sketch.ino"), threadMemoryFile("other.ino")],
+      },
+    });
+
+    assert.equal(route.engine, "local");
+    assert.equal(route.reason, "short_firmware_followup_ambiguous_target");
+    assert.equal(route.decisionKind, "clarify");
+    assert.match(route.userMessage, /multiple remembered source files/i);
+    assert.match(route.userMessage, /sketch\.ino/);
+    assert.match(route.userMessage, /other\.ino/);
+  });
+}
+
 async function runPlannerClarificationCreateFallbackSmoke() {
   await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
     const events = [];
@@ -2312,6 +2613,11 @@ async function runPermissionActivitySmoke() {
   assert.match(runtimeSource, /mode === "power" \? 80 : 50/);
   assert.match(runtimeSource, /mode === "power" \? DEFAULT_OPENCODE_POWER_CONTEXT_WINDOW : DEFAULT_OPENCODE_FAST_CONTEXT_WINDOW/);
   assert.match(runtimeSource, /mode === "power" \? DEFAULT_OPENCODE_POWER_TIMEOUT_MS : DEFAULT_OPENCODE_FAST_TIMEOUT_MS/);
+  assert.match(runtimeSource, /Retrying file edit/);
+  assert.match(runtimeSource, /buildNoDiffRetryPrompt/);
+  assert.match(runtimeSource, /The previous response did not modify any workspace files/);
+  assert.match(runtimeSource, /did not match the applied agent change after writing/);
+  assert.match(runtimeSource, /still exists after the agent delete was applied/);
   assert.doesNotMatch(runtimeSource, /CAVEMAN_OUTPUT_STYLE_FALLBACK/);
   assert.doesNotMatch(runtimeSource, /Caveman mode active/);
 }
@@ -2354,6 +2660,8 @@ async function main() {
   await runDeleteRootSketchFilesEmptySmoke();
   await runAmbiguousFuzzyTargetSmoke();
   await runDefaultSketchExtensionSmoke();
+  await runPreferredImplicitEditTargetSmoke();
+  await runShortFirmwareFollowupTargetSmoke();
   await runPlannerClarificationCreateFallbackSmoke();
   await runPlannerDefaultSketchExtensionSmoke();
   await runPermissionModeRouteSmoke();

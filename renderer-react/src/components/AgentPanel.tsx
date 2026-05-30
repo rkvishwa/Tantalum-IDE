@@ -34,6 +34,7 @@ import {
   Terminal,
   Trash2,
   TriangleAlert,
+  Undo2,
   Wrench,
   X,
   Zap,
@@ -73,6 +74,7 @@ import type {
   AgentContextItem,
   AgentPermissionMode,
   AgentProgressEvent,
+  AgentRestorePointSummary,
   AgentRunPayload,
   AgentTaskItem,
   AgentTaskList,
@@ -97,7 +99,15 @@ export type AgentPendingReview = {
   createdAt: string;
 };
 
-export type AgentPreparedReview = Omit<AgentPendingReview, 'id' | 'createdAt'>;
+export type AgentPreparedReview = Omit<AgentPendingReview, 'id' | 'createdAt'> & {
+  userMessageId?: string | null;
+  userMessageCreatedAt?: string | null;
+};
+
+export type AgentRestoreResult = {
+  messages: AgentThreadMessage[];
+  restorePoints: AgentRestorePointSummary[];
+};
 
 export type AgentReviewResolutionNotice = {
   id: string;
@@ -155,6 +165,8 @@ type AgentPanelProps = {
   onPreviewAgentFile?: (relativePath: string) => void;
   onOpenContextFile?: (filePath: string) => void;
   onResolveAgentChanges?: (approved: boolean) => void | Promise<void>;
+  restorePoints?: AgentRestorePointSummary[];
+  onRestoreToMessage?: (message: AgentThreadMessage, messages: AgentThreadMessage[]) => Promise<AgentRestoreResult | null>;
   defaultView?: AgentView;
   hideChat?: boolean;
   chatOnly?: boolean;
@@ -165,6 +177,7 @@ type AgentPanelProps = {
 
 type AgentView = 'chat' | 'settings';
 type AgentComposeTarget = 'new' | 'thread';
+type AgentCloudLoadScope = 'settings' | 'threads';
 type AgentIntent = 'agent' | 'ask';
 type PersistPreferencesOptions = {
   includeCustomModelName?: boolean;
@@ -188,6 +201,7 @@ const EMPTY_CREDENTIAL_FORM: CredentialFormState = {
   modelNames: '',
   enabled: true,
 };
+const AGENT_RUN_STOPPED_MESSAGE = 'Agent run stopped.';
 
 function formatDate(value: string | null | undefined) {
   if (!value) {
@@ -333,6 +347,77 @@ function threadsForWorkspace(threads: AgentThreadSummary[], workspaceKey: string
   }
 
   return threads.filter((thread) => thread.workspaceKey === workspaceKey);
+}
+
+type AgentPanelDisplayCache = {
+  version: 1;
+  settings: AgentSettingsState;
+  threads: AgentThreadSummary[];
+  savedAt: string;
+};
+
+const AGENT_PANEL_DISPLAY_CACHE_PREFIX = 'tantalum-agent-panel-display-cache';
+
+function agentPanelDisplayCacheKey(userId: string, workspaceKey: string | null) {
+  return `${AGENT_PANEL_DISPLAY_CACHE_PREFIX}:${userId}:${workspaceKey || 'no-workspace'}`;
+}
+
+function isAgentPanelDisplayCache(value: unknown): value is AgentPanelDisplayCache {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<AgentPanelDisplayCache>;
+  return (
+    candidate.version === 1 &&
+    Boolean(candidate.settings) &&
+    typeof candidate.settings === 'object' &&
+    Array.isArray(candidate.settings.recentThreads) &&
+    Array.isArray(candidate.threads)
+  );
+}
+
+function readAgentPanelDisplayCache(userId: string, workspaceKey: string | null) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(agentPanelDisplayCacheKey(userId, workspaceKey));
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    return isAgentPanelDisplayCache(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAgentPanelDisplayCache(
+  userId: string,
+  workspaceKey: string | null,
+  settings: AgentSettingsState,
+  threads: AgentThreadSummary[],
+) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      agentPanelDisplayCacheKey(userId, workspaceKey),
+      JSON.stringify({
+        version: 1,
+        settings: { ...settings, recentThreads: threads },
+        threads,
+        savedAt: new Date().toISOString(),
+      } satisfies AgentPanelDisplayCache),
+    );
+  } catch {
+    // Best-effort display cache only; Appwrite remains authoritative.
+  }
 }
 
 function titleFromPrompt(value: string) {
@@ -1043,6 +1128,33 @@ function isLocalThreadId(value: string | null | undefined) {
   return Boolean(value?.startsWith('local-thread-'));
 }
 
+function agentCloudLoadErrorMessage(error: unknown, scope: AgentCloudLoadScope) {
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const cleanMessage = rawMessage.replace(/\s+/g, ' ').trim();
+  const prefix =
+    scope === 'settings'
+      ? 'Tantalum AI cloud settings could not be loaded.'
+      : 'Synced threads could not be refreshed.';
+
+  if (/function returned an empty response|returned an empty response|unreadable response/i.test(cleanMessage)) {
+    return `${prefix} Tantalum AI setup is temporarily unavailable. Retry in a moment.`;
+  }
+
+  if (/timed out|timeout/i.test(cleanMessage)) {
+    return `${prefix} Tantalum AI took too long to start. Retry in a moment.`;
+  }
+
+  if (/jwt|session|unauthorized|missing.*user|401/i.test(cleanMessage)) {
+    return `${prefix} Sign in again, then retry.`;
+  }
+
+  if (/fetch failed|failed to fetch|network|enotfound|econnrefused|etimedout/i.test(cleanMessage)) {
+    return `${prefix} Check the Appwrite connection and try again.`;
+  }
+
+  return cleanMessage ? `${prefix} ${cleanMessage}` : `${prefix} Try again from the refresh button.`;
+}
+
 function replaceOptimisticMessage(
   current: AgentThreadMessage[],
   optimisticMessageId: string | null,
@@ -1142,6 +1254,8 @@ function asPendingAgentAction(value: unknown): PendingAgentAction | null {
     kind: typeof value.kind === 'string' ? value.kind : 'edit',
     originalPrompt,
     normalizedPrompt: typeof value.normalizedPrompt === 'string' ? value.normalizedPrompt : originalPrompt.toLowerCase(),
+    userMessageId: typeof value.userMessageId === 'string' ? value.userMessageId : null,
+    userMessageCreatedAt: typeof value.userMessageCreatedAt === 'string' ? value.userMessageCreatedAt : null,
     riskLevel: typeof value.riskLevel === 'string' ? value.riskLevel : 'medium',
     reason: typeof value.reason === 'string' ? value.reason : 'pending_action',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
@@ -1203,7 +1317,7 @@ function asAgentTaskList(value: unknown): AgentTaskList | null {
     .filter(isRecord)
     .map((item, index) => ({
       id: typeof item.id === 'string' ? item.id : `task-${index + 1}`,
-      title: typeof item.title === 'string' ? item.title : 'Run workspace task',
+      title: typeof item.title === 'string' ? item.title : 'Run Project task',
       status: isAgentTaskStatus(item.status) ? item.status : 'pending',
       kind: typeof item.kind === 'string' ? item.kind : 'opencode_edit',
       targetPath: typeof item.targetPath === 'string' ? item.targetPath : undefined,
@@ -1502,6 +1616,15 @@ function displayAgentWorkText(value: string) {
     .replace(/\/tmp\/tantalum-opencode-[^\s/]+\/workspace\/?/gi, '')
     .replace(/\/var\/folders\/[^\r\n]*?\/T\/tantalum-opencode-[^\s/]+\/workspace\/?/gi, '')
     .replace(/\btantalum-opencode-[^\s/\\]+[\\/](?:workspace[\\/]?)?/gi, '')
+    .replace(/\bModel request started\b/gi, 'Generating response')
+    .replace(/\bModel request completed\b/gi, 'Response ready')
+    .replace(/\bModel request failed\b/gi, 'Response failed')
+    .replace(/\bModel response streamed\b/gi, 'Streaming response')
+    .replace(/\bRetrying model request\b/gi, 'Retrying response')
+    .replace(/\bWaiting for model\b/gi, 'Waiting for response')
+    .replace(/\bmanaged gateway\b/gi, 'managed service')
+    .replace(/\bTantalum gateway\b/gi, 'Tantalum AI')
+    .replace(/\bGateway response\b/gi, 'Response')
     .replace(/\bopen\s*code\b/gi, 'Tantalum AI')
     .replace(/\bopencode\b/gi, 'Tantalum AI')
     .replace(/\s{2,}/g, ' ')
@@ -1911,18 +2034,26 @@ export function AgentPanel({
   onPreviewAgentFile,
   onOpenContextFile,
   onResolveAgentChanges,
+  restorePoints = [],
+  onRestoreToMessage,
   defaultView = 'chat',
   hideChat = false,
   chatOnly = false,
   onOpenSettings,
   onClosePanel,
 }: AgentPanelProps) {
+  const workspaceKey = workspacePath?.trim() || null;
+  const initialDisplayCache = useMemo(
+    () => (hasAgentCloudConfiguration() ? readAgentPanelDisplayCache(user.$id, workspaceKey) : null),
+    [user.$id, workspaceKey],
+  );
   const [view, setView] = useState<AgentView>(defaultView);
-  const [threadSummaries, setThreadSummaries] = useState<AgentThreadSummary[]>([]);
+  const [threadSummaries, setThreadSummaries] = useState<AgentThreadSummary[]>(() => initialDisplayCache?.threads ?? []);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentThreadMessage[]>([]);
   const [draftPrompt, setDraftPrompt] = useState('');
-  const [settings, setSettings] = useState<AgentSettingsState>(() => createDefaultAgentSettings());
+  const [settings, setSettings] = useState<AgentSettingsState>(() => initialDisplayCache?.settings ?? createDefaultAgentSettings());
+  const [hasLastKnownAgentData, setHasLastKnownAgentData] = useState(Boolean(initialDisplayCache));
   const [isViewingHistory, setIsViewingHistory] = useState(activeThreadId === null);
   const [composeTarget, setComposeTarget] = useState<AgentComposeTarget>('new');
   const [agentIntent, setAgentIntent] = useState<AgentIntent>('agent');
@@ -1945,12 +2076,17 @@ export function AgentPanel({
 
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [settingsBootstrapped, setSettingsBootstrapped] = useState(false);
+  const [settingsCloudDataLoaded, setSettingsCloudDataLoaded] = useState(false);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [loadingThreads, setLoadingThreads] = useState(false);
+  const [threadLoadError, setThreadLoadError] = useState<string | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [preparingThreadId, setPreparingThreadId] = useState<string | null>(null);
   const [runningThreadId, setRunningThreadId] = useState<string | null>(null);
   const [stoppingThreadId, setStoppingThreadId] = useState<string | null>(null);
+  const [restoringMessageId, setRestoringMessageId] = useState<string | null>(null);
   const [unreadCompletedThreadIds, setUnreadCompletedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadApprovalState, setThreadApprovalState] = useState<Map<string, boolean>>(() => new Map());
   const [liveTaskLists, setLiveTaskLists] = useState<Map<string, AgentTaskList>>(() => new Map());
@@ -1971,10 +2107,13 @@ export function AgentPanel({
   const activeThreadIdRef = useRef<string | null>(activeThreadId);
   const isViewingHistoryRef = useRef(isViewingHistory);
   const liveActivitiesRef = useRef<Map<string, AgentActivityEntry[]>>(new Map());
+  const stopRequestedThreadIdsRef = useRef<Set<string>>(new Set());
   const contextMentionRef = useRef<ContextMentionRange | null>(contextMention);
-  const workspaceKey = workspacePath?.trim() || null;
+  const settingsRef = useRef(settings);
+  const settingsCloudDataLoadedRef = useRef(settingsCloudDataLoaded);
   const workspaceKeyRef = useRef<string | null>(workspaceKey);
   const previousWorkspaceKeyRef = useRef<string | null>(workspaceKey);
+  const previousUserIdRef = useRef(user.$id);
   const threadRefreshRequestRef = useRef(0);
   const settingsRefreshRequestRef = useRef(0);
   const settingsUsageLoadedRef = useRef(false);
@@ -1990,6 +2129,14 @@ export function AgentPanel({
   }, [isViewingHistory]);
 
   useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    settingsCloudDataLoadedRef.current = settingsCloudDataLoaded;
+  }, [settingsCloudDataLoaded]);
+
+  useEffect(() => {
     if (pendingReview?.id) {
       setComposerReviewOpen(true);
     }
@@ -2001,15 +2148,35 @@ export function AgentPanel({
 
   useEffect(() => {
     workspaceKeyRef.current = workspaceKey;
-    if (previousWorkspaceKeyRef.current === workspaceKey) {
+    if (previousWorkspaceKeyRef.current === workspaceKey && previousUserIdRef.current === user.$id) {
       return;
     }
 
     previousWorkspaceKeyRef.current = workspaceKey;
+    previousUserIdRef.current = user.$id;
     threadRefreshRequestRef.current += 1;
     settingsRefreshRequestRef.current += 1;
     settingsUsageLoadedRef.current = false;
     messageLoadRequestRef.current += 1;
+    const cachedDisplay = hasAgentCloudConfiguration() ? readAgentPanelDisplayCache(user.$id, workspaceKey) : null;
+    if (cachedDisplay) {
+      settingsRef.current = cachedDisplay.settings;
+      setSettings(cachedDisplay.settings);
+      setThreadSummaries(threadsForWorkspace(cachedDisplay.threads, workspaceKey));
+      setHasLastKnownAgentData(true);
+    } else {
+      const defaultSettings = createDefaultAgentSettings();
+      settingsRef.current = defaultSettings;
+      setSettings(defaultSettings);
+      setThreadSummaries([]);
+      setHasLastKnownAgentData(false);
+    }
+    settingsCloudDataLoadedRef.current = false;
+    setSettingsCloudDataLoaded(false);
+    setSettingsBootstrapped(false);
+    setLoadingSettings(true);
+    setSettingsLoadError(null);
+    setThreadLoadError(null);
     activeThreadIdRef.current = null;
     setActiveThreadId(null);
     setMessages([]);
@@ -2037,10 +2204,14 @@ export function AgentPanel({
     setExpandedWorkSummaryIds(new Set());
     setComposerTasksOpen(false);
     setLoadingMessages(false);
-    setThreadSummaries([]);
     setLoadingThreads(false);
     setThreadApprovalState(new Map());
-  }, [workspaceKey]);
+    setPreparingThreadId(null);
+    setRunningThreadId(null);
+    setStoppingThreadId(null);
+    setRestoringMessageId(null);
+    stopRequestedThreadIdsRef.current.clear();
+  }, [user.$id, workspaceKey]);
 
   useEffect(() => {
     if (!activeThreadId || loadingMessages) {
@@ -2191,19 +2362,35 @@ export function AgentPanel({
         }.`
       : null;
   const canUseCustom = Boolean(selectedCredential && selectedModel);
-  const loadingInitialAgentData = loadingSettings && !settingsBootstrapped;
+  const loadingInitialAgentData = loadingSettings && !settingsBootstrapped && !hasLastKnownAgentData;
+  const showingCloudConnectionState = hasCloudAgent && loadingSettings && !settingsCloudDataLoaded && !settingsLoadError;
+  const showManagedUnavailableMessage = settingsCloudDataLoaded && preferences.selectedSource === 'managed' && managedUnavailableMessage;
   const canSend =
     Boolean(workspacePath) &&
     hasCloudAgent &&
-    settingsBootstrapped &&
+    settingsCloudDataLoaded &&
     !busy &&
     deferredPrompt.trim().length > 0 &&
     (preferences.selectedSource === 'managed' ? canUseManaged : canUseCustom);
   const activeThreadIsRunning = Boolean(activeThreadId && runningThreadId === activeThreadId);
-  const activeThreadIsPreparing = busy && !activeThreadIsRunning && !isViewingHistory && messages.length > 0;
+  const activeThreadIsPreparing = Boolean(activeThreadId && preparingThreadId === activeThreadId && !activeThreadIsRunning);
+  const activeThreadCanStop = activeThreadIsRunning || activeThreadIsPreparing;
   const isStoppingActiveThread = Boolean(activeThreadId && stoppingThreadId === activeThreadId);
+  const userMessageOrder = useMemo(() => {
+    const order = new Map<string, number>();
+    messages.forEach((message) => {
+      if (message.role === 'user') {
+        order.set(message.id, order.size);
+      }
+    });
+    return order;
+  }, [messages]);
+  const activeThreadRestorePoints = useMemo(
+    () => restorePoints.filter((point) => !activeThreadId || point.threadId === activeThreadId),
+    [activeThreadId, restorePoints],
+  );
   const agentIntentLabel = agentIntent === 'ask' ? 'Ask' : 'Agent';
-  const agentIntentDescription = agentIntent === 'ask' ? 'Ask mode answers without changing files.' : 'Agent mode can apply workspace edits with revert available.';
+  const agentIntentDescription = agentIntent === 'ask' ? 'Ask mode answers without changing files.' : 'Agent mode can apply Project edits with revert available.';
   const threadSearchQuery = sessionSearchOpen ? sessionSearchQuery.trim().toLowerCase() : '';
   const visibleThreadSummaries = useMemo(
     () =>
@@ -2654,19 +2841,20 @@ export function AgentPanel({
     return resolvedItems;
   }, [activeTab, contextItems, pushToast]);
 
-  const refreshThreads = useCallback(async () => {
+  const refreshThreads = useCallback(async (options: { bypassCache?: boolean } = {}) => {
     const targetWorkspaceKey = workspaceKey;
     const requestId = ++threadRefreshRequestRef.current;
 
     if (!hasCloudAgent || !targetWorkspaceKey) {
       setThreadSummaries([]);
       setLoadingThreads(false);
+      setThreadLoadError(null);
       return;
     }
 
     setLoadingThreads(true);
     try {
-      const nextThreads = await listAgentThreads(targetWorkspaceKey);
+      const nextThreads = await listAgentThreads(targetWorkspaceKey, { bypassCache: options.bypassCache });
       if (threadRefreshRequestRef.current !== requestId || workspaceKeyRef.current !== targetWorkspaceKey) {
         return;
       }
@@ -2675,18 +2863,23 @@ export function AgentPanel({
         ...current.filter((thread) => isLocalThreadId(thread.id) && !scopedThreads.some((entry) => entry.id === thread.id)),
         ...scopedThreads,
       ]);
+      if (settingsCloudDataLoadedRef.current) {
+        writeAgentPanelDisplayCache(user.$id, targetWorkspaceKey, settingsRef.current, scopedThreads);
+        setHasLastKnownAgentData(true);
+      }
+      setThreadLoadError(null);
     } catch (error) {
       if (threadRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
-        pushToast(error instanceof Error ? error.message : 'Unable to load Tantalum AI threads.', 'error');
+        setThreadLoadError(agentCloudLoadErrorMessage(error, 'threads'));
       }
     } finally {
       if (threadRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
         setLoadingThreads(false);
       }
     }
-  }, [hasCloudAgent, pushToast, workspaceKey]);
+  }, [hasCloudAgent, user.$id, workspaceKey]);
 
-  const refreshAgentSettings = useCallback(async (showErrors = true, options: { includeUsage?: boolean } = {}) => {
+  const refreshAgentSettings = useCallback(async (showErrors = true, options: { includeUsage?: boolean; bypassCache?: boolean } = {}) => {
     const targetWorkspaceKey = workspaceKey;
     const requestId = ++settingsRefreshRequestRef.current;
     const includeUsage = options.includeUsage ?? settingsUsageLoadedRef.current;
@@ -2696,27 +2889,40 @@ export function AgentPanel({
       setThreadSummaries([]);
       setLoadingSettings(false);
       setSettingsBootstrapped(true);
+      setSettingsCloudDataLoaded(false);
+      settingsCloudDataLoadedRef.current = false;
+      setHasLastKnownAgentData(false);
+      setSettingsLoadError(null);
+      setThreadLoadError(null);
       return;
     }
 
     setLoadingSettings(true);
     try {
-      const nextSettings = await loadAgentSettings(targetWorkspaceKey, { includeUsage });
+      const nextSettings = await loadAgentSettings(targetWorkspaceKey, { includeUsage, bypassCache: options.bypassCache });
       if (settingsRefreshRequestRef.current !== requestId || workspaceKeyRef.current !== targetWorkspaceKey) {
         return;
       }
       if (includeUsage) {
         settingsUsageLoadedRef.current = true;
       }
-      setSettings((current) => ({
+      const mergedSettings = {
         ...nextSettings,
-        recentUsage: includeUsage ? nextSettings.recentUsage : current.recentUsage,
-      }));
+        recentUsage: includeUsage ? nextSettings.recentUsage : settingsRef.current.recentUsage,
+      };
+      settingsRef.current = mergedSettings;
+      setSettings(mergedSettings);
       const scopedThreads = threadsForWorkspace(nextSettings.recentThreads, targetWorkspaceKey);
       setThreadSummaries((current) => [
         ...current.filter((thread) => isLocalThreadId(thread.id) && !scopedThreads.some((entry) => entry.id === thread.id)),
         ...scopedThreads,
       ]);
+      writeAgentPanelDisplayCache(user.$id, targetWorkspaceKey, mergedSettings, scopedThreads);
+      setHasLastKnownAgentData(true);
+      setSettingsCloudDataLoaded(true);
+      settingsCloudDataLoadedRef.current = true;
+      setSettingsLoadError(null);
+      setThreadLoadError(null);
       const currentActiveThreadId = activeThreadIdRef.current;
       if (currentActiveThreadId && !isLocalThreadId(currentActiveThreadId) && !scopedThreads.some((thread) => thread.id === currentActiveThreadId)) {
         setActiveThreadId(null);
@@ -2726,7 +2932,7 @@ export function AgentPanel({
       }
     } catch (error) {
       if (showErrors && settingsRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
-        pushToast(error instanceof Error ? error.message : 'Unable to load agent settings.', 'error');
+        setSettingsLoadError(agentCloudLoadErrorMessage(error, 'settings'));
       }
     } finally {
       if (settingsRefreshRequestRef.current === requestId && workspaceKeyRef.current === targetWorkspaceKey) {
@@ -2734,7 +2940,7 @@ export function AgentPanel({
         setSettingsBootstrapped(true);
       }
     }
-  }, [hasCloudAgent, pushToast, workspaceKey]);
+  }, [hasCloudAgent, user.$id, workspaceKey]);
 
   async function persistPreferences(nextPreferences: AgentPreferences, options: PersistPreferencesOptions = {}) {
     const sanitizedPreferences: AgentPreferences =
@@ -2905,6 +3111,30 @@ export function AgentPanel({
     }
   }
 
+  function clearThreadStopRequest(threadId: string | null | undefined) {
+    if (!threadId) {
+      return;
+    }
+
+    stopRequestedThreadIdsRef.current.delete(threadId);
+  }
+
+  function transferThreadStopRequest(fromThreadId: string | null | undefined, toThreadId: string | null | undefined) {
+    if (!fromThreadId || !toThreadId || !stopRequestedThreadIdsRef.current.has(fromThreadId)) {
+      return;
+    }
+
+    stopRequestedThreadIdsRef.current.delete(fromThreadId);
+    stopRequestedThreadIdsRef.current.add(toThreadId);
+    setStoppingThreadId((current) => (current === fromThreadId ? toThreadId : current));
+  }
+
+  function throwIfThreadStopRequested(threadId: string | null | undefined) {
+    if (threadId && stopRequestedThreadIdsRef.current.has(threadId)) {
+      throw new Error(AGENT_RUN_STOPPED_MESSAGE);
+    }
+  }
+
   async function executeAgentRun({
     threadId,
     prompt,
@@ -2915,6 +3145,8 @@ export function AgentPanel({
     taskList = null,
     completedTaskReferences = [],
     threadMemory = null,
+    userMessageId = null,
+    userMessageCreatedAt = null,
   }: {
     threadId: string;
     prompt: string;
@@ -2925,11 +3157,16 @@ export function AgentPanel({
     taskList?: AgentTaskList | null;
     completedTaskReferences?: AgentCompletedTaskReference[];
     threadMemory?: AgentThreadMemory | null;
+    userMessageId?: string | null;
+    userMessageCreatedAt?: string | null;
   }) {
     let wasStopped = false;
+    let refreshedAgentData = false;
 
+    clearThreadStopRequest(threadId);
     setBusy(true);
     setView('chat');
+    setPreparingThreadId((current) => (current === threadId ? null : current));
     setRunningThreadId(threadId);
     setStoppingThreadId(null);
     setThinkingDetailsOpen(false);
@@ -2961,6 +3198,7 @@ export function AgentPanel({
         });
       }
 
+      throwIfThreadStopRequested(threadId);
       const result = await window.tantalum.agent.run({
         prompt,
         source: preferences.selectedSource,
@@ -3038,6 +3276,8 @@ export function AgentPanel({
         const pendingAction: PendingAgentAction = {
           ...recommendedToolAction,
           threadId,
+          userMessageId: userMessageId ?? approvedAction?.userMessageId ?? null,
+          userMessageCreatedAt: userMessageCreatedAt ?? approvedAction?.userMessageCreatedAt ?? null,
           status: 'pending',
         };
         const toolRequest = pendingAction.toolRequest;
@@ -3058,7 +3298,7 @@ export function AgentPanel({
       const skippedFiles = Array.isArray(result.skippedFiles) ? result.skippedFiles : [];
       if (skippedFiles.length > 0) {
         pushConsole(
-          `Agent preparation skipped ${skippedFiles.length} non-reviewable workspace ${skippedFiles.length === 1 ? 'file' : 'files'}.`,
+          `Agent preparation skipped ${skippedFiles.length} non-reviewable Project ${skippedFiles.length === 1 ? 'file' : 'files'}.`,
           'info',
         );
       }
@@ -3073,11 +3313,13 @@ export function AgentPanel({
           threadId,
           files: reviewFiles,
           output: result.output,
+          userMessageId: userMessageId ?? approvedAction?.userMessageId ?? null,
+          userMessageCreatedAt: userMessageCreatedAt ?? approvedAction?.userMessageCreatedAt ?? null,
         });
 
         await appendAgentStatusMessage(
           threadId,
-          `Applied ${reviewFiles.length} workspace ${reviewFiles.length === 1 ? 'change' : 'changes'}. Keep or revert them from the editor review bar.`,
+          `Applied ${reviewFiles.length} Project ${reviewFiles.length === 1 ? 'change' : 'changes'}. Keep or revert them from the editor review bar.`,
           'warning',
           {
             action: 'opencode_live_applied',
@@ -3088,9 +3330,10 @@ export function AgentPanel({
       }
 
       await refreshAgentSettings(false);
+      refreshedAgentData = true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The agent run failed.';
-      wasStopped = message === 'Agent run stopped.';
+      wasStopped = message === AGENT_RUN_STOPPED_MESSAGE;
       await appendAgentStatusMessage(threadId, message, wasStopped ? 'warning' : 'error', approvedAction
         ? {
             pendingActionStatus: {
@@ -3109,7 +3352,9 @@ export function AgentPanel({
     } finally {
       setBusy(false);
       setRunningThreadId((current) => (current === threadId ? null : current));
+      setPreparingThreadId((current) => (current === threadId ? null : current));
       setStoppingThreadId((current) => (current === threadId ? null : current));
+      clearThreadStopRequest(threadId);
       if (!wasStopped && (activeThreadIdRef.current !== threadId || isViewingHistoryRef.current)) {
         setUnreadCompletedThreadIds((current) => {
           if (current.has(threadId)) {
@@ -3121,7 +3366,9 @@ export function AgentPanel({
           return next;
         });
       }
-      await refreshThreads();
+      if (!refreshedAgentData) {
+        await refreshThreads();
+      }
     }
   }
 
@@ -3132,7 +3379,7 @@ export function AgentPanel({
     }
 
     if (!workspacePath) {
-      pushToast('Open a workspace before starting Tantalum AI.', 'info');
+      pushToast('Open a Project before starting Tantalum AI.', 'info');
       return;
     }
 
@@ -3165,6 +3412,11 @@ export function AgentPanel({
     setContextMention(null);
     setPreviewImageContextItem(null);
     setBusy(true);
+    if (displayThreadId) {
+      clearThreadStopRequest(displayThreadId);
+      setPreparingThreadId(displayThreadId);
+      setStoppingThreadId(null);
+    }
     setView('chat');
     setThinkingDetailsOpen(false);
     setComposerTasksOpen(false);
@@ -3209,6 +3461,7 @@ export function AgentPanel({
 
     try {
       const resolvedContextItems = await resolveContextItemsForRun();
+      throwIfThreadStopRequested(displayThreadId);
       const initialRunContext = shrinkAgentRunContext({
         prompt,
         threadMessages: toThreadContext(priorMessages),
@@ -3242,6 +3495,7 @@ export function AgentPanel({
       if (!routed.success) {
         throw new Error(routed.error);
       }
+      throwIfThreadStopRequested(displayThreadId);
 
       if (!routed.persistThread) {
         if (threadId) {
@@ -3289,10 +3543,13 @@ export function AgentPanel({
           createdThread,
           ...current.filter((thread) => thread.id !== createdThread.id && thread.id !== optimisticThreadId),
         ]);
+        transferThreadStopRequest(optimisticThreadId, createdThread.id);
+        setPreparingThreadId((current) => (current === optimisticThreadId ? createdThread.id : current));
         setMessages((current) =>
           current.map((message) => (message.threadId === optimisticThreadId ? { ...message, threadId: createdThread.id } : message)),
         );
         setIsViewingHistory(false);
+        throwIfThreadStopRequested(threadId);
       }
 
       const runThreadId = threadId;
@@ -3303,13 +3560,14 @@ export function AgentPanel({
       const userMessage = await createAgentThreadMessage({ threadId: runThreadId, role: 'user', content: prompt, metadata: userMessageMetadata });
       setMessages((current) => replaceOptimisticMessage(current, localUserMessage?.id ?? null, userMessage, priorMessages));
       setView('chat');
+      throwIfThreadStopRequested(runThreadId);
       const routedTaskList = asAgentTaskList(routed.taskList);
 
       if (routed.decisionKind === 'clarify') {
         const assistantMessage = await createAgentThreadMessage({
           threadId: runThreadId,
           role: 'assistant',
-          content: routed.userMessage || 'I need a clearer target before changing the workspace.',
+          content: routed.userMessage || 'I need a clearer target before changing the Project.',
           tone: 'warning',
         });
         setMessages((current) => [...current, assistantMessage]);
@@ -3321,13 +3579,15 @@ export function AgentPanel({
         const pendingAction: PendingAgentAction = {
           ...routed.pendingAction,
           threadId: runThreadId,
+          userMessageId: userMessage.id,
+          userMessageCreatedAt: userMessage.createdAt ?? null,
           status: 'pending',
         };
         const pendingTaskList = routedTaskList ? { ...routedTaskList, actionId: pendingAction.id } : null;
         const assistantMessage = await createAgentThreadMessage({
           threadId: runThreadId,
           role: 'assistant',
-          content: routed.userMessage || 'Approve this workspace action to run it, or skip it.',
+          content: routed.userMessage || 'Approve this Project action to run it, or skip it.',
           metadata: {
             pendingAction,
             ...(pendingTaskList ? { taskList: pendingTaskList } : {}),
@@ -3335,7 +3595,7 @@ export function AgentPanel({
         });
         setMessages((current) => [...current, assistantMessage]);
         setThreadWaitingForApproval(runThreadId, true);
-        pushConsole('Waiting for approval before running workspace changes.', 'info');
+        pushConsole('Waiting for approval before running Project changes.', 'info');
         await refreshThreads();
         return;
       }
@@ -3375,54 +3635,141 @@ export function AgentPanel({
         taskList: runTaskList,
         completedTaskReferences: approvedAction ? [] : completedTaskReferences,
         threadMemory,
+        userMessageId: userMessage.id,
+        userMessageCreatedAt: userMessage.createdAt ?? null,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The agent run failed.';
+      const wasStopped = message === AGENT_RUN_STOPPED_MESSAGE;
       if (threadId) {
         try {
           const errorMessage = await createAgentThreadMessage({
             threadId,
             role: 'status',
             content: message,
-            tone: 'error',
+            tone: wasStopped ? 'warning' : 'error',
           });
           setMessages((current) => [...current, errorMessage]);
         } catch {
-          pushToast(message, 'error');
+          if (!wasStopped) {
+            pushToast(message, 'error');
+          }
         }
       } else if (optimisticThreadId) {
-        activeThreadIdRef.current = null;
-        setActiveThreadId(null);
-        setComposeTarget('new');
-        setThreadSummaries((current) => current.filter((thread) => thread.id !== optimisticThreadId));
-        setMessages((current) => [...current, createLocalThreadMessage('status', message, 'error')]);
-        pushToast(message, 'error');
+        if (wasStopped) {
+          setMessages((current) => [...current, createLocalThreadMessage('status', message, 'warning', undefined, optimisticThreadId)]);
+        } else {
+          activeThreadIdRef.current = null;
+          setActiveThreadId(null);
+          setComposeTarget('new');
+          setThreadSummaries((current) => current.filter((thread) => thread.id !== optimisticThreadId));
+          setMessages((current) => [...current, createLocalThreadMessage('status', message, 'error')]);
+          pushToast(message, 'error');
+        }
       } else {
-        pushToast(message, 'error');
+        if (!wasStopped) {
+          pushToast(message, 'error');
+        }
       }
     } finally {
       setBusy(false);
+      setPreparingThreadId((current) => (current === threadId || current === optimisticThreadId ? null : current));
+      setStoppingThreadId((current) => (current === threadId || current === optimisticThreadId ? null : current));
+      clearThreadStopRequest(threadId);
+      clearThreadStopRequest(optimisticThreadId);
     }
   }
 
-  async function handleStopRunningThread() {
-    if (!activeThreadId || runningThreadId !== activeThreadId || stoppingThreadId === activeThreadId) {
+  async function handleStopRunningThread(threadIdOverride?: string) {
+    const targetThreadId = threadIdOverride || activeThreadId;
+    const targetIsRunning = Boolean(targetThreadId && runningThreadId === targetThreadId);
+    const targetIsPreparing = Boolean(targetThreadId && preparingThreadId === targetThreadId);
+    if (!targetThreadId || (!targetIsRunning && !targetIsPreparing) || stoppingThreadId === targetThreadId) {
       return;
     }
 
-    setStoppingThreadId(activeThreadId);
+    stopRequestedThreadIdsRef.current.add(targetThreadId);
+    setStoppingThreadId(targetThreadId);
+    if (!targetIsRunning) {
+      return;
+    }
+
     try {
-      const result = await window.tantalum.agent.stop({ threadId: activeThreadId });
+      const result = await window.tantalum.agent.stop({ threadId: targetThreadId });
       if (!result.success) {
         throw new Error(result.error);
       }
 
-      if (!result.stopped) {
+      if (!result.stopped && !busy) {
         setStoppingThreadId(null);
       }
     } catch (error) {
       setStoppingThreadId(null);
+      clearThreadStopRequest(targetThreadId);
       pushToast(error instanceof Error ? error.message : 'Unable to stop the agent run.', 'error');
+    }
+  }
+
+  function messageHasRestorePoint(message: AgentThreadMessage) {
+    if (message.role !== 'user') {
+      return false;
+    }
+
+    const selectedIndex = userMessageOrder.get(message.id);
+    if (selectedIndex === undefined) {
+      return false;
+    }
+
+    return activeThreadRestorePoints.some((point) => {
+      const pointIndex = userMessageOrder.get(point.userMessageId);
+      return pointIndex !== undefined && pointIndex >= selectedIndex;
+    });
+  }
+
+  async function handleRestoreMessage(message: AgentThreadMessage) {
+    if (!onRestoreToMessage || message.role !== 'user' || restoringMessageId || busy || activeThreadCanStop) {
+      return;
+    }
+
+    if (!messageHasRestorePoint(message)) {
+      pushToast('No agent file changes are available to restore from this message.', 'info');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Restore files touched by Tantalum AI after this message and remove later chat messages from this thread?',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setRestoringMessageId(message.id);
+    try {
+      const result = await onRestoreToMessage(message, messages);
+      if (result) {
+        setMessages(result.messages);
+        setThreadWaitingForApproval(message.threadId, threadMessagesNeedApproval(result.messages));
+        setLiveTaskLists(new Map());
+        setLiveActivities((current) => {
+          const next = new Map(current);
+          next.delete(message.threadId);
+          liveActivitiesRef.current = next;
+          return next;
+        });
+        setUnreadCompletedThreadIds((current) => {
+          if (!current.has(message.threadId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(message.threadId);
+          return next;
+        });
+        await refreshThreads();
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to restore this agent point.', 'error');
+    } finally {
+      setRestoringMessageId((current) => (current === message.id ? null : current));
     }
   }
 
@@ -3432,12 +3779,12 @@ export function AgentPanel({
     }
 
     if (agentIntent === 'ask') {
-      pushToast('Switch to Agent mode to approve workspace changes.', 'info');
+      pushToast('Switch to Agent mode to approve Project changes.', 'info');
       return;
     }
 
     if (!workspacePath) {
-      pushToast('Open a workspace before running this action.', 'info');
+      pushToast('Open a Project before running this action.', 'info');
       return;
     }
 
@@ -3476,6 +3823,8 @@ export function AgentPanel({
       approvedAction: action,
       taskList,
       threadMemory,
+      userMessageId: action.userMessageId ?? null,
+      userMessageCreatedAt: action.userMessageCreatedAt ?? null,
     });
   }
 
@@ -3793,7 +4142,7 @@ export function AgentPanel({
             title={
               agentPermissionMode === 'bypass'
                 ? 'Bypass intermediate approval prompts; final Keep/Revert review still applies.'
-                : 'Ask for approval before high-risk workspace actions.'
+                : 'Ask for approval before high-risk Project actions.'
             }
           >
             <KeyRound size={12} />
@@ -4135,9 +4484,9 @@ export function AgentPanel({
               ? isReplyingToThread && activeThread
                 ? 'Ask for follow-up changes'
                 : agentIntent === 'ask'
-                  ? 'Ask about this workspace'
+                  ? 'Ask about this Project'
                   : 'Start a new agent thread'
-              : 'Open a workspace to start coding'
+              : 'Open a Project to start coding'
           }
           rows={2}
           onKeyDown={handleComposerKeyDown}
@@ -4244,12 +4593,20 @@ export function AgentPanel({
 
           <div className="bottom-right-actions">
             <button
-              className={`tantalum-ai-send-btn ${activeThreadIsRunning ? 'tantalum-ai-stop-btn' : ''}`}
+              className={`tantalum-ai-send-btn ${activeThreadCanStop ? 'tantalum-ai-stop-btn' : ''}`}
               type="button"
-              title={activeThreadIsRunning ? 'Stop agent run' : loadingInitialAgentData ? 'Loading agent' : 'Send message'}
-              disabled={activeThreadIsRunning ? isStoppingActiveThread : !canSend}
+              title={
+                activeThreadCanStop
+                  ? isStoppingActiveThread
+                    ? 'Stopping agent run'
+                    : 'Stop agent run'
+                  : loadingInitialAgentData
+                    ? 'Loading agent'
+                    : 'Send message'
+              }
+              disabled={activeThreadCanStop ? isStoppingActiveThread : !canSend}
               onClick={() => {
-                if (activeThreadIsRunning) {
+                if (activeThreadCanStop) {
                   void handleStopRunningThread();
                   return;
                 }
@@ -4257,7 +4614,7 @@ export function AgentPanel({
                 void handleSendPrompt();
               }}
             >
-              {activeThreadIsRunning ? (
+              {activeThreadCanStop ? (
                 isStoppingActiveThread ? <LoaderCircle size={12} className="spin" /> : <CircleStop size={14} />
               ) : busy ? (
                 <LoaderCircle size={12} className="spin" />
@@ -4278,47 +4635,55 @@ export function AgentPanel({
     const previewThreadSummaries = showFullThreadList ? visibleThreadSummaries : visibleThreadSummaries.slice(0, THREAD_HISTORY_PREVIEW_LIMIT);
     const overflowThreadSummaries = showFullThreadList ? [] : visibleThreadSummaries.slice(THREAD_HISTORY_PREVIEW_LIMIT);
     const hiddenThreadCount = Math.max(0, visibleThreadSummaries.length - THREAD_HISTORY_PREVIEW_LIMIT);
-    const showThreadListLoading = loadingThreads || (loadingInitialAgentData && threadSummaries.length === 0);
+    const showThreadListLoading = (loadingThreads || loadingInitialAgentData) && threadSummaries.length === 0;
     const renderThreadItem = (thread: AgentThreadSummary) => {
       const isRunning = thread.id === runningThreadId;
+      const isPreparing = thread.id === preparingThreadId && !isRunning;
+      const isInFlight = isRunning || isPreparing;
       const isStopping = thread.id === stoppingThreadId;
       const isReviewPending = pendingReview?.threadId === thread.id;
       const isReviewResolving = isReviewPending && resolvingReview;
       const isWaitingForApproval = !isReviewPending && threadIsWaitingForApproval(thread);
       const hasUnreadCompletion = unreadCompletedThreadIds.has(thread.id);
       const threadTitle = formatThreadTitle(thread.title);
-      const stateKind = isRunning
-        ? 'running'
-        : isReviewResolving
-          ? 'review-resolving'
-          : isReviewPending
-            ? 'review'
-            : isWaitingForApproval
-              ? 'approval'
-              : hasUnreadCompletion
-                ? 'completed'
-                : null;
-      const stateLabel = isRunning
+      const stateKind = isPreparing
+        ? 'preparing'
+        : isRunning
+          ? 'running'
+          : isReviewResolving
+            ? 'review-resolving'
+            : isReviewPending
+              ? 'review'
+              : isWaitingForApproval
+                ? 'approval'
+                : hasUnreadCompletion
+                  ? 'completed'
+                  : null;
+      const stateLabel = isPreparing
         ? isStopping
           ? 'Stopping'
-          : 'Running'
-        : isReviewResolving
-          ? 'Resolving review'
-          : isReviewPending
-            ? 'Review changes'
-            : isWaitingForApproval
-              ? 'Waiting for approval'
-              : hasUnreadCompletion
-                ? 'Completed'
-                : null;
+          : 'Preparing'
+        : isRunning
+          ? isStopping
+            ? 'Stopping'
+            : 'Running'
+          : isReviewResolving
+            ? 'Resolving review'
+            : isReviewPending
+              ? 'Review changes'
+              : isWaitingForApproval
+                ? 'Waiting for approval'
+                : hasUnreadCompletion
+                  ? 'Completed'
+                  : null;
 
       return (
         <article
           key={thread.id}
-          className={`tantalum-ai-thread-item ${isRunning ? 'running' : ''} ${isWaitingForApproval ? 'waiting-approval' : ''} ${isReviewPending ? 'waiting-review' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
+          className={`tantalum-ai-thread-item ${isInFlight ? 'running' : ''} ${isWaitingForApproval ? 'waiting-approval' : ''} ${isReviewPending ? 'waiting-review' : ''} ${hasUnreadCompletion ? 'unread-complete' : ''}`}
         >
           <span className="tantalum-ai-thread-leading" aria-hidden="true">
-            {isRunning || isReviewResolving ? (
+            {isInFlight || isReviewResolving ? (
               <LoaderCircle size={12} className="spin tantalum-ai-thread-spinner" />
             ) : isReviewPending ? (
               <ShieldCheck size={12} className="tantalum-ai-thread-review-icon" />
@@ -4342,6 +4707,17 @@ export function AgentPanel({
             </span>
           </button>
           <div className="tantalum-ai-thread-item-actions">
+            {isInFlight ? (
+              <button
+                className="tantalum-ai-thread-stop-btn"
+                type="button"
+                title={isStopping ? 'Stopping agent run' : 'Stop agent run'}
+                disabled={isStopping}
+                onClick={() => void handleStopRunningThread(thread.id)}
+              >
+                {isStopping ? <LoaderCircle size={13} className="spin" /> : <CircleStop size={14} />}
+              </button>
+            ) : null}
             <button type="button" title="Rename" onClick={() => void handleRenameThread(thread)}>
               <PencilLine size={14} />
             </button>
@@ -4373,7 +4749,7 @@ export function AgentPanel({
             >
               <Search size={15} />
             </button>
-            <button className="ghost-button compact icon-only" type="button" title="Refresh" onClick={() => void refreshThreads()}>
+            <button className="ghost-button compact icon-only" type="button" title="Refresh" onClick={() => void refreshThreads({ bypassCache: true })}>
               <RefreshCw size={15} />
             </button>
           </div>
@@ -4404,6 +4780,15 @@ export function AgentPanel({
         ) : null}
 
         <div className="tantalum-ai-threads-container">
+          {!showThreadListLoading && threadLoadError ? (
+            <div className="inline-banner inline-banner-warning agent-inline-banner agent-thread-sync-banner agent-cloud-sync-banner">
+              <span>{threadLoadError}</span>
+              <button type="button" onClick={() => void refreshThreads({ bypassCache: true })} disabled={loadingThreads}>
+                {loadingThreads ? 'Retrying...' : 'Retry'}
+              </button>
+            </div>
+          ) : null}
+
           {showThreadListLoading ? (
             <div className="agent-empty-state">
               <LoaderCircle size={16} className="spin" />
@@ -4411,7 +4796,7 @@ export function AgentPanel({
             </div>
           ) : null}
 
-          {!showThreadListLoading && threadSummaries.length === 0 ? (
+          {!showThreadListLoading && !threadLoadError && !settingsLoadError && threadSummaries.length === 0 ? (
             <div className="agent-empty-state tantalum-empty-state sessions-empty-state">
               <MessageSquare size={16} />
               <span>No active threads.</span>
@@ -4489,7 +4874,7 @@ export function AgentPanel({
         ? `${pendingFileChanges.length} ${pendingFileChanges.length === 1 ? 'file' : 'files'} ${approvalStateLabel}`
         : taskList?.items.length
           ? `${taskList.items.length} planned ${taskList.items.length === 1 ? 'update' : 'updates'} ${approvalStateLabel}`
-          : `${action.riskLevel || 'workspace'} risk workspace change`;
+          : `${action.riskLevel || 'project'} risk Project change`;
     const permissionCopy =
       isToolAction
         ? effectiveStatus === 'executed'
@@ -4502,14 +4887,14 @@ export function AgentPanel({
                 ? 'Tantalum AI needs approval again before it can continue.'
                 : 'Tantalum AI needs permission before it can run this IDE tool.'
         : effectiveStatus === 'executed'
-          ? 'This workspace change was approved and applied.'
+          ? 'This Project change was approved and applied.'
           : effectiveStatus === 'skipped'
-            ? 'This workspace change was skipped.'
+            ? 'This Project change was skipped.'
             : effectiveStatus === 'expired'
               ? 'A newer permission request replaced this one.'
               : effectiveStatus === 'blocked'
                 ? 'Tantalum AI needs approval again before it can continue.'
-                : 'Tantalum AI needs permission before it can make changes in this workspace.';
+                : 'Tantalum AI needs permission before it can make changes in this Project.';
 
     return (
       <div className={`pending-agent-action-card pending-agent-action-card-${effectiveStatus}`}>
@@ -4886,6 +5271,21 @@ export function AgentPanel({
                   </>
                 ) : message.role === 'user' ? (
                   <>
+                    <div className="agent-user-message-toolbar">
+                      <button
+                        className="agent-message-restore-btn"
+                        type="button"
+                        title={
+                          messageHasRestorePoint(message)
+                            ? 'Restore files and clean this thread from this message'
+                            : 'No agent file changes to restore from this message'
+                        }
+                        disabled={!messageHasRestorePoint(message) || Boolean(restoringMessageId) || busy || activeThreadCanStop}
+                        onClick={() => void handleRestoreMessage(message)}
+                      >
+                        {restoringMessageId === message.id ? <LoaderCircle size={12} className="spin" /> : <Undo2 size={12} />}
+                      </button>
+                    </div>
                     <pre>{message.content}</pre>
                     {renderUserMessageContextChips(message)}
                   </>
@@ -4909,6 +5309,10 @@ export function AgentPanel({
       return null;
     }
 
+    const retryCloudSettings = () => {
+      void refreshAgentSettings(true, { includeUsage: false, bypassCache: true });
+    };
+
     return (
       <div
         className={`tantalum-ai-chat-layout ${contextDropActive ? 'context-drop-active' : ''}`}
@@ -4923,7 +5327,22 @@ export function AgentPanel({
           </div>
         ) : null}
 
-        {!loadingInitialAgentData && preferences.selectedSource === 'managed' && managedUnavailableMessage ? (
+        {showingCloudConnectionState ? (
+          <div className="inline-banner inline-banner-info agent-inline-banner agent-cloud-sync-banner">
+            <span>Connecting to Tantalum AI...</span>
+          </div>
+        ) : null}
+
+        {!loadingInitialAgentData && hasCloudAgent && settingsLoadError ? (
+          <div className="inline-banner inline-banner-warning agent-inline-banner agent-cloud-sync-banner">
+            <span>{settingsLoadError}</span>
+            <button type="button" onClick={retryCloudSettings} disabled={loadingSettings}>
+              {loadingSettings ? 'Retrying...' : 'Retry'}
+            </button>
+          </div>
+        ) : null}
+
+        {!loadingInitialAgentData && showManagedUnavailableMessage ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
             {managedUnavailableMessage}
           </div>

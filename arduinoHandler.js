@@ -20,7 +20,30 @@ const BOARD_TOOL_ARCHIVE_SPACE_MULTIPLIER = 3;
 const TANTALUM_RUNTIME_VERSION = "1.1.5";
 const TANTALUM_RUNTIME_HEADER_NAME = "TantalumCloudRuntime.h";
 const TANTALUM_RUNTIME_HEADER_PATH = path.join(__dirname, "resources", "firmware", TANTALUM_RUNTIME_HEADER_NAME);
+const TANTALUM_SOURCE_MARKER_FILE_NAME = "TantalumSourceMarker.cpp";
+const TANTALUM_SOURCE_MARKER_PREFIX = "TANTALUM_SOURCE_SNAPSHOT_V1";
 const TANTALUM_WIFI_HOSTNAME_MAX_LENGTH = 31;
+const ARDUINO_WORKSPACE_ENTRY_FILE_NAME = "main.ino";
+const ARDUINO_ROOT_SKETCH_EXTENSIONS = new Set([".ino", ".pde"]);
+const ARDUINO_ROOT_SOURCE_EXTENSIONS = new Set([".c", ".cc", ".cpp", ".cxx", ".s"]);
+const ARDUINO_ROOT_HEADER_EXTENSIONS = new Set([".h", ".hh", ".hpp", ".hxx", ".ipp", ".tpp"]);
+const ARDUINO_ROOT_BUILD_EXTENSIONS = new Set([
+  ...ARDUINO_ROOT_SKETCH_EXTENSIONS,
+  ...ARDUINO_ROOT_SOURCE_EXTENSIONS,
+  ...ARDUINO_ROOT_HEADER_EXTENSIONS
+]);
+const ARDUINO_WORKSPACE_INCLUDED_DIRS = new Set(["src"]);
+const ARDUINO_WORKSPACE_SKIPPED_DIRS = new Set([
+  ".git",
+  ".tantalum-file-tree-trash",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  ".vite",
+  "out",
+  "target"
+]);
 let configuredArduinoStorageRoot = null;
 
 function createCanceledError(message = "Operation stopped by user.") {
@@ -1845,7 +1868,597 @@ function createTemporarySketch(code, extraFiles = {}) {
   for (const [fileName, contents] of Object.entries(extraFiles)) {
     fs.writeFileSync(path.join(tmpDir, fileName), contents);
   }
-  return { tmpDir, sketchPath };
+  return { tmpDir, sketchPath, outputDir: tmpDir };
+}
+
+function normalizeSketchRelativePath(value) {
+  return String(value || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => part !== "." && part !== "..")
+    .join("/");
+}
+
+function shouldSkipWorkspaceSketchDirectory(name) {
+  const normalized = String(name || "").toLowerCase();
+  return normalized.startsWith(".") || ARDUINO_WORKSPACE_SKIPPED_DIRS.has(normalized);
+}
+
+function isArduinoRootBuildFileName(fileName) {
+  return ARDUINO_ROOT_BUILD_EXTENSIONS.has(path.extname(fileName).toLowerCase());
+}
+
+function isArduinoSketchFileName(fileName) {
+  return ARDUINO_ROOT_SKETCH_EXTENSIONS.has(path.extname(fileName).toLowerCase());
+}
+
+function stripArduinoCodeForLifecycleScan(code) {
+  return String(code || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\r\n]*/g, " ")
+    .replace(/"(?:\\.|[^"\\])*"/g, "\"\"")
+    .replace(/'(?:\\.|[^'\\])*'/g, "''");
+}
+
+function hasArduinoLifecycleFunction(code) {
+  return /\bvoid\s+(setup|loop)\s*\(/.test(stripArduinoCodeForLifecycleScan(code));
+}
+
+function isWorkspaceEntrySketchRelativePath(relativePath, entryFileName = ARDUINO_WORKSPACE_ENTRY_FILE_NAME) {
+  return normalizeSketchRelativePath(relativePath).toLowerCase() === normalizeSketchRelativePath(entryFileName).toLowerCase();
+}
+
+function isStandaloneWorkspaceSketchTab(relativePath, content, entryFileName = ARDUINO_WORKSPACE_ENTRY_FILE_NAME) {
+  return isArduinoSketchFileName(relativePath)
+    && !isWorkspaceEntrySketchRelativePath(relativePath, entryFileName)
+    && hasArduinoLifecycleFunction(content);
+}
+
+function arduinoWorkspaceSourceOrder(entryFileName = ARDUINO_WORKSPACE_ENTRY_FILE_NAME) {
+  const normalizedEntryFileName = normalizeSketchRelativePath(entryFileName).toLowerCase();
+  return (left, right) => {
+    const leftName = path.basename(left.relativePath);
+    const rightName = path.basename(right.relativePath);
+    const leftPrimary = left.relativePath.toLowerCase() === normalizedEntryFileName;
+    const rightPrimary = right.relativePath.toLowerCase() === normalizedEntryFileName;
+    if (leftPrimary !== rightPrimary) {
+      return leftPrimary ? -1 : 1;
+    }
+    const leftSketch = isArduinoSketchFileName(leftName);
+    const rightSketch = isArduinoSketchFileName(rightName);
+    if (leftSketch !== rightSketch) {
+      return leftSketch ? -1 : 1;
+    }
+    return leftName.localeCompare(rightName, undefined, { sensitivity: "base" });
+  };
+}
+
+function normalizeWorkspaceSketchSource(source = {}) {
+  const workspacePath = path.resolve(String(source.workspacePath || ""));
+  const entryFileName = normalizeSketchRelativePath(source.entryFileName || ARDUINO_WORKSPACE_ENTRY_FILE_NAME) || ARDUINO_WORKSPACE_ENTRY_FILE_NAME;
+  if (entryFileName.includes("/") || !isArduinoSketchFileName(entryFileName)) {
+    throw new Error("Project builds must use a root .ino or .pde file as the entry file.");
+  }
+  const dirtyFiles = Array.isArray(source.dirtyFiles) ? source.dirtyFiles : [];
+  return { kind: "workspace", workspacePath, entryFileName, dirtyFiles };
+}
+
+function getArduinoSketchFolderName(entryFileName = ARDUINO_WORKSPACE_ENTRY_FILE_NAME) {
+  const stem = path.basename(entryFileName, path.extname(entryFileName)).trim();
+  const normalizedStem = stem.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 63).replace(/[.]+$/g, "");
+  if (/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$/.test(normalizedStem)) {
+    return normalizedStem;
+  }
+  return path.basename(ARDUINO_WORKSPACE_ENTRY_FILE_NAME, ".ino");
+}
+
+function normalizeDirtyWorkspaceFiles(workspacePath, dirtyFiles = []) {
+  const dirtyFileMap = new Map();
+  for (const dirtyFile of dirtyFiles) {
+    if (!dirtyFile || typeof dirtyFile !== "object") {
+      continue;
+    }
+    const rawPath = String(dirtyFile.path || "").trim();
+    if (!rawPath) {
+      continue;
+    }
+    const absolutePath = path.isAbsolute(rawPath)
+      ? path.resolve(rawPath)
+      : path.resolve(workspacePath, rawPath);
+    if (!isPathInsideRoot(absolutePath, workspacePath)) {
+      continue;
+    }
+    const relativePath = normalizeSketchRelativePath(path.relative(workspacePath, absolutePath));
+    if (!relativePath) {
+      continue;
+    }
+    dirtyFileMap.set(relativePath.toLowerCase(), {
+      absolutePath,
+      relativePath,
+      content: String(dirtyFile.content ?? "")
+    });
+  }
+  return dirtyFileMap;
+}
+
+function readWorkspaceSketchFile(filePath, dirtyFileMap, relativePath) {
+  const dirtyFile = dirtyFileMap.get(relativePath.toLowerCase());
+  if (dirtyFile) {
+    return dirtyFile.content;
+  }
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function collectWorkspaceSketchFiles(source = {}) {
+  const normalizedSource = normalizeWorkspaceSketchSource(source);
+  const { workspacePath, entryFileName } = normalizedSource;
+  const workspaceStats = fs.statSync(workspacePath);
+  if (!workspaceStats.isDirectory()) {
+    throw new Error("Project source must be a directory.");
+  }
+
+  const dirtyFileMap = normalizeDirtyWorkspaceFiles(workspacePath, normalizedSource.dirtyFiles);
+  const files = [];
+  const addFileWithContent = (absolutePath, relativePath, content) => {
+    const normalizedRelativePath = normalizeSketchRelativePath(relativePath);
+    if (!normalizedRelativePath) {
+      return;
+    }
+    const canonicalRelativePath = normalizedRelativePath.toLowerCase() === entryFileName.toLowerCase()
+      ? entryFileName
+      : normalizedRelativePath;
+    files.push({
+      path: absolutePath,
+      relativePath: canonicalRelativePath,
+      content
+    });
+  };
+  const addFile = (absolutePath, relativePath) => {
+    const normalizedRelativePath = normalizeSketchRelativePath(relativePath);
+    const canonicalRelativePath = normalizedRelativePath.toLowerCase() === entryFileName.toLowerCase()
+      ? entryFileName
+      : normalizedRelativePath;
+    const content = readWorkspaceSketchFile(absolutePath, dirtyFileMap, canonicalRelativePath);
+    addFileWithContent(absolutePath, canonicalRelativePath, content);
+  };
+
+  const rootEntries = fs.readdirSync(workspacePath, { withFileTypes: true });
+  for (const entry of rootEntries) {
+    if (entry.name.startsWith(".")) {
+      continue;
+    }
+    const entryPath = path.join(workspacePath, entry.name);
+    if (entry.isFile() && isArduinoRootBuildFileName(entry.name)) {
+      const content = readWorkspaceSketchFile(entryPath, dirtyFileMap, entry.name);
+      if (isStandaloneWorkspaceSketchTab(entry.name, content, entryFileName)) {
+        continue;
+      }
+      addFileWithContent(entryPath, entry.name, content);
+    }
+  }
+
+  const visitIncludedDirectory = (dirPath, relativeDir) => {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (shouldSkipWorkspaceSketchDirectory(entry.name)) {
+          continue;
+        }
+        visitIncludedDirectory(path.join(dirPath, entry.name), `${relativeDir}/${entry.name}`);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (isArduinoSketchFileName(entry.name)) {
+        continue;
+      }
+      const relativePath = normalizeSketchRelativePath(`${relativeDir}/${entry.name}`);
+      addFile(path.join(dirPath, entry.name), relativePath);
+    }
+  };
+
+  for (const entry of rootEntries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const normalizedName = entry.name.toLowerCase();
+    if (!ARDUINO_WORKSPACE_INCLUDED_DIRS.has(normalizedName)) {
+      continue;
+    }
+    visitIncludedDirectory(path.join(workspacePath, entry.name), normalizedName);
+  }
+
+  const includedFileKeys = new Set(files.map((file) => file.relativePath.toLowerCase()));
+  for (const dirtyFile of dirtyFileMap.values()) {
+    const parts = dirtyFile.relativePath.split("/").filter(Boolean);
+    if (parts.length === 0 || includedFileKeys.has(dirtyFile.relativePath.toLowerCase())) {
+      continue;
+    }
+    const isRootBuildFile = parts.length === 1 && isArduinoRootBuildFileName(dirtyFile.relativePath);
+    const isSrcFile = parts.length > 1
+      && ARDUINO_WORKSPACE_INCLUDED_DIRS.has(parts[0].toLowerCase())
+      && !isArduinoSketchFileName(dirtyFile.relativePath)
+      && !parts.some((part) => shouldSkipWorkspaceSketchDirectory(part));
+    if (!isRootBuildFile && !isSrcFile) {
+      continue;
+    }
+    if (isRootBuildFile && isStandaloneWorkspaceSketchTab(dirtyFile.relativePath, dirtyFile.content, entryFileName)) {
+      continue;
+    }
+    const canonicalDirtyParts = [...parts];
+    if (canonicalDirtyParts.length > 1 && ARDUINO_WORKSPACE_INCLUDED_DIRS.has(canonicalDirtyParts[0].toLowerCase())) {
+      canonicalDirtyParts[0] = canonicalDirtyParts[0].toLowerCase();
+    }
+    const canonicalDirtyRelativePath = canonicalDirtyParts.join("/");
+    const canonicalRelativePath = canonicalDirtyRelativePath.toLowerCase() === entryFileName.toLowerCase()
+      ? entryFileName
+      : canonicalDirtyRelativePath;
+    files.push({
+      path: dirtyFile.absolutePath,
+      relativePath: canonicalRelativePath,
+      content: dirtyFile.content
+    });
+    includedFileKeys.add(canonicalRelativePath.toLowerCase());
+  }
+
+  files.sort(arduinoWorkspaceSourceOrder(entryFileName));
+  if (!files.some((file) => file.relativePath.toLowerCase() === entryFileName.toLowerCase())) {
+    const dirtyEntry = dirtyFileMap.get(entryFileName.toLowerCase());
+    if (dirtyEntry) {
+      files.unshift({
+        path: dirtyEntry.absolutePath,
+        relativePath: entryFileName,
+        content: dirtyEntry.content
+      });
+    } else {
+      throw new Error(`Project builds require a root ${entryFileName} file.`);
+    }
+  }
+  return files;
+}
+
+function buildCloudRuntimePrefix(cloudRuntime = {}) {
+  const serviceName = cloudRuntime.provisioningServiceName || `Tantalum-${String(cloudRuntime.boardId || "board").slice(-8)}`;
+  const wifiHostname = buildTantalumWifiHostname(
+    cloudRuntime.wifiHostname || cloudRuntime.boardName || cloudRuntime.name,
+    cloudRuntime.boardId
+  );
+  const buildEpoch = Math.max(
+    1700000000,
+    Number.parseInt(cloudRuntime.buildEpoch || Math.floor(Date.now() / 1000), 10) || 1700000000
+  );
+
+  return [
+    "/* Generated by Tantalum IDE for cloud-board OTA builds. */",
+    `#define TANTALUM_BOARD_ID ${cStringLiteral(cloudRuntime.boardId)}`,
+    `#define TANTALUM_API_TOKEN ${cStringLiteral(cloudRuntime.apiToken)}`,
+    `#define TANTALUM_APPWRITE_ENDPOINT ${cStringLiteral(cloudRuntime.appwriteEndpoint)}`,
+    `#define TANTALUM_APPWRITE_PROJECT_ID ${cStringLiteral(cloudRuntime.appwriteProjectId)}`,
+    `#define TANTALUM_DEVICE_GATEWAY_FUNCTION_ID ${cStringLiteral(cloudRuntime.deviceGatewayFunctionId)}`,
+    `#define TANTALUM_FIRMWARE_VERSION ${cStringLiteral(cloudRuntime.firmwareVersion || "1.0.0")}`,
+    `#define TANTALUM_FIRMWARE_ID ${cStringLiteral(cloudRuntime.firmwareId)}`,
+    `#define TANTALUM_RUNTIME_VERSION ${cStringLiteral(TANTALUM_RUNTIME_VERSION)}`,
+    `#define TANTALUM_BUILD_EPOCH ${cNumberLiteral(buildEpoch, 1700000000)}`,
+    `#define TANTALUM_MQTT_HOST ${cStringLiteral(cloudRuntime.mqttHost)}`,
+    `#define TANTALUM_MQTT_PORT ${cNumberLiteral(cloudRuntime.mqttPort, 8883)}`,
+    `#define TANTALUM_MQTT_USERNAME ${cStringLiteral(cloudRuntime.mqttUsername)}`,
+    `#define TANTALUM_MQTT_PASSWORD ${cStringLiteral(cloudRuntime.mqttPassword)}`,
+    `#define TANTALUM_MQTT_TOPIC ${cStringLiteral(cloudRuntime.mqttTopic)}`,
+    `#define TANTALUM_COMMAND_SECRET ${cStringLiteral(cloudRuntime.commandSecret)}`,
+    `#define TANTALUM_TLS_CA_CERT ${cStringLiteral(cloudRuntime.tlsCaCert)}`,
+    `#define TANTALUM_MQTT_CA_CERT ${cStringLiteral(cloudRuntime.mqttCaCert)}`,
+    `#define TANTALUM_PROVISIONING_POP ${cStringLiteral(cloudRuntime.provisioningPop)}`,
+    `#define TANTALUM_PROVISIONING_SERVICE_NAME ${cStringLiteral(serviceName)}`,
+    `#define TANTALUM_WIFI_HOSTNAME ${cStringLiteral(wifiHostname)}`,
+    `#include "${TANTALUM_RUNTIME_HEADER_NAME}"`,
+    ""
+  ].join("\n");
+}
+
+function buildCloudRuntimeSuffix() {
+  return [
+    "",
+    "void setup() {",
+    "  TantalumCloud.begin();",
+    "  tantalumUserSetup();",
+    "}",
+    "",
+    "void loop() {",
+    "  TantalumCloud.loop();",
+    "  tantalumUserLoop();",
+    "}"
+  ].join("\n");
+}
+
+function replaceSketchLifecycleFunctionDefinition(code, name, replacement) {
+  const pattern = new RegExp(`\\bvoid\\s+${name}\\s*\\(`);
+  if (!pattern.test(code)) {
+    return {
+      code,
+      replaced: false
+    };
+  }
+  return {
+    code: code.replace(pattern, `void ${replacement}(`),
+    replaced: true
+  };
+}
+
+function applyCloudRuntimeToWorkspaceSketchFiles(files, cloudRuntime = {}, entryFileName = ARDUINO_WORKSPACE_ENTRY_FILE_NAME) {
+  let setupReplaced = false;
+  let loopReplaced = false;
+  const transformedFiles = files.map((file) => {
+    if (!isArduinoSketchFileName(file.relativePath)) {
+      return file;
+    }
+    let content = file.content;
+    const setupResult = replaceSketchLifecycleFunctionDefinition(content, "setup", "tantalumUserSetup");
+    content = setupResult.code;
+    setupReplaced = setupReplaced || setupResult.replaced;
+    const loopResult = replaceSketchLifecycleFunctionDefinition(content, "loop", "tantalumUserLoop");
+    content = loopResult.code;
+    loopReplaced = loopReplaced || loopResult.replaced;
+    return { ...file, content };
+  });
+
+  const primaryIndex = transformedFiles.findIndex((file) => file.relativePath.toLowerCase() === entryFileName.toLowerCase());
+  if (primaryIndex >= 0) {
+    const primaryFile = transformedFiles[primaryIndex];
+    const lifecycleFallbacks = [
+      setupReplaced ? "" : "void tantalumUserSetup() {}",
+      loopReplaced ? "" : "void tantalumUserLoop() {}"
+    ].filter(Boolean).join("\n");
+    transformedFiles[primaryIndex] = {
+      ...primaryFile,
+      content: [
+        buildCloudRuntimePrefix(cloudRuntime),
+        lifecycleFallbacks,
+        primaryFile.content,
+        buildCloudRuntimeSuffix()
+      ].filter(Boolean).join("\n\n")
+    };
+  }
+
+  return transformedFiles;
+}
+
+function writeTemporarySketchFile(sketchDir, relativePath, content) {
+  const destinationPath = path.join(sketchDir, ...normalizeSketchRelativePath(relativePath).split("/"));
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  fs.writeFileSync(destinationPath, content, "utf8");
+}
+
+function createTemporaryWorkspaceSketch(source, extraFiles = {}, options = {}) {
+  const normalizedSource = normalizeWorkspaceSketchSource(source);
+  const tempRoot = fs.mkdtempSync(path.join(getArduinoTempDir(), "arduino-workspace-"));
+  const sketchFolderName = getArduinoSketchFolderName(normalizedSource.entryFileName);
+  const sketchDir = path.join(tempRoot, sketchFolderName);
+  fs.mkdirSync(sketchDir, { recursive: true });
+  const collectedFiles = collectWorkspaceSketchFiles(normalizedSource);
+  const files = options.cloudRuntime
+    ? applyCloudRuntimeToWorkspaceSketchFiles(collectedFiles, options.cloudRuntime, normalizedSource.entryFileName)
+    : collectedFiles;
+
+  for (const file of files) {
+    writeTemporarySketchFile(sketchDir, file.relativePath, file.content);
+  }
+  for (const [fileName, contents] of Object.entries(extraFiles)) {
+    writeTemporarySketchFile(sketchDir, fileName, contents);
+  }
+
+  return {
+    tmpDir: sketchDir,
+    tempRoot,
+    sketchPath: path.join(sketchDir, normalizedSource.entryFileName),
+    outputDir: tempRoot,
+    entryFileName: normalizedSource.entryFileName,
+    files: files.map((file) => ({
+      path: file.path,
+      relativePath: file.relativePath
+    }))
+  };
+}
+
+function normalizeSourceRestoreMarker(marker = null) {
+  if (!marker || typeof marker !== "object") {
+    return null;
+  }
+  const markerId = String(marker.markerId || "").trim();
+  const snapshotChecksum = String(marker.snapshotChecksum || marker.sourceSnapshotChecksum || "").trim().toLowerCase();
+  if (!/^source_[a-z0-9_-]{8,80}$/i.test(markerId) || !/^[a-f0-9]{64}$/.test(snapshotChecksum)) {
+    return null;
+  }
+  return { markerId, snapshotChecksum };
+}
+
+function sourceRestoreMarkerLiteral(marker) {
+  return `${TANTALUM_SOURCE_MARKER_PREFIX}::${marker.markerId}::${marker.snapshotChecksum}::END`;
+}
+
+function findBuildArtifacts(outputDir) {
+  const artifacts = [];
+  const root = path.resolve(outputDir || "");
+  if (!root || !fs.existsSync(root)) {
+    return artifacts;
+  }
+
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+        continue;
+      }
+      if (/\.(?:bin|hex)$/i.test(entry.name)) {
+        artifacts.push(entryPath);
+      }
+    }
+  };
+  visit(root);
+  return artifacts;
+}
+
+function parseIntelHexToBuffer(hexInput) {
+  const text = Buffer.isBuffer(hexInput) ? hexInput.toString("utf8") : String(hexInput || "");
+  const records = [];
+  let baseAddress = 0;
+  let minAddress = Number.POSITIVE_INFINITY;
+  let maxAddress = 0;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    if (!line.startsWith(":") || line.length < 11) {
+      continue;
+    }
+
+    const byteCount = Number.parseInt(line.slice(1, 3), 16);
+    const offset = Number.parseInt(line.slice(3, 7), 16);
+    const recordType = Number.parseInt(line.slice(7, 9), 16);
+    const dataHex = line.slice(9, 9 + byteCount * 2);
+    if (!Number.isFinite(byteCount) || !Number.isFinite(offset) || !Number.isFinite(recordType) || dataHex.length !== byteCount * 2) {
+      continue;
+    }
+
+    if (recordType === 0x00) {
+      const absoluteAddress = baseAddress + offset;
+      const data = Buffer.from(dataHex, "hex");
+      records.push({ address: absoluteAddress, data });
+      minAddress = Math.min(minAddress, absoluteAddress);
+      maxAddress = Math.max(maxAddress, absoluteAddress + data.length);
+    } else if (recordType === 0x01) {
+      break;
+    } else if (recordType === 0x02 && dataHex.length === 4) {
+      baseAddress = Buffer.from(dataHex, "hex").readUInt16BE(0) << 4;
+    } else if (recordType === 0x04 && dataHex.length === 4) {
+      baseAddress = Buffer.from(dataHex, "hex").readUInt16BE(0) << 16;
+    }
+  }
+
+  if (!records.length || !Number.isFinite(minAddress) || maxAddress <= minAddress) {
+    return Buffer.alloc(0);
+  }
+
+  const buffer = Buffer.alloc(maxAddress - minAddress, 0xff);
+  for (const record of records) {
+    record.data.copy(buffer, record.address - minAddress);
+  }
+  return buffer;
+}
+
+function readBuildArtifactBuffer(filePath) {
+  const raw = fs.readFileSync(filePath);
+  if (/\.hex$/i.test(filePath)) {
+    return parseIntelHexToBuffer(raw);
+  }
+  return raw;
+}
+
+function scanCompiledArtifactsForSourceRestoreMarker(outputDir, markerInput) {
+  const marker = normalizeSourceRestoreMarker(markerInput);
+  if (!marker) {
+    return {
+      requested: false,
+      embedded: false,
+      artifacts: [],
+      marker: null,
+    };
+  }
+
+  const literal = sourceRestoreMarkerLiteral(marker);
+  const needle = Buffer.from(literal, "ascii");
+  const artifacts = findBuildArtifacts(outputDir).map((artifactPath) => {
+    let size = 0;
+    let embedded = false;
+    try {
+      const buffer = readBuildArtifactBuffer(artifactPath);
+      size = buffer.length;
+      embedded = buffer.indexOf(needle) >= 0;
+    } catch {
+      embedded = false;
+    }
+    return {
+      path: artifactPath,
+      filename: path.basename(artifactPath),
+      size,
+      embedded,
+    };
+  });
+
+  return {
+    requested: true,
+    embedded: artifacts.some((artifact) => artifact.embedded),
+    artifacts,
+    marker,
+    literal,
+  };
+}
+
+function assertSourceRestoreMarkerEmbedded(outputDir, markerInput) {
+  const scan = scanCompiledArtifactsForSourceRestoreMarker(outputDir, markerInput);
+  if (!scan.requested) {
+    return scan;
+  }
+  if (!scan.embedded) {
+    const artifactList = scan.artifacts.length
+      ? scan.artifacts.map((artifact) => `${artifact.filename} (${artifact.size} bytes)`).join(", ")
+      : "no .bin/.hex artifacts";
+    throw new Error(`Source restore marker was removed from the compiled firmware. Tantalum stopped before flashing because View Code would not be able to find this upload later. Checked ${artifactList}.`);
+  }
+  return scan;
+}
+
+function buildSourceRestoreMarkerFile(markerInput) {
+  const marker = normalizeSourceRestoreMarker(markerInput);
+  if (!marker) {
+    return null;
+  }
+  const literal = sourceRestoreMarkerLiteral(marker);
+  return [
+    "/* Generated by Tantalum IDE. Do not edit. */",
+    "#include <stdint.h>",
+    "",
+    "extern \"C\" {",
+    "#if defined(__GNUC__)",
+    "__attribute__((used, section(\".rodata.tantalum_source_marker\")))",
+    "#endif",
+    `const char TANTALUM_SOURCE_SNAPSHOT_MARKER[] = ${JSON.stringify(literal)};`,
+    "#if defined(__GNUC__)",
+    "__attribute__((used))",
+    "#endif",
+    "volatile uint32_t TANTALUM_SOURCE_SNAPSHOT_MARKER_SINK = 0;",
+    "}",
+    "",
+    "#if defined(__GNUC__)",
+    "__attribute__((used, constructor))",
+    "#endif",
+    "static void tantalumSourceSnapshotMarkerAnchor(void) {",
+    "  const volatile char *marker = TANTALUM_SOURCE_SNAPSHOT_MARKER;",
+    "  uint32_t hash = 2166136261u;",
+    "  for (uint32_t index = 0; marker[index] != '\\0'; ++index) {",
+    "    hash = (hash ^ (uint8_t)marker[index]) * 16777619u;",
+    "  }",
+    "  TANTALUM_SOURCE_SNAPSHOT_MARKER_SINK = hash;",
+    "}",
+    "",
+  ].join("\n");
+}
+
+function buildGeneratedExtraFiles({ cloudRuntime = null, sourceRestoreMarker = null } = {}) {
+  const extraFiles = {};
+  if (cloudRuntime) {
+    extraFiles[TANTALUM_RUNTIME_HEADER_NAME] = fs.readFileSync(TANTALUM_RUNTIME_HEADER_PATH, "utf8");
+  }
+  const markerFile = buildSourceRestoreMarkerFile(sourceRestoreMarker);
+  if (markerFile) {
+    extraFiles[TANTALUM_SOURCE_MARKER_FILE_NAME] = markerFile;
+  }
+  return extraFiles;
 }
 
 function cleanupPath(targetPath) {
@@ -2042,6 +2655,29 @@ async function withTemporarySketch(code, callback, extraFiles = {}) {
   }
 }
 
+async function withTemporaryToolchainSketch({ code, sketchSource = null, extraFiles = {}, cloudRuntime = null }, callback) {
+  const workspaceSource = sketchSource?.kind === "workspace" ? normalizeWorkspaceSketchSource(sketchSource) : null;
+  if (!workspaceSource) {
+    return withTemporarySketch(code, callback, extraFiles);
+  }
+
+  const sketch = createTemporaryWorkspaceSketch(workspaceSource, extraFiles, { cloudRuntime });
+  const { userDir } = await ensureArduinoLibraryDirectory();
+  const { configDir, configFile } = createArduinoCliConfig(userDir);
+
+  try {
+    return await callback({
+      ...sketch,
+      userDir,
+      configFile,
+      env: getArduinoCliEnv({ ARDUINO_DIRECTORIES_USER: userDir })
+    });
+  } finally {
+    cleanupPath(sketch.tempRoot || sketch.tmpDir);
+    cleanupPath(configDir);
+  }
+}
+
 function cStringLiteral(value) {
   return JSON.stringify(String(value ?? ""));
 }
@@ -2171,14 +2807,28 @@ async function compileArduino(code, board = "arduino:avr:uno", options = {}) {
   const cloudRuntime = options.cloudRuntime || null;
   const onProgress = typeof options.onProgress === "function" ? options.onProgress : undefined;
   await ensureCloudRuntimeDependencies(cloudRuntime, onProgress, { signal: options.signal });
-  const sketchCode = cloudRuntime ? buildCloudRuntimeSketch(code, cloudRuntime) : code;
-  const extraFiles = cloudRuntime
-    ? { [TANTALUM_RUNTIME_HEADER_NAME]: fs.readFileSync(TANTALUM_RUNTIME_HEADER_PATH, "utf8") }
-    : {};
+  const sketchSource = options.sketchSource || null;
+  const usesWorkspaceSource = sketchSource?.kind === "workspace";
+  const inlineCode = sketchSource?.kind === "inline" ? String(sketchSource.code ?? code) : code;
+  const sketchCode = cloudRuntime && !usesWorkspaceSource ? buildCloudRuntimeSketch(inlineCode, cloudRuntime) : inlineCode;
+  const sourceRestoreMarker = normalizeSourceRestoreMarker(options.sourceRestoreMarker);
+  if (options.sourceRestoreMarker && !sourceRestoreMarker) {
+    throw new Error("Source restore marker is invalid.");
+  }
+  const extraFiles = buildGeneratedExtraFiles({
+    cloudRuntime,
+    sourceRestoreMarker,
+  });
 
-  return withTemporarySketch(sketchCode, async ({ tmpDir, configFile, env }) => {
+  return withTemporaryToolchainSketch({
+    code: sketchCode,
+    sketchSource,
+    extraFiles,
+    cloudRuntime,
+  }, async ({ tmpDir, outputDir, configFile, env }) => {
+    const buildOutputDir = outputDir || tmpDir;
     const compileOptions = { timeout: 300000, env, signal: options.signal };
-    const compileArgs = ["--config-file", configFile, "compile", "--fqbn", board, tmpDir, "--output-dir", tmpDir];
+    const compileArgs = ["--config-file", configFile, "compile", "--fqbn", board, tmpDir, "--output-dir", buildOutputDir];
     let cliResult;
 
     try {
@@ -2191,14 +2841,15 @@ async function compileArduino(code, board = "arduino:avr:uno", options = {}) {
 
     const { stdout, stderr } = cliResult;
 
-    const files = fs.readdirSync(tmpDir);
+    const files = fs.readdirSync(buildOutputDir);
     const binFile = files.find(f => f.endsWith(".bin") || f.endsWith(".hex"));
 
     if (!binFile) {
       throw new Error("No binary file generated.");
     }
 
-    const binPath = path.join(tmpDir, binFile);
+    const markerScan = assertSourceRestoreMarkerEmbedded(buildOutputDir, sourceRestoreMarker);
+    const binPath = path.join(buildOutputDir, binFile);
     const binData = fs.readFileSync(binPath, "base64");
     const binSize = fs.statSync(binPath).size;
 
@@ -2210,9 +2861,10 @@ async function compileArduino(code, board = "arduino:avr:uno", options = {}) {
       binSize,
       board,
       cloudRuntime: Boolean(cloudRuntime),
+      sourceRestoreMarkerEmbedded: Boolean(markerScan.requested && markerScan.embedded),
       output: joinArduinoCliOutput(stdout, stderr)
     };
-  }, extraFiles);
+  });
 }
 
 async function uploadLocalSketch(code, board, port, onProgress, options = {}) {
@@ -2226,22 +2878,67 @@ async function uploadLocalSketch(code, board, port, onProgress, options = {}) {
 
   const cloudRuntime = options.cloudRuntime || null;
   await ensureCloudRuntimeDependencies(cloudRuntime, onProgress, { signal: options.signal });
-  const sketchCode = cloudRuntime ? buildCloudRuntimeSketch(code, cloudRuntime) : code;
-  const extraFiles = cloudRuntime
-    ? { [TANTALUM_RUNTIME_HEADER_NAME]: fs.readFileSync(TANTALUM_RUNTIME_HEADER_PATH, "utf8") }
-    : {};
+  const sketchSource = options.sketchSource || null;
+  const usesWorkspaceSource = sketchSource?.kind === "workspace";
+  const inlineCode = sketchSource?.kind === "inline" ? String(sketchSource.code ?? code) : code;
+  const sketchCode = cloudRuntime && !usesWorkspaceSource ? buildCloudRuntimeSketch(inlineCode, cloudRuntime) : inlineCode;
+  const sourceRestoreMarker = normalizeSourceRestoreMarker(options.sourceRestoreMarker);
+  if (options.sourceRestoreMarker && !sourceRestoreMarker) {
+    throw new Error("Source restore marker is invalid.");
+  }
+  const extraFiles = buildGeneratedExtraFiles({
+    cloudRuntime,
+    sourceRestoreMarker,
+  });
 
-  return withTemporarySketch(sketchCode, async ({ tmpDir, configFile, env }) => {
+  return withTemporaryToolchainSketch({
+    code: sketchCode,
+    sketchSource,
+    extraFiles,
+    cloudRuntime,
+  }, async ({ tmpDir, outputDir, configFile, env }) => {
+    const buildOutputDir = outputDir || tmpDir;
     const uploadOptions = { timeout: 300000, env, signal: options.signal };
-    const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", board, "--port", port, tmpDir, "--output-dir", tmpDir];
     let cliResult;
+    let markerScan = {
+      requested: false,
+      embedded: false,
+    };
 
-    try {
-      cliResult = onProgress
-        ? await runArduinoCliStreaming(uploadArgs, uploadOptions, onProgress)
-        : await runArduinoCli(uploadArgs, uploadOptions);
-    } catch (error) {
-      await enrichGenericBuildFailure(error, withVerboseCompileArgs(uploadArgs), uploadOptions);
+    if (sourceRestoreMarker) {
+      const compileArgs = ["--config-file", configFile, "compile", "--fqbn", board, tmpDir, "--output-dir", buildOutputDir];
+      let compileResult;
+      try {
+        compileResult = onProgress
+          ? await runArduinoCliStreaming(compileArgs, uploadOptions, onProgress)
+          : await runArduinoCli(compileArgs, uploadOptions);
+      } catch (error) {
+        await enrichGenericBuildFailure(error, withVerboseCompileArgs(compileArgs), uploadOptions);
+      }
+
+      markerScan = assertSourceRestoreMarkerEmbedded(buildOutputDir, sourceRestoreMarker);
+      const uploadArgs = ["--config-file", configFile, "upload", "--fqbn", board, "--port", port, "--input-dir", buildOutputDir, tmpDir];
+      let uploadResult;
+      try {
+        uploadResult = onProgress
+          ? await runArduinoCliStreaming(uploadArgs, uploadOptions, onProgress)
+          : await runArduinoCli(uploadArgs, uploadOptions);
+      } catch (error) {
+        throw error;
+      }
+      cliResult = {
+        stdout: [compileResult.stdout, uploadResult.stdout].filter(Boolean).join("\n"),
+        stderr: [compileResult.stderr, uploadResult.stderr].filter(Boolean).join("\n"),
+      };
+    } else {
+      const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", board, "--port", port, tmpDir, "--output-dir", buildOutputDir];
+      try {
+        cliResult = onProgress
+          ? await runArduinoCliStreaming(uploadArgs, uploadOptions, onProgress)
+          : await runArduinoCli(uploadArgs, uploadOptions);
+      } catch (error) {
+        await enrichGenericBuildFailure(error, withVerboseCompileArgs(uploadArgs), uploadOptions);
+      }
     }
 
     const { stdout, stderr } = cliResult;
@@ -2252,9 +2949,10 @@ async function uploadLocalSketch(code, board, port, onProgress, options = {}) {
       board,
       port,
       cloudRuntime: Boolean(cloudRuntime),
+      sourceRestoreMarkerEmbedded: Boolean(markerScan.requested && markerScan.embedded),
       output: joinArduinoCliOutput(stdout, stderr)
     };
-  }, extraFiles);
+  });
 }
 
 /**
@@ -3057,5 +3755,14 @@ module.exports = {
   getArduinoStorageInfo,
   buildTantalumWifiHostname,
   BOARD_PACKAGES,
-  getFeaturedLibraries
+  getFeaturedLibraries,
+  __testing: {
+    assertSourceRestoreMarkerEmbedded,
+    buildSourceRestoreMarkerFile,
+    collectWorkspaceSketchFiles,
+    createTemporaryWorkspaceSketch,
+    applyCloudRuntimeToWorkspaceSketchFiles,
+    scanCompiledArtifactsForSourceRestoreMarker,
+    sourceRestoreMarkerLiteral
+  }
 };
