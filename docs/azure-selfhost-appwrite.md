@@ -318,7 +318,60 @@ ports:
   - "127.0.0.1:27017:27017"
 ```
 
-The local monitor script `/srv/tantalum/bin/tantalum-monitor.sh` should run every 5 minutes by systemd timer. It logs stable syslog fields for disk, memory, container health, and backup age. Azure Monitor Agent can forward those entries to a Log Analytics workspace through a syslog Data Collection Rule, and scheduled-query alerts should notify the production action group when any monitor metric logs `status=fail`. On Ubuntu, confirm rsyslog is forwarding to AMA after the DCR lands; if needed, link the generated AMA forwarding config from `/etc/opt/microsoft/azuremonitoragent/syslog/rsyslogconf/` into `/etc/rsyslog.d/` and restart `rsyslog`.
+The configure script installs `/srv/tantalum/bin/tantalum-monitor.sh` and a `tantalum-monitor.timer` that runs every 5 minutes. It logs stable syslog fields for disk, memory, container health, backup age, and the `agent-settings` function warm check. The warm check calls the public non-sensitive `/warm` function route, so production runtime warming does not depend on Appwrite's own function scheduler. The container check also covers the Appwrite function worker, execution worker, build worker, function scheduler, execution scheduler, message scheduler, and openruntimes executor containers, because those are the services that must be healthy for async and scheduled executions.
+
+For production monitoring, create a least-privilege Appwrite API key that can create and read function executions, then add it to `/srv/tantalum/appwrite/tantalum.env`:
+
+```bash
+TANTALUM_MONITOR_APPWRITE_API_KEY=<execution-read-monitor-key>
+TANTALUM_MONITOR_AGENT_SETTINGS_ASYNC_WARM_ENABLED=true
+```
+
+With that key present, the monitor also emits `agent_settings_async_warm`. This creates an async `/warm` execution and polls it until completion, which catches the failure class where sync function calls still work but Appwrite's async/scheduled execution path is broken.
+
+Azure Monitor Agent can forward monitor entries to a Log Analytics workspace through a syslog Data Collection Rule. Scheduled-query alerts should notify the production action group when any monitor metric logs `status=fail`, especially `container_health`, `agent_settings_warm`, and `agent_settings_async_warm`. On Ubuntu, confirm rsyslog is forwarding to AMA after the DCR lands; if needed, link the generated AMA forwarding config from `/etc/opt/microsoft/azuremonitoragent/syslog/rsyslogconf/` into `/etc/rsyslog.d/` and restart `rsyslog`.
+
+Verify the timer and warm metric on the VM:
+
+```bash
+systemctl status tantalum-monitor.timer --no-pager
+sudo /srv/tantalum/bin/tantalum-monitor.sh
+journalctl -t tantalum-monitor -n 50 --no-pager
+```
+
+Expected warm metric:
+
+```text
+metric=agent_settings_warm value=0 threshold=0 status=pass function=agent-settings
+metric=agent_settings_async_warm value=0 threshold=0 status=pass function=agent-settings
+```
+
+The repo also includes `.github/workflows/agent-settings-warm.yml`, which calls the same `/warm` route every 5 minutes from GitHub Actions. Keep that workflow enabled as an off-VM fallback so `agent-settings` is still warmed and monitored if the VM timer or Appwrite's internal scheduler stops firing. Add the same least-privilege monitor key as the repository secret `APPWRITE_MONITOR_API_KEY` if you also want GitHub Actions to fail when the async execution path stops completing.
+
+If `agent_settings_async_warm` fails, repair and verify the function runtime path on the VM:
+
+```bash
+sudo /srv/tantalum/bin/repair-functions-runtime.sh --restart --async
+```
+
+The repair script ensures the `appwrite-worker-executions` service exists, reconciles the function worker, execution worker, build worker, scheduler, and executor containers with Docker Compose, optionally restarts them, then verifies both sync and async `/warm` executions. It prints recent runtime logs and exits non-zero if Appwrite still cannot complete the async execution.
+
+If SSH is blocked by NSG rules or your current public IP changed, run the same repair through Azure VM Run Command from the repo root:
+
+```bash
+pwsh ./infra/azure/repair-appwrite-functions.ps1
+```
+
+That command uploads the current repo copy of `repair-functions-runtime.sh` through the Azure VM agent and runs it with `--restart --async`, so it does not depend on port 22 being reachable from your laptop.
+
+If the Azure CLI is signed into the wrong subscription, pass the production subscription explicitly:
+
+```bash
+pwsh ./infra/azure/repair-appwrite-functions.ps1 \
+  -SubscriptionId "<production-subscription-id>" \
+  -ResourceGroup "rg-tantalum-appwrite-prod" \
+  -VmName "vm-tantalum-appwrite-prod"
+```
 
 ## 11. Health Checks
 

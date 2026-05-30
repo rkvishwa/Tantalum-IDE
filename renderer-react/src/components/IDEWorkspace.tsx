@@ -5101,6 +5101,12 @@ export function IDEWorkspace({
 
     treeTrashMap.clear();
     workspacePathRef.current = result.path;
+    const loadingIntegrity: ProjectIntegrityState = {
+      ...EMPTY_PROJECT_INTEGRITY,
+      loading: true,
+    };
+    projectIntegrityRef.current = loadingIntegrity;
+    setProjectIntegrity(loadingIntegrity);
     setWorkspacePath(result.path);
     setPendingAgentReview(validReview);
     void refreshAgentRestorePoints(result.path);
@@ -5627,10 +5633,13 @@ export function IDEWorkspace({
     const rootInoName = filePath && workspacePath && isRootInoProjectFile(filePath, workspacePath)
       ? rootProjectFileName(filePath, workspacePath)
       : null;
-    const entryFile = projectIntegrity.entryFile;
+    const integrity = projectIntegrityRef.current;
+    const entryFile = integrity.entryFile;
     const isProjectEntry = Boolean(rootInoName && entryFile && rootInoName.toLowerCase() === entryFile.toLowerCase());
+    const canReportLifecycleConflict = Boolean(rootInoName && !integrity.loading && !integrity.error);
     const lifecycleConflict = Boolean(
       rootInoName
+      && canReportLifecycleConflict
       && hasArduinoLifecycleFunction(model.getValue())
       && (!entryFile || rootInoName.toLowerCase() !== entryFile.toLowerCase()),
     );
@@ -5663,7 +5672,7 @@ export function IDEWorkspace({
       editorInstance.trigger('tantalum.project-problem', 'editor.action.marker.next', null);
     }, 0);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeEditorFilePath, projectIntegrity.entryFile, workspacePath]);
+  }, [activeEditorFilePath, workspacePath]);
 
   async function openFile(filePath: string, options?: { preview?: boolean }) {
     const shouldPreview = options?.preview ?? true;
@@ -10591,7 +10600,7 @@ export function IDEWorkspace({
     return () => {
       window.clearTimeout(handle);
     };
-  }, [activeEditorFilePath, activeEditorLanguage, refreshActiveEditorDiagnostics]);
+  }, [activeEditorFilePath, activeEditorLanguage, projectIntegrity.entryFile, projectIntegrity.error, projectIntegrity.loading, refreshActiveEditorDiagnostics]);
 
   useEffect(() => {
     if (!workspacePath || !activeEditorFilePath || !isRootInoProjectFile(activeEditorFilePath, workspacePath)) {
@@ -13308,7 +13317,7 @@ export function IDEWorkspace({
                   dragAndDrop: true,
                   extraEditorClassName: 'tantalum-source-editor',
                   find: { addExtraSpaceOnTop: false },
-                  fixedOverflowWidgets: false,
+                  fixedOverflowWidgets: true,
                   folding: true,
                   foldingHighlight: true,
                   fontFamily: uiPreferences.editorFontFamily,
@@ -13316,7 +13325,7 @@ export function IDEWorkspace({
                   formatOnPaste: uiPreferences.editorFormatOnPaste,
                   formatOnType: uiPreferences.editorFormatOnType,
                   guides: { bracketPairs: uiPreferences.editorBracketPairs, indentation: true },
-                  hover: { enabled: true, sticky: true },
+                  hover: { enabled: true, sticky: true, above: false },
                   inlayHints: { enabled: uiPreferences.editorInlayHints ? 'on' : 'off' },
                   inlineSuggest: { enabled: uiPreferences.editorInlineSuggest },
                   lightbulb: { enabled: 'on' as editor.ShowLightbulbIconMode },

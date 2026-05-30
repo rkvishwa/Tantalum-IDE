@@ -71,7 +71,10 @@ type AgentFunctionReadOptions = {
 };
 
 const AGENT_SETTINGS_READ_EXECUTION_OPTIONS = {
-  retryOnSyncTimeout: true,
+  async: true,
+  waitForCompletion: true,
+  waitTimeoutMs: 95_000,
+  pollMs: 1_000,
 } as const;
 
 export type AgentCreditAccount = {
@@ -261,7 +264,7 @@ export async function loadAgentSettings(workspaceKey?: string | null, options: L
   assertAgentSettingsFunction();
   return executeFunction<{ workspaceKey?: string | null; includeUsage?: boolean }, AgentSettingsState>(
     appwriteConfig.agentSettingsFunctionId,
-    { workspaceKey: workspaceKey ?? null, includeUsage: options.includeUsage !== false },
+    { workspaceKey: workspaceKey ?? null, includeUsage: options.includeUsage === true },
     '/bootstrap',
     { ...AGENT_SETTINGS_READ_EXECUTION_OPTIONS, bypassCache: options.bypassCache },
   );

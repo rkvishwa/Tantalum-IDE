@@ -505,6 +505,7 @@ export type CloudConfig = {
   firmwareCollectionId: string;
   sketchesCollectionId: string;
   sourceSnapshotsCollectionId?: string;
+  agentAsyncReadResultsCollectionId?: string;
   firmwareBucketId: string;
   firmwareSourceBucketId?: string;
   boardAdminFunctionId: string;

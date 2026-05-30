@@ -34,6 +34,20 @@ fi
 
 curl "${curl_args[@]}" "$base/health" | jq . || curl "${curl_args[@]}" "$base/health"
 
+if [[ -n "${APPWRITE_PROJECT_ID:-}" ]]; then
+  echo ""
+  echo "Agent settings warm check:"
+  agent_settings_function_id="${TANTALUM_AGENT_SETTINGS_FUNCTION_ID:-agent-settings}"
+  warm_payload='{"body":"{\"reason\":\"manual-healthcheck\"}","async":false,"path":"/warm","method":"POST","headers":{"content-type":"application/json"}}'
+  curl --fail --show-error --silent \
+    -X POST \
+    -H "X-Appwrite-Project: ${APPWRITE_PROJECT_ID}" \
+    -H "X-Appwrite-Response-Format: 1.4.0" \
+    -H "Content-Type: application/json" \
+    --data "$warm_payload" \
+    "$base/functions/$agent_settings_function_id/executions" | jq . || true
+fi
+
 if command -v docker >/dev/null 2>&1; then
   echo ""
   docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E '(^NAMES|appwrite)' || true

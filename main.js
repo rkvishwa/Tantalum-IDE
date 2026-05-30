@@ -3411,6 +3411,7 @@ const APPWRITE_AGENT_MESSAGES_CACHE_TTL_MS = 30 * 1000;
 const APPWRITE_AGENT_SETTINGS_WARM_INITIAL_DELAY_MS = 5 * 1000;
 const APPWRITE_AGENT_SETTINGS_WARM_INTERVAL_MS = 4 * 60 * 1000;
 const APPWRITE_AGENT_SETTINGS_WARM_STALE_MS = 2 * 60 * 1000;
+const APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID = "agent_async_read_results";
 const appwriteReadCache = new Map();
 const appwriteInflightReadCache = new Map();
 let appwriteReadCacheEpoch = 0;
@@ -3706,6 +3707,163 @@ function isPassiveAgentSettingsRead(payload) {
   }
 
   return ["/bootstrap", "/", "/threads/list", "/threads/messages"].includes(String(payload?.pathName ?? "/"));
+}
+
+function shouldUseAgentSettingsAsyncResultBridge(payload) {
+  return Boolean(payload?.async && payload?.waitForCompletion && isPassiveAgentSettingsRead(payload));
+}
+
+function agentAsyncReadResultsCollectionId() {
+  const cloudConfig = getRendererCloudConfig();
+  return String(cloudConfig.agentAsyncReadResultsCollectionId || APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID);
+}
+
+function createAgentAsyncReadResultIds() {
+  return {
+    requestId: crypto.randomBytes(16).toString("hex"),
+    documentId: `r_${crypto.randomBytes(16).toString("hex")}`,
+  };
+}
+
+function payloadBodyObject(bodyText) {
+  const parsed = safeJsonParse(String(bodyText || "{}"), {});
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function buildAgentAsyncResultRequest(request, ids) {
+  return {
+    ...request,
+    body: {
+      ...request.body,
+      body: JSON.stringify({
+        ...payloadBodyObject(request.body?.body),
+        asyncResultRequestId: ids.requestId,
+        asyncResultDocumentId: ids.documentId,
+      }),
+    },
+  };
+}
+
+function isMissingAppwriteDocument(error) {
+  return Number(error?.status || error?.code || 0) === 404 || /not found/i.test(String(error?.message || ""));
+}
+
+async function deleteAgentAsyncResultDocument(databaseId, collectionId, documentId) {
+  await appwriteRequest({
+    method: "DELETE",
+    pathName: `databases/${encodeURIComponent(databaseId)}/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}`,
+    invalidateCache: false,
+  }).catch(() => {});
+}
+
+function executionFromAsyncResultDocument(execution, document, ids) {
+  const status = String(document.status || "").toLowerCase() === "failed" ? "failed" : "completed";
+  const responseBody = typeof document.responseJson === "string" ? document.responseJson : "";
+  return normalizeFunctionExecutionShape({
+    ...execution,
+    status,
+    responseStatusCode: status === "failed" ? 500 : 200,
+    responseBody,
+    response: responseBody,
+    errors: status === "failed" ? String(document.error || execution?.errors || "") : String(execution?.errors || ""),
+    asyncResultRequestId: ids.requestId,
+    asyncResultDocumentId: ids.documentId,
+  });
+}
+
+async function waitForAgentAsyncResult(
+  functionId,
+  execution,
+  ids,
+  { timeoutMs = 95000, pollMs = 1000 } = {},
+) {
+  const cloudConfig = getRendererCloudConfig();
+  const databaseId = String(cloudConfig.databaseId || "");
+  const collectionId = agentAsyncReadResultsCollectionId();
+  if (!databaseId || !collectionId) {
+    throw new Error("Agent async result storage is not configured.");
+  }
+
+  const startedAt = Date.now();
+  let lastExecution = execution;
+  let lastExecutionPollAt = 0;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const document = await appwriteRequest({
+        pathName: `databases/${encodeURIComponent(databaseId)}/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(ids.documentId)}`,
+        invalidateCache: false,
+      });
+
+      if (document.requestId !== ids.requestId) {
+        throw new Error("Agent async result did not match the current request.");
+      }
+
+      const status = String(document.status || "").toLowerCase();
+      if (status === "completed" || status === "failed") {
+        await deleteAgentAsyncResultDocument(databaseId, collectionId, ids.documentId);
+        return executionFromAsyncResultDocument(lastExecution, document, ids);
+      }
+    } catch (error) {
+      if (!isMissingAppwriteDocument(error)) {
+        throw error;
+      }
+    }
+
+    if (Date.now() - lastExecutionPollAt >= Math.max(2500, pollMs)) {
+      lastExecutionPollAt = Date.now();
+      try {
+        lastExecution = normalizeFunctionExecutionShape(await appwriteRequest({
+          method: "GET",
+          pathName: `functions/${encodeURIComponent(functionId)}/executions/${encodeURIComponent(execution.$id || execution.id)}`,
+          invalidateCache: false,
+        }));
+
+        if (functionExecutionIsTerminal(lastExecution) && String(lastExecution.status || "").toLowerCase() !== "completed") {
+          return lastExecution;
+        }
+      } catch {
+        // The result document is authoritative for successful async reads; execution polling is only diagnostic.
+      }
+    }
+
+    await delay(pollMs);
+  }
+
+  const diagnostic = functionExecutionDiagnostic(lastExecution);
+  throw new Error(diagnostic || "Tantalum AI did not publish an async result before the local wait timeout.");
+}
+
+async function createAgentAsyncResultExecutionAndWait(
+  functionId,
+  request,
+  { timeoutMs = 95000, pollMs = 1000, invalidateCache = true } = {},
+) {
+  const ids = createAgentAsyncReadResultIds();
+  const nextRequest = buildAgentAsyncResultRequest(request, ids);
+  const initial = normalizeFunctionExecutionShape(await appwriteRequest({
+    ...nextRequest,
+    invalidateCache,
+  }));
+
+  if (!nextRequest.body?.async || functionExecutionIsTerminal(initial)) {
+    return initial;
+  }
+
+  const executionId = initial?.$id || initial?.id;
+  if (!executionId) {
+    throw new Error("Appwrite did not return an execution ID for the async function request.");
+  }
+
+  return waitForAgentAsyncResult(functionId, initial, ids, { timeoutMs, pollMs });
+}
+
+async function createAgentSettingsAsyncReadExecutionAndWait(
+  functionId,
+  request,
+  { timeoutMs = 95000, pollMs = 1000, invalidateCache = true } = {},
+) {
+  return createAgentAsyncResultExecutionAndWait(functionId, request, { timeoutMs, pollMs, invalidateCache });
 }
 
 async function warmAgentSettingsFunctionIfStale(reason = "preflight") {
@@ -6199,13 +6357,21 @@ async function executeAgentGatewayRequest(body) {
     // Appwrite will reject the function if a user session is required and unavailable.
   }
 
-  const execution = await createFunctionExecutionAndWait(cloudConfig.agentGatewayFunctionId, {
-    body: JSON.stringify(body),
-    async: true,
-    path: "/gateway",
-    method: "POST",
-    headers,
-  });
+  const execution = await createAgentAsyncResultExecutionAndWait(
+    cloudConfig.agentGatewayFunctionId,
+    {
+      method: "POST",
+      pathName: `functions/${encodeURIComponent(cloudConfig.agentGatewayFunctionId)}/executions`,
+      body: {
+        body: JSON.stringify(body),
+        async: true,
+        path: "/gateway",
+        method: "POST",
+        headers,
+      },
+    },
+    { timeoutMs: 125000, pollMs: 1000 },
+  );
   const responseBody = functionExecutionResponseBody(execution);
   const parsed = safeJsonParse(responseBody || "{}", {
     ok: false,
@@ -7654,11 +7820,16 @@ ipcMain.handle("cloud:functions:create-execution", async (_event, payload) => {
     };
     const cacheTtlMs = functionExecutionCacheTtlMs(payload);
     const requestExecutor = payload.waitForCompletion
-      ? (nextRequest) => createFunctionExecutionAndWait(payload.functionId, nextRequest.body, {
-          timeoutMs: boundedPositiveNumber(payload.waitTimeoutMs, 95000, 5000, 125000),
-          pollMs: boundedPositiveNumber(payload.pollMs, 1000, 250, 5000),
-          invalidateCache: nextRequest.invalidateCache !== false,
-        })
+      ? (nextRequest) => {
+          const waitOptions = {
+            timeoutMs: boundedPositiveNumber(payload.waitTimeoutMs, 95000, 5000, 125000),
+            pollMs: boundedPositiveNumber(payload.pollMs, 1000, 250, 5000),
+            invalidateCache: nextRequest.invalidateCache !== false,
+          };
+          return shouldUseAgentSettingsAsyncResultBridge(payload)
+            ? createAgentSettingsAsyncReadExecutionAndWait(payload.functionId, nextRequest, waitOptions)
+            : createFunctionExecutionAndWait(payload.functionId, nextRequest.body, waitOptions);
+        }
       : appwriteRequest;
     const functionRequestExecutor = async (nextRequest) => {
       const execution = await requestExecutor(nextRequest);

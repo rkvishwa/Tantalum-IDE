@@ -16,7 +16,8 @@ function deriveCollections(config) {
         boards: tables.find((table) => table.$id === 'boards')?.$id || 'boards',
         firmwares: tables.find((table) => table.$id === 'firmwares')?.$id || 'firmwares',
         sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches',
-        boardSourceSnapshots: tables.find((table) => table.$id === 'board_source_snapshots')?.$id || 'board_source_snapshots'
+        boardSourceSnapshots: tables.find((table) => table.$id === 'board_source_snapshots')?.$id || 'board_source_snapshots',
+        agentAsyncReadResults: tables.find((table) => table.$id === 'agent_async_read_results')?.$id || 'agent_async_read_results'
     };
 }
 

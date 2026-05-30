@@ -23,6 +23,7 @@ type ArduinoDoc = {
 type SanitizedLine = {
   raw: string;
   code: string;
+  preprocessorCode: string;
 };
 
 type LintMarker = editor.IMarkerData & {
@@ -772,6 +773,7 @@ function sanitizeCppLines(text: string): SanitizedLine[] {
 
   for (const raw of lines) {
     let code = '';
+    let preprocessorCode = '';
     let stringDelimiter: '"' | "'" | null = null;
     let escaped = false;
 
@@ -782,16 +784,19 @@ function sanitizeCppLines(text: string): SanitizedLine[] {
       if (inBlockComment) {
         if (char === '*' && nextChar === '/') {
           code += '  ';
+          preprocessorCode += '  ';
           index += 1;
           inBlockComment = false;
         } else {
           code += ' ';
+          preprocessorCode += ' ';
         }
         continue;
       }
 
       if (stringDelimiter) {
         code += ' ';
+        preprocessorCode += char;
         if (!escaped && char === stringDelimiter) {
           stringDelimiter = null;
         }
@@ -804,11 +809,13 @@ function sanitizeCppLines(text: string): SanitizedLine[] {
 
       if (char === '/' && nextChar === '/') {
         code += ' '.repeat(raw.length - index);
+        preprocessorCode += ' '.repeat(raw.length - index);
         break;
       }
 
       if (char === '/' && nextChar === '*') {
         code += '  ';
+        preprocessorCode += '  ';
         index += 1;
         inBlockComment = true;
         continue;
@@ -817,13 +824,15 @@ function sanitizeCppLines(text: string): SanitizedLine[] {
       if (char === '"' || char === "'") {
         stringDelimiter = char;
         code += ' ';
+        preprocessorCode += char;
         continue;
       }
 
       code += char;
+      preprocessorCode += char;
     }
 
-    sanitizedLines.push({ raw, code });
+    sanitizedLines.push({ raw, code, preprocessorCode });
   }
 
   return sanitizedLines;
@@ -921,7 +930,7 @@ function lintPreprocessor(monaco: Monaco, lines: SanitizedLine[]) {
   const markers: LintMarker[] = [];
 
   lines.forEach((line, index) => {
-    const trimmed = line.code.trim();
+    const trimmed = line.preprocessorCode.trim();
     if (!trimmed.startsWith('#')) {
       return;
     }

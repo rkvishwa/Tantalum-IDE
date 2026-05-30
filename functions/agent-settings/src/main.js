@@ -1,7 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
-import { Account, Client, Databases, ID, Query } from 'node-appwrite';
+import { Account, Client, Databases, ID, Permission, Query, Role } from 'node-appwrite';
 import {
   LEGACY_RAW_KEY_SENTINEL,
   encryptSecret,
@@ -21,12 +21,15 @@ const {
   APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID = 'agent_usage_ledger',
   APPWRITE_AGENT_THREADS_COLLECTION_ID = 'agent_threads',
   APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID = 'agent_thread_messages',
+  APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID = 'agent_async_read_results',
   AGENT_DEFAULT_MONTHLY_CREDITS = '500',
 } = process.env;
 
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
 const MESSAGE_METADATA_JSON_MAX = 32768;
 const RECENT_USAGE_LIMIT = 50;
+const ASYNC_READ_RESULT_TTL_MS = 5 * 60 * 1000;
+const ASYNC_READ_RESULT_CLEANUP_LIMIT = 20;
 const DEFAULT_MANAGED_MODEL_METADATA = {
   providerLabel: 'Azure AI Foundry',
   fastModel: 'gpt-4.1',
@@ -72,6 +75,29 @@ function readPayload(req) {
   } catch {
     return {};
   }
+}
+
+function asyncReadResultRequest(payload) {
+  const requestId = String(payload.asyncResultRequestId || '').trim();
+  const documentId = String(payload.asyncResultDocumentId || '').trim();
+  if (!requestId && !documentId) {
+    return null;
+  }
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(requestId) || !/^r_[a-f0-9]{32}$/.test(documentId)) {
+    const error = new Error('Invalid async result request.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { requestId, documentId };
+}
+
+function userResultPermissions(userId) {
+  return [
+    Permission.read(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
 }
 
 function createAdminClient(req) {
@@ -121,6 +147,102 @@ function requestUserJwt(req) {
 async function resolveUser(req) {
   const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
+}
+
+function errorResponse(caughtError) {
+  const rawMessage = caughtError instanceof Error ? caughtError.message : 'Unexpected agent-settings failure.';
+  const statusCode = Number(caughtError?.statusCode || caughtError?.code || 0);
+  if (statusCode === 401 || /jwt|unauthorized|missing.*user/i.test(rawMessage)) {
+    return { status: 401, error: 'Sign in again, then retry.' };
+  }
+
+  return {
+    status: statusCode >= 400 && statusCode < 600 ? statusCode : 500,
+    error: rawMessage,
+  };
+}
+
+async function cleanupExpiredAsyncReadResults(databases, userId, now = new Date()) {
+  if (!APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID) {
+    return;
+  }
+
+  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID, [
+    Query.equal('userId', userId),
+    Query.lessThan('expiresAt', now.toISOString()),
+    Query.limit(ASYNC_READ_RESULT_CLEANUP_LIMIT),
+  ]);
+
+  await Promise.allSettled(
+    response.documents.map((document) =>
+      databases.deleteDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID, document.$id),
+    ),
+  );
+}
+
+async function writeAsyncReadResult(databases, userId, payload, path, envelope, status = 'completed') {
+  const resultRequest = asyncReadResultRequest(payload);
+  if (!resultRequest) {
+    return;
+  }
+
+  const now = new Date();
+  const data = {
+    userId,
+    requestId: resultRequest.requestId,
+    path,
+    status,
+    responseJson: JSON.stringify(envelope),
+    error: envelope.ok ? '' : String(envelope.error || 'Agent settings read failed.'),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + ASYNC_READ_RESULT_TTL_MS).toISOString(),
+  };
+
+  try {
+    await databases.createDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID,
+      resultRequest.documentId,
+      data,
+      userResultPermissions(userId),
+    );
+  } catch (error) {
+    if (Number(error?.code || error?.statusCode || 0) !== 409) {
+      throw error;
+    }
+
+    await databases.updateDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID,
+      resultRequest.documentId,
+      data,
+      userResultPermissions(userId),
+    );
+  }
+
+  await cleanupExpiredAsyncReadResults(databases, userId).catch(() => {});
+}
+
+async function runAsyncReadableRoute(req, res, routePath, handler, log = () => {}) {
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  let user = null;
+
+  try {
+    user = routePath === '/bootstrap' || routePath === '/'
+      ? await timedBootstrapPhase(log, 'user lookup', () => resolveUser(req))
+      : await resolveUser(req);
+    const data = await handler({ user, payload, databases, log });
+    await writeAsyncReadResult(databases, user.$id, payload, routePath, { ok: true, data });
+    return ok(res, data);
+  } catch (caughtError) {
+    const response = errorResponse(caughtError);
+    if (user) {
+      await writeAsyncReadResult(databases, user.$id, payload, routePath, { ok: false, error: response.error }, 'failed').catch(() => {});
+    }
+    throw caughtError;
+  }
 }
 
 function periodKeyFor(date = new Date()) {
@@ -643,12 +765,16 @@ async function listThreadDocuments(databases, userId, workspaceKey = null, limit
   }
 }
 
+async function listThreadsData({ user, payload, databases }) {
+  const workspaceKey = String(payload.workspaceKey || '').trim() || null;
+  return listThreadDocuments(databases, user.$id, workspaceKey);
+}
+
 async function listThreads(req, res) {
   const user = await resolveUser(req);
   const payload = readPayload(req);
   const databases = new Databases(createAdminClient(req));
-  const workspaceKey = String(payload.workspaceKey || '').trim() || null;
-  return ok(res, await listThreadDocuments(databases, user.$id, workspaceKey));
+  return ok(res, await listThreadsData({ user, payload, databases }));
 }
 
 async function createThread(req, res) {
@@ -680,15 +806,19 @@ async function createThread(req, res) {
   return ok(res, maskThread(thread), 201);
 }
 
-async function listThreadMessages(req, res) {
-  const user = await resolveUser(req);
-  const payload = readPayload(req);
-  const databases = new Databases(createAdminClient(req));
+async function listThreadMessagesData({ user, payload, databases }) {
   const thread = await getOwnedThread(databases, user.$id, payload.threadId);
 
   const documents = await listAllThreadMessageDocuments(databases, thread.$id);
 
-  return ok(res, documents.map(maskThreadMessage));
+  return documents.map(maskThreadMessage);
+}
+
+async function listThreadMessages(req, res) {
+  const user = await resolveUser(req);
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  return ok(res, await listThreadMessagesData({ user, payload, databases }));
 }
 
 async function listAllThreadMessageDocuments(databases, threadId) {
@@ -837,11 +967,8 @@ async function timedBootstrapPhase(log, phase, task) {
   }
 }
 
-async function bootstrap(req, res, log = () => {}) {
+async function bootstrapData({ user, payload, databases, log = () => {} }) {
   const startedAt = Date.now();
-  const user = await timedBootstrapPhase(log, 'user lookup', () => resolveUser(req));
-  const payload = readPayload(req);
-  const databases = new Databases(createAdminClient(req));
   const workspaceKey = String(payload.workspaceKey || '').trim() || null;
   const includeUsage = payload.includeUsage !== false;
   const [assignment, preferences, creditAccount, customCredentials, recentUsage, recentThreads] = await Promise.all([
@@ -857,7 +984,7 @@ async function bootstrap(req, res, log = () => {}) {
   );
   log(`[bootstrap] complete ${Date.now() - startedAt}ms includeUsage=${includeUsage ? 'true' : 'false'} workspace=${workspaceKey ? 'true' : 'false'}`);
 
-  return ok(res, {
+  return {
     managedAvailable: Boolean(assignment),
     managedModes: managedModesFromMetadata(managedModelMetadata),
     managedModelMetadata,
@@ -871,7 +998,14 @@ async function bootstrap(req, res, log = () => {}) {
     creditAccount: maskCreditAccount(creditAccount),
     recentUsage,
     recentThreads,
-  });
+  };
+}
+
+async function bootstrap(req, res, log = () => {}) {
+  const user = await timedBootstrapPhase(log, 'user lookup', () => resolveUser(req));
+  const payload = readPayload(req);
+  const databases = new Databases(createAdminClient(req));
+  return ok(res, await bootstrapData({ user, payload, databases, log }));
 }
 
 async function savePreferences(req, res) {
@@ -1087,12 +1221,12 @@ export default async function ({ req, res, log = () => {}, error }) {
 
     switch (req.path) {
       case '/bootstrap':
-        return await bootstrap(req, res, log);
+        return await runAsyncReadableRoute(req, res, '/bootstrap', bootstrapData, log);
       case '/':
         if (!requestUserJwt(req)) {
           return health(res, { warmup: true });
         }
-        return await bootstrap(req, res, log);
+        return await runAsyncReadableRoute(req, res, '/', bootstrapData, log);
       case '/preferences':
         return await savePreferences(req, res);
       case '/custom-credentials/create':
@@ -1104,11 +1238,11 @@ export default async function ({ req, res, log = () => {}, error }) {
       case '/custom-credentials/test':
         return await testCustomCredential(req, res);
       case '/threads/list':
-        return await listThreads(req, res);
+        return await runAsyncReadableRoute(req, res, '/threads/list', listThreadsData, log);
       case '/threads/create':
         return await createThread(req, res);
       case '/threads/messages':
-        return await listThreadMessages(req, res);
+        return await runAsyncReadableRoute(req, res, '/threads/messages', listThreadMessagesData, log);
       case '/threads/messages/truncate':
         return await truncateThreadMessages(req, res);
       case '/threads/message/create':
@@ -1121,13 +1255,8 @@ export default async function ({ req, res, log = () => {}, error }) {
         return fail(res, 404, `Unknown agent settings path: ${req.path}`);
     }
   } catch (caughtError) {
-    const message = caughtError instanceof Error ? caughtError.message : 'Unexpected agent-settings failure.';
-    const statusCode = Number(caughtError?.statusCode || caughtError?.code || 0);
-    if (statusCode === 401 || /jwt|unauthorized|missing.*user/i.test(message)) {
-      return fail(res, 401, 'Sign in again, then retry.');
-    }
-
-    error(message);
-    return fail(res, 500, message);
+    const response = errorResponse(caughtError);
+    error(response.error);
+    return fail(res, response.status, response.error);
   }
 }

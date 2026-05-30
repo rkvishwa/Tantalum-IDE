@@ -123,7 +123,8 @@
             "path": "functions/agent-settings",
             "entrypoint": "src/main.js",
             "execute": [
-                "any"
+                "any",
+                "apps"
             ],
             "enabled": true,
             "logging": true,
@@ -177,6 +178,10 @@
                 {
                     "key": "APPWRITE_AGENT_THREAD_MESSAGES_COLLECTION_ID",
                     "value": "agent_thread_messages"
+                },
+                {
+                    "key": "APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID",
+                    "value": "agent_async_read_results"
                 },
                 {
                     "key": "AGENT_DEFAULT_MONTHLY_CREDITS",
@@ -233,6 +238,10 @@
                 {
                     "key": "APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID",
                     "value": "agent_usage_ledger"
+                },
+                {
+                    "key": "APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID",
+                    "value": "agent_async_read_results"
                 },
                 {
                     "key": "APPWRITE_APP_SETTINGS_COLLECTION_ID",
@@ -2142,6 +2151,128 @@
                     "columns": [
                         "threadId",
                         "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "agent_async_read_results",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Agent Async Read Results",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "requestId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "path",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "responseJson",
+                    "type": "text",
+                    "required": true,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "error",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "expiresAt",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "agent_async_results_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_async_results_request",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "requestId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "agent_async_results_user_expires",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "expiresAt"
                     ],
                     "orders": [
                         "ASC",

@@ -2928,6 +2928,8 @@ body.panel-resizing-row * {
 .editor-tabs-scroll-host {
   flex: 0 0 auto;
   min-width: 0;
+  position: relative;
+  z-index: 1;
 }
 
 .editor-shell .jet-editor-tabs-bar {
@@ -2948,6 +2950,7 @@ body.panel-resizing-row * {
   border-top-left-radius: inherit;
   overflow: hidden;
   position: relative;
+  z-index: 2;
 }
 
 .agent-editor-review-bar {
@@ -8348,15 +8351,24 @@ button.agent-message-context-chip {
 
 .monaco-editor.tantalum-source-editor,
 .monaco-editor.tantalum-source-editor .overflow-guard,
+.monaco-editor.tantalum-source-editor .contentWidgets,
+.monaco-editor.tantalum-source-editor .overflowingContentWidgets,
 .monaco-editor.tantalum-source-editor .overlayWidgets,
 .monaco-editor.tantalum-source-editor .overflowingOverlayWidgets {
   max-width: 100% !important;
   max-height: 100% !important;
 }
 
+.monaco-editor.tantalum-source-editor .overflowingContentWidgets,
+.monaco-editor.tantalum-source-editor .overflowingOverlayWidgets,
+.monaco-editor.tantalum-source-editor .monaco-resizable-hover {
+  z-index: 95 !important;
+}
+
 .monaco-editor.tantalum-source-editor .zone-widget:has(.marker-widget) {
   box-sizing: border-box;
   max-width: 100% !important;
+  z-index: 60 !important;
   overflow: hidden;
   contain: paint;
 }
@@ -9336,6 +9348,8 @@ button.agent-message-context-chip {
   resize: none;
   width: 100%;
   color: #e0e0e0;
+  caret-color: #e0e0e0;
+  cursor: text;
   font-size: 13px;
   line-height: 1.4;
   padding: 4px 6px;
@@ -9970,6 +9984,10 @@ button.agent-message-context-chip {
 .agent-panel.tantalum-ai-panel .tantalum-ai-bubble-content,
 .agent-panel.tantalum-ai-panel .chip-filename {
   color: var(--agent-text);
+}
+
+.agent-panel.tantalum-ai-panel .tantalum-ai-composer-textarea {
+  caret-color: var(--agent-accent);
 }
 
 .agent-panel.tantalum-ai-panel .agent-popup-menu button:hover:not(:disabled),

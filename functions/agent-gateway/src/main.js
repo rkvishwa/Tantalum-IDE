@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 
-import { Account, Client, Databases, ID, Query } from 'node-appwrite';
+import { Account, Client, Databases, ID, Permission, Query, Role } from 'node-appwrite';
 import {
   AGENT_OUTPUT_STYLE_SETTING_KEY,
   DEFAULT_AGENT_OUTPUT_STYLE,
@@ -20,6 +20,7 @@ const {
   APPWRITE_AGENT_CUSTOM_CREDENTIALS_COLLECTION_ID = 'agent_custom_credentials',
   APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID = 'agent_credit_accounts',
   APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID = 'agent_usage_ledger',
+  APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID = 'agent_async_read_results',
   APPWRITE_APP_SETTINGS_COLLECTION_ID = 'app_settings',
   AGENT_DEFAULT_MONTHLY_CREDITS = '500',
 } = process.env;
@@ -27,6 +28,8 @@ const {
 const DEFAULT_CREDIT_ALLOWANCE = Number.parseInt(AGENT_DEFAULT_MONTHLY_CREDITS, 10) || 500;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const DEFAULT_POWER_REASONING_EFFORT = 'medium';
+const ASYNC_RESULT_TTL_MS = 10 * 60 * 1000;
+const ASYNC_RESULT_CLEANUP_LIMIT = 25;
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -54,6 +57,29 @@ function readPayload(req) {
   } catch {
     return {};
   }
+}
+
+function asyncResultRequest(payload) {
+  const requestId = String(payload.asyncResultRequestId || '').trim();
+  const documentId = String(payload.asyncResultDocumentId || '').trim();
+  if (!requestId && !documentId) {
+    return null;
+  }
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(requestId) || !/^r_[a-f0-9]{32}$/.test(documentId)) {
+    const error = new Error('Invalid async result request.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return { requestId, documentId };
+}
+
+function userResultPermissions(userId) {
+  return [
+    Permission.read(Role.user(userId)),
+    Permission.delete(Role.user(userId)),
+  ];
 }
 
 function createAdminClient(req) {
@@ -95,6 +121,68 @@ function requestUserJwt(req) {
 async function resolveUser(req) {
   const account = new Account(createUserClient(requestUserJwt(req)));
   return account.get();
+}
+
+async function cleanupExpiredAsyncResults(databases, userId, now = new Date()) {
+  if (!APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID) {
+    return;
+  }
+
+  const response = await databases.listDocuments(APPWRITE_DATABASE_ID, APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID, [
+    Query.equal('userId', userId),
+    Query.lessThan('expiresAt', now.toISOString()),
+    Query.limit(ASYNC_RESULT_CLEANUP_LIMIT),
+  ]);
+
+  await Promise.allSettled(
+    response.documents.map((document) =>
+      databases.deleteDocument(APPWRITE_DATABASE_ID, APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID, document.$id),
+    ),
+  );
+}
+
+async function writeAsyncResult(databases, userId, payload, path, envelope, status = 'completed') {
+  const resultRequest = asyncResultRequest(payload);
+  if (!resultRequest) {
+    return;
+  }
+
+  const now = new Date();
+  const data = {
+    userId,
+    requestId: resultRequest.requestId,
+    path,
+    status,
+    responseJson: JSON.stringify(envelope),
+    error: envelope.ok ? '' : String(envelope.error || 'Agent gateway request failed.'),
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + ASYNC_RESULT_TTL_MS).toISOString(),
+  };
+
+  try {
+    await databases.createDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID,
+      resultRequest.documentId,
+      data,
+      userResultPermissions(userId),
+    );
+  } catch (error) {
+    if (Number(error?.code || error?.statusCode || 0) !== 409) {
+      throw error;
+    }
+
+    await databases.updateDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_AGENT_ASYNC_READ_RESULTS_COLLECTION_ID,
+      resultRequest.documentId,
+      data,
+      userResultPermissions(userId),
+    );
+  }
+
+  await cleanupExpiredAsyncResults(databases, userId).catch(() => {});
 }
 
 function periodKeyFor(date = new Date()) {
@@ -578,6 +666,14 @@ async function handleChatCompletion(req, res) {
         multiplier,
         errorMessage: 'Monthly managed agent credits are exhausted.',
       });
+      await writeAsyncResult(
+        databases,
+        user.$id,
+        payload,
+        req.path,
+        { ok: false, error: 'Monthly managed agent credits are exhausted.' },
+        'failed',
+      );
       return fail(res, 402, 'Monthly managed agent credits are exhausted.');
     }
   }
@@ -619,6 +715,7 @@ async function handleChatCompletion(req, res) {
       chargedCredits,
     });
 
+    await writeAsyncResult(databases, user.$id, payload, req.path, { ok: true, data: upstreamResponse });
     return ok(res, upstreamResponse);
   } catch (caughtError) {
     const message = caughtError instanceof Error ? caughtError.message : 'Agent gateway request failed.';
@@ -633,6 +730,7 @@ async function handleChatCompletion(req, res) {
       multiplier,
       errorMessage: message,
     });
+    await writeAsyncResult(databases, user.$id, payload, req.path, { ok: false, error: message }, 'failed').catch(() => {});
     return fail(res, 500, message);
   }
 }
