@@ -159,6 +159,35 @@ textarea {
   resize: vertical;
 }
 
+.password-input-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-input-shell input {
+  padding-right: 2.75rem;
+}
+
+.password-toggle-button {
+  position: absolute;
+  right: 0.35rem;
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.password-toggle-button:hover,
+.password-toggle-button:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .boot-screen,
 .auth-shell {
   min-height: 100vh;
@@ -4483,7 +4512,7 @@ body.panel-resizing-row * {
 }
 
 .console-output {
-  font-family: var(--app-font-family);
+  font-family: var(--system-font-family);
   font-size: 0.84rem;
   white-space: pre-wrap;
 }
@@ -4544,15 +4573,20 @@ body.panel-resizing-row * {
   min-height: 0;
   overflow: hidden;
   padding: 0;
+  --serial-monitor-terminal-pad-x: 0.95rem;
+  --serial-monitor-terminal-pad-top: 0.75rem;
+  --serial-monitor-terminal-scroll-beyond: 3rem;
 }
 
 .serial-monitor-toolbar,
 .serial-monitor-send-row {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 0.55rem;
   padding: 0.65rem 0.85rem;
   border-bottom: 1px solid var(--line);
+  background: rgba(10, 15, 20, 0.96);
 }
 
 .serial-monitor-send-row {
@@ -4628,12 +4662,14 @@ body.panel-resizing-row * {
 .serial-monitor-terminal-shell {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0.75rem 0.95rem;
+  overflow: hidden;
+  padding: 0;
   position: relative;
 }
 
 .serial-monitor-terminal-shell .xterm {
   height: 100%;
+  padding: var(--serial-monitor-terminal-pad-top) var(--serial-monitor-terminal-pad-x) var(--serial-monitor-terminal-scroll-beyond);
 }
 
 .serial-monitor-context-menu {

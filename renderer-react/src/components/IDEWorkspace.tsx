@@ -35,6 +35,8 @@ import {
   Clipboard,
   Copy,
   Cpu,
+  Eye,
+  EyeOff,
   ExternalLink,
   FilePlus2,
   FileCode2,
@@ -105,6 +107,7 @@ import type {
   ToolchainSketchSource,
   StorageUploadProgressEvent,
   UsbUploadProgressEvent,
+  SerialPortBlocker,
   WorkspaceReplaceChangedFile,
   WorkspaceSearchResult,
   BoardCodeProgressEvent,
@@ -284,6 +287,15 @@ type SerialBlockerDialogRequest = {
   subtitle?: string;
   retryLabel?: string;
   onRetry?: () => void;
+};
+
+type SerialPreflightDialogRequest = {
+  requestId?: string;
+  port: string;
+  title: string;
+  subtitle?: string;
+  continueLabel: string;
+  cancelMessage?: string;
 };
 
 type BoardPlatform = {
@@ -881,6 +893,10 @@ function isLocalBoardUploadRecoverableSerialError(message: string) {
     isLocalBoardUploadPortUnavailableError(normalized) ||
     /Cannot configure port|device attached to the system is not functioning|PermissionError|pySerial|port is busy|Access is denied|already open/i.test(normalized)
   );
+}
+
+function isBlockingSerialPortBlocker(blocker: SerialPortBlocker) {
+  return blocker.kind === 'tantalum-session' || (blocker.kind === 'external-process' && blocker.confidence === 'confirmed');
 }
 
 function normalizeToolchainStreamChunk(chunk: string) {
@@ -2724,6 +2740,7 @@ export function IDEWorkspace({
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [serialBlockerDialog, setSerialBlockerDialog] = useState<SerialBlockerDialogRequest | null>(null);
+  const [serialPreflightDialog, setSerialPreflightDialog] = useState<SerialPreflightDialogRequest | null>(null);
   const [boards, setBoards] = useState<BoardDocument[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(() => hasRequiredCloudConfiguration());
   const [boardsError, setBoardsError] = useState<string | null>(null);
@@ -2761,6 +2778,7 @@ export function IDEWorkspace({
   const [usbWifiModalOpen, setUsbWifiModalOpen] = useState(false);
   const [usbWifiProfileId, setUsbWifiProfileId] = useState('');
   const [usbWifiForm, setUsbWifiForm] = useState({ ssid: '', password: '' });
+  const [usbWifiPasswordVisible, setUsbWifiPasswordVisible] = useState(false);
   const [provisionPorts, setProvisionPorts] = useState<Array<{ path: string; manufacturer: string }>>([]);
   const [selectedProvisionPort, setSelectedProvisionPort] = useState('');
   const [releaseVersion, setReleaseVersion] = useState('1.0.1');
@@ -2807,6 +2825,8 @@ export function IDEWorkspace({
   const localBoardReconnectScanSignatureRef = useRef('');
   const localBoardUploadInProgressRef = useRef(false);
   const localBoardUploadProgressRef = useRef<UsbUploadProgressTask | null>(null);
+  const firmwareReleaseUploadInProgressRef = useRef(false);
+  const serialPreflightResolveRef = useRef<((ready: boolean) => void) | null>(null);
   const verifyInProgressRef = useRef(false);
 
   const deferredLibraryQuery = useDeferredValue(libraryQuery);
@@ -3003,10 +3023,18 @@ export function IDEWorkspace({
     busyAction === 'compile' ||
     editorUploadBusy ||
     (selectedEditorCloudBoard ? false : !canAttemptLocalUpload(selectedEditorLocalBoard));
+  const releaseUploadBusy = busyAction === 'verify-before-upload' || busyAction === 'upload';
+  const releaseUploadLabel = busyAction === 'verify-before-upload'
+    ? 'Verifying...'
+    : busyAction === 'upload'
+      ? 'Uploading...'
+      : 'Upload release';
   const editorUploadLabel = selectedEditorCloudBoard
-    ? busyAction === 'upload'
-      ? 'Uploading OTA...'
-      : 'Upload OTA'
+    ? busyAction === 'verify-before-upload'
+      ? 'Verifying...'
+      : busyAction === 'upload'
+        ? 'Uploading OTA...'
+        : 'Upload OTA'
     : busyAction === 'verify-before-upload'
       ? 'Verifying...'
       : busyAction === 'prepare-upload'
@@ -3436,6 +3464,56 @@ export function IDEWorkspace({
       dismissToast(id);
     }, timeoutMs);
   }
+
+  function finishSerialPreflight(ready: boolean) {
+    const resolve = serialPreflightResolveRef.current;
+    serialPreflightResolveRef.current = null;
+    setSerialPreflightDialog(null);
+    resolve?.(ready);
+  }
+
+  async function ensureUsbSerialPortReady(request: SerialPreflightDialogRequest) {
+    const targetPort = request.port.trim();
+    if (!targetPort) {
+      pushToast('Select a USB port before continuing.', 'info');
+      return false;
+    }
+
+    const result = await window.tantalum.serialPort.listBlockers({ port: targetPort });
+    if (!result.success) {
+      pushToast('Unable to check serial port blockers.', 'error', undefined, { detail: result.error });
+      return false;
+    }
+
+    const hasBlockingHolder = result.blockers.some(isBlockingSerialPortBlocker);
+    if (!hasBlockingHolder) {
+      return true;
+    }
+
+    const ready = await new Promise<boolean>((resolve) => {
+      serialPreflightResolveRef.current?.(false);
+      serialPreflightResolveRef.current = resolve;
+      setSerialPreflightDialog({
+        ...request,
+        requestId: `serial-preflight:${Date.now()}:${Math.random()}`,
+        port: targetPort,
+      });
+    });
+
+    if (!ready && request.cancelMessage) {
+      pushToast(request.cancelMessage, 'info');
+    }
+
+    return ready;
+  }
+
+  useEffect(() => {
+    return () => {
+      const resolve = serialPreflightResolveRef.current;
+      serialPreflightResolveRef.current = null;
+      resolve?.(false);
+    };
+  }, []);
 
   function isActiveToolchainNotification(notification: Pick<ToolchainNotification, 'status'>) {
     return notification.status === 'queued' || notification.status === 'running';
@@ -6968,6 +7046,19 @@ export function IDEWorkspace({
   }
 
   async function handleUploadRelease(targetBoard: BoardDocument | null = selectedBoard) {
+    if (firmwareReleaseUploadInProgressRef.current || verifyInProgressRef.current || localBoardUploadInProgressRef.current) {
+      return;
+    }
+
+    firmwareReleaseUploadInProgressRef.current = true;
+    try {
+      await runUploadRelease(targetBoard);
+    } finally {
+      firmwareReleaseUploadInProgressRef.current = false;
+    }
+  }
+
+  async function runUploadRelease(targetBoard: BoardDocument | null = selectedBoard) {
     if (!targetBoard) {
       pushToast('Choose a board before uploading firmware.', 'info');
       return;
@@ -6980,6 +7071,20 @@ export function IDEWorkspace({
 
     if (targetBoard.$id !== selectedBoardId) {
       setSelectedBoardId(targetBoard.$id);
+    }
+
+    if (uiPreferences.verifyBeforeUpload) {
+      const verified = await runVerifySketch({
+        board: targetBoard.boardType,
+        busyAction: 'verify-before-upload',
+        title: `Verifying ${activeTab?.name || projectIntegrity.entryFile || 'Project'}`,
+        detail: `Checking ${activeTab?.name || projectIntegrity.entryFile || 'Project'} before OTA upload to ${targetBoard.name}...`,
+        successMessage: 'Verification passed',
+      });
+
+      if (!verified) {
+        return;
+      }
     }
 
     const sketchSource = createToolchainSketchSource();
@@ -7230,8 +7335,7 @@ export function IDEWorkspace({
         persistent: true,
         progress: FIRMWARE_RELEASE_PHASE_CONFIG.checksum.start,
       });
-      pushConsole('Calculating firmware checksum...');
-      const checksum = await sha256Hex(compileResult.binData);
+      pushConsole('Preparing firmware checksum...');
       let uploadedSourceSnapshot: {
         fileId: string;
         checksum: string;
@@ -7282,7 +7386,6 @@ export function IDEWorkspace({
         progressId: uploadProgressId,
         version: releaseVersion,
         notes: releaseNotes,
-        checksum,
         sourceSnapshot: uploadedSourceSnapshot,
         compileResult: {
           filename: compileResult.filename,
@@ -7426,6 +7529,17 @@ export function IDEWorkspace({
           pushToast('Local board unavailable.', 'error', undefined, { detail: message });
           return null;
         }
+      }
+
+      const serialReady = await ensureUsbSerialPortReady({
+        port,
+        title: 'Serial port in use',
+        subtitle: `Stop serial connections on ${port} before installing Tantalum Cloud on ${board.name}.`,
+        continueLabel: 'Continue install',
+        cancelMessage: 'Tantalum Cloud install cancelled.',
+      });
+      if (!serialReady) {
+        return null;
       }
 
       notificationId = createToolchainTaskId('cloud-runtime-install');
@@ -7720,9 +7834,22 @@ export function IDEWorkspace({
     await handleUploadLocal(selectedEditorLocalBoard);
   }
 
+  function confirmTantalumCloudRuntimeFlash(board: BoardDocument, row: LocalBoardRow | null) {
+    const action = row?.lastCloudProvisionedAt ? 'Reinstalling' : 'Installing';
+    const target = row ? `${localBoardDisplayName(row)} linked to ${board.name}` : board.name;
+    return window.confirm(
+      `${action} Tantalum Cloud on ${target} will flash the runtime and replace the sketch currently on the board.\n\nContinue?`,
+    );
+  }
+
   async function handleProvisionBoard() {
     if (!selectedBoard || !selectedProvisionPort) {
       pushToast('Select both a board and a USB port.', 'info');
+      return;
+    }
+
+    if (!confirmTantalumCloudRuntimeFlash(selectedBoard, selectedBoardLinkedLocalRow)) {
+      pushToast('Tantalum Cloud install cancelled.', 'info');
       return;
     }
 
@@ -7880,7 +8007,7 @@ export function IDEWorkspace({
     }
   }
 
-  async function linkLocalBoardToCloud(row: LocalBoardRow, board: BoardDocument, options: { quiet?: boolean; installRuntime?: boolean } = {}) {
+  async function linkLocalBoardToCloud(row: LocalBoardRow, board: BoardDocument, options: { quiet?: boolean } = {}) {
     if (!row.profileId || !row.profile) {
       pushToast('Save the local board before linking it to cloud.', 'info');
       return null;
@@ -7903,33 +8030,21 @@ export function IDEWorkspace({
 
     setBusyAction(`link-cloud-board:${row.key}`);
     try {
-      let liveRow = row;
-      if (options.installRuntime) {
-        const resolution = await resolveLiveLocalBoardTarget(row);
-        liveRow = resolution.row;
-        if (!canUploadLocalBoard(liveRow)) {
-          const message = 'Board is not available on the saved port. Run Auto detect or reconnect the board.';
-          pushConsole(message, 'error');
-          pushToast('Local board unavailable.', 'error', undefined, { detail: message });
-          return null;
-        }
-      }
-
       const result = await window.tantalum.toolchain.saveLocalBoardProfile({
-        ...liveRow.profile,
-        name: liveRow.name || liveRow.profile?.name,
-        fqbn: liveRow.fqbn,
-        boardLabel: liveRow.boardLabel,
-        port: liveRow.port,
-        protocol: liveRow.protocol,
-        protocolLabel: liveRow.protocolLabel,
-        manufacturer: liveRow.manufacturer,
-        vendorId: liveRow.vendorId,
-        productId: liveRow.productId,
-        serialNumber: liveRow.serialNumber,
-        pnpId: liveRow.pnpId,
-        locationId: liveRow.locationId,
-        fingerprint: liveRow.fingerprint,
+        ...row.profile,
+        name: row.name || row.profile?.name,
+        fqbn: row.fqbn,
+        boardLabel: row.boardLabel,
+        port: row.port,
+        protocol: row.protocol,
+        protocolLabel: row.protocolLabel,
+        manufacturer: row.manufacturer,
+        vendorId: row.vendorId,
+        productId: row.productId,
+        serialNumber: row.serialNumber,
+        pnpId: row.pnpId,
+        locationId: row.locationId,
+        fingerprint: row.fingerprint,
         cloudBoardId: board.$id,
         cloudLinkedAt: new Date().toISOString(),
       });
@@ -7942,25 +8057,9 @@ export function IDEWorkspace({
       setSelectedLocalBoardId(result.profile.id);
       setSelectedBoardId(board.$id);
       if (!options.quiet) {
-        pushToast(`${board.name} linked to ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}.`, 'success');
-      }
-      if (options.installRuntime && liveRow.connected && liveRow.port) {
-        const installResult = await installTantalumCloudRuntime({
-          board,
-          port: liveRow.port,
-          profile: result.profile,
-          localBoard: {
-            ...liveRow,
-            profile: result.profile,
-            profileId: result.profile.id,
-            cloudBoardId: board.$id,
-            cloudLinkedAt: result.profile.cloudLinkedAt,
-          },
-          busyActionId: `install-cloud-runtime:${row.key}`,
+        pushToast(`${board.name} linked to ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}.`, 'success', undefined, {
+          detail: 'Linked. Install Tantalum Cloud only when you want to flash the runtime.',
         });
-        if (!installResult && !options.quiet) {
-          pushToast('Local board linked. Tantalum Cloud install is still needed.', 'info');
-        }
       }
       return result.profile;
     } catch (error) {
@@ -7982,7 +8081,7 @@ export function IDEWorkspace({
       return;
     }
 
-    await linkLocalBoardToCloud(row, selectedBoard, { installRuntime: true });
+    await linkLocalBoardToCloud(row, selectedBoard);
   }
 
   const processPendingSelectedLocalCloudLink = useEffectEvent(async (request: { profileId: string; boardId: string }) => {
@@ -7998,7 +8097,7 @@ export function IDEWorkspace({
       return;
     }
 
-    await linkLocalBoardToCloud(row, board, { installRuntime: true });
+    await linkLocalBoardToCloud(row, board);
   });
 
   useEffect(() => {
@@ -8044,12 +8143,18 @@ export function IDEWorkspace({
 
     setUsbWifiProfileId(row.profileId);
     setUsbWifiForm({ ssid: '', password: '' });
+    setUsbWifiPasswordVisible(false);
     setUsbWifiModalOpen(true);
   }
 
   async function handleInstallTantalumCloudForLocalBoard(row: LocalBoardRow, board: BoardDocument | null) {
     if (!row.profileId || !row.profile || !board) {
       pushToast('Link this local board to a cloud board before installing Tantalum Cloud.', 'info');
+      return;
+    }
+
+    if (!confirmTantalumCloudRuntimeFlash(board, row)) {
+      pushToast('Tantalum Cloud install cancelled.', 'info');
       return;
     }
 
@@ -8106,7 +8211,19 @@ export function IDEWorkspace({
         return;
       }
 
+      const serialReady = await ensureUsbSerialPortReady({
+        port: resolution.row.port,
+        title: 'Serial port in use',
+        subtitle: `Stop serial connections on ${resolution.row.port} before sending WiFi credentials to ${localBoardDisplayName(resolution.row)}.`,
+        continueLabel: 'Continue WiFi setup',
+        cancelMessage: 'WiFi over USB cancelled.',
+      });
+      if (!serialReady) {
+        return;
+      }
+
       const targetCloudBoardId = usbWifiTargetRow.cloudBoardId;
+      pushConsole('Sending WiFi credentials over USB.', 'info');
       const result = await window.tantalum.toolchain.provisionBoardWifiUsb({
         boardId: targetCloudBoardId,
         port: resolution.row.port,
@@ -8115,6 +8232,7 @@ export function IDEWorkspace({
       });
 
       setUsbWifiForm({ ssid: '', password: '' });
+      setUsbWifiPasswordVisible(false);
 
       if (!result.success) {
         throw new Error(result.error);
@@ -8135,6 +8253,7 @@ export function IDEWorkspace({
       void waitForCloudBoardHeartbeat(targetCloudBoardId);
     } catch (error) {
       setUsbWifiForm((current) => ({ ...current, password: '' }));
+      setUsbWifiPasswordVisible(false);
       pushToast(error instanceof Error ? error.message : 'USB WiFi provisioning failed.', 'error');
     } finally {
       setBusyAction(null);
@@ -11488,7 +11607,7 @@ export function IDEWorkspace({
                     Cloud linked
                   </button>
                 ) : likelyCloudBoard ? (
-                  <button className="secondary-button compact" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard, { installRuntime: true })} disabled={linkCloudBusy || !canResolveUsbPort}>
+                  <button className="secondary-button compact" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard)} disabled={linkCloudBusy}>
                     {linkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
                     Link cloud board
                   </button>
@@ -13671,6 +13790,7 @@ export function IDEWorkspace({
           setUsbWifiModalOpen(false);
           setUsbWifiProfileId('');
           setUsbWifiForm({ ssid: '', password: '' });
+          setUsbWifiPasswordVisible(false);
         }}
       >
         <form className="modal-form" onSubmit={handleProvisionWifiOverUsb}>
@@ -13683,7 +13803,25 @@ export function IDEWorkspace({
           </label>
           <label>
             WiFi password
-            <input value={usbWifiForm.password} onChange={(event) => setUsbWifiForm((current) => ({ ...current, password: event.target.value }))} placeholder="Network password" type="password" autoComplete="off" />
+            <div className="password-input-shell">
+              <input
+                value={usbWifiForm.password}
+                onChange={(event) => setUsbWifiForm((current) => ({ ...current, password: event.target.value }))}
+                placeholder="Network password"
+                type={usbWifiPasswordVisible ? 'text' : 'password'}
+                autoComplete="off"
+              />
+              <button
+                className="password-toggle-button"
+                type="button"
+                onClick={() => setUsbWifiPasswordVisible((visible) => !visible)}
+                aria-label={usbWifiPasswordVisible ? 'Hide WiFi password' : 'Show WiFi password'}
+                aria-pressed={usbWifiPasswordVisible}
+                title={usbWifiPasswordVisible ? 'Hide password' : 'Show password'}
+              >
+                {usbWifiPasswordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
           </label>
           <div className="form-actions">
             <button
@@ -13693,6 +13831,7 @@ export function IDEWorkspace({
                 setUsbWifiModalOpen(false);
                 setUsbWifiProfileId('');
                 setUsbWifiForm({ ssid: '', password: '' });
+                setUsbWifiPasswordVisible(false);
               }}
             >
               Cancel
@@ -13786,8 +13925,8 @@ export function IDEWorkspace({
             <button className="secondary-button" type="button" onClick={() => setReleaseModalOpen(false)}>
               Cancel
             </button>
-            <button className="primary-button" type="button" onClick={() => void handleUploadRelease()} disabled={busyAction === 'upload'}>
-              {busyAction === 'upload' ? 'Uploading...' : 'Upload release'}
+            <button className="primary-button" type="button" onClick={() => void handleUploadRelease()} disabled={releaseUploadBusy}>
+              {releaseUploadLabel}
             </button>
           </div>
         </div>
@@ -13961,6 +14100,18 @@ export function IDEWorkspace({
           </div>
         ) : null}
       </Modal>
+
+      <SerialPortBlockerDialog
+        key={serialPreflightDialog?.requestId || 'serial-preflight'}
+        open={Boolean(serialPreflightDialog)}
+        port={serialPreflightDialog?.port || ''}
+        title={serialPreflightDialog?.title}
+        subtitle={serialPreflightDialog?.subtitle}
+        closeLabel="Cancel"
+        continueLabel={serialPreflightDialog?.continueLabel || 'Continue'}
+        onClose={() => finishSerialPreflight(false)}
+        onContinue={() => finishSerialPreflight(true)}
+      />
 
       <SerialPortBlockerDialog
         open={Boolean(serialBlockerDialog)}

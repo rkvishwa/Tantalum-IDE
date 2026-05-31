@@ -5834,8 +5834,8 @@ function generateCloudDocumentId(prefix) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
-function sha256HexBase64(value) {
-  return crypto.createHash("sha256").update(Buffer.from(String(value || ""), "base64")).digest("hex");
+function sha256HexBuffer(value) {
+  return crypto.createHash("sha256").update(Buffer.isBuffer(value) ? value : Buffer.from(value || "")).digest("hex");
 }
 
 function requireCloudConfigForFirmware() {
@@ -6019,7 +6019,8 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     progress: 68,
     filename: compileResult.filename,
   });
-  const checksum = sha256HexBase64(compileResult.binData);
+  const fileBuffer = Buffer.from(compileResult.binData, "base64");
+  const checksum = sha256HexBuffer(fileBuffer);
   updateFirmwareNotification({
     title: `Uploading ${boardName} ${version}`,
     detail: "Uploading firmware to Appwrite storage...",
@@ -6028,7 +6029,6 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     filename: compileResult.filename,
   });
 
-  const fileBuffer = Buffer.from(compileResult.binData, "base64");
   const multipart = buildMultipartBody({
     fields: [
       ["fileId", firmwareId],
@@ -6954,6 +6954,14 @@ function normalizeSerialMonitorBaudRate(value) {
 
 function serialMonitorPortKey(port) {
   return String(port || "").trim().toLowerCase();
+}
+
+function assertSerialMonitorPortAvailable(port, actionLabel) {
+  const portValue = String(port || "").trim();
+  const portKey = serialMonitorPortKey(portValue);
+  if (portKey && activeSerialMonitorPorts.has(portKey)) {
+    throw new Error(`Serial Monitor is open on ${portValue}. Stop Serial Monitor before ${actionLabel}.`);
+  }
 }
 
 function execFileAsync(command, args, options = {}) {
@@ -9155,6 +9163,7 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
     const appwriteConfig = payload?.appwriteConfig;
     const port = String(payload?.port || "").trim();
     const uploadId = String(payload?.uploadId || `cloud-runtime-install:${board?.$id || Date.now()}`);
+    assertSerialMonitorPortAvailable(port, "installing Tantalum Cloud");
 
     if (!board?.$id || !board?.boardType) {
       throw new Error("A valid board payload is required for provisioning.");
@@ -9199,7 +9208,9 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
 ipcMain.handle("toolchain:provision-board-wifi-usb", async (_event, payload = {}) => {
   try {
     const boardId = String(payload.boardId || "").trim();
+    const port = String(payload.port || "").trim();
     const secrets = secretStore?.get(`boards.${boardId}`) ?? null;
+    assertSerialMonitorPortAvailable(port, "sending WiFi over USB");
 
     if (!boardId) {
       throw new Error("A cloud board ID is required.");
@@ -9212,7 +9223,7 @@ ipcMain.handle("toolchain:provision-board-wifi-usb", async (_event, payload = {}
     return await provisioningService.provisionBoardWifiUsb({
       boardId,
       commandSecret: secrets.commandSecret,
-      port: payload.port,
+      port,
       ssid: payload.ssid,
       password: payload.password,
     });

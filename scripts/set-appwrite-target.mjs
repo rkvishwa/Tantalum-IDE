@@ -21,7 +21,7 @@ Usage:
   node scripts/set-appwrite-target.mjs --endpoint https://api.example.com/v1 --project-id tantalum
 
 Also accepts APPWRITE_ENDPOINT and APPWRITE_PROJECT_ID from the environment.
-Updates appwrite.config.json plus renderer env files that already exist.
+Updates appwrite.config.json, the device-gateway public endpoint variable, plus renderer env files that already exist.
 `);
     process.exit(0);
   }
@@ -54,6 +54,29 @@ const configPath = path.join(projectRoot, 'appwrite.config.json');
 const manifest = JSON.parse(await fs.readFile(configPath, 'utf8'));
 manifest.endpoint = endpoint;
 manifest.projectId = projectId;
+
+function upsertFunctionVariable(config, functionId, key, value) {
+  const functions = Array.isArray(config.functions) ? config.functions : [];
+  const targetFunction = functions.find((entry) => entry?.$id === functionId || entry?.name === functionId);
+  if (!targetFunction) {
+    return false;
+  }
+
+  if (!Array.isArray(targetFunction.variables)) {
+    targetFunction.variables = [];
+  }
+
+  const existing = targetFunction.variables.find((entry) => entry?.key === key);
+  if (existing) {
+    existing.value = value;
+  } else {
+    targetFunction.variables.push({ key, value });
+  }
+
+  return true;
+}
+
+upsertFunctionVariable(manifest, 'device-gateway', 'TANTALUM_APPWRITE_PUBLIC_ENDPOINT', endpoint);
 await fs.writeFile(configPath, `${JSON.stringify(manifest, null, 4)}\n`);
 touched.push(path.relative(projectRoot, configPath));
 

@@ -158,7 +158,7 @@ Update the repo target:
 npm run selfhost:set-target -- --endpoint "https://api.yourdomain.com/v1" --project-id "tantalum"
 ```
 
-This updates `appwrite.config.json` and renderer env files that already exist.
+This updates `appwrite.config.json`, the `device-gateway` public endpoint variable, and renderer env files that already exist.
 
 ## 7. Configure Function Secrets
 
@@ -175,6 +175,7 @@ Set these as Appwrite function variables/secrets where relevant:
 - `TANTALUM_BOARD_SECRET_KEK_V1` on `board-admin`.
 - `APPWRITE_DATABASE_ID=697b8f660033fffde4be` on all functions that use databases.
 - Existing collection/bucket/function variables from `README.md`.
+- `TANTALUM_APPWRITE_PUBLIC_ENDPOINT=https://api.yourdomain.com/v1` on `device-gateway`; this must be the public HTTPS Appwrite endpoint used by boards for OTA firmware downloads.
 - MQTT variables only when MQTT is ready; HTTPS heartbeat fallback can run without MQTT.
 
 Do not reuse old testing boards. Create fresh boards after the self-host cutover.

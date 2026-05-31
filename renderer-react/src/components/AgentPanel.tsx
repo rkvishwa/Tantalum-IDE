@@ -1308,6 +1308,15 @@ function asAgentActivityEntries(value: unknown): AgentActivityEntry[] {
   return value.map(asAgentActivityEntry).filter((entry): entry is AgentActivityEntry => Boolean(entry));
 }
 
+function asOptionalStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const items = value.filter((item): item is string => typeof item === 'string');
+  return items.length > 0 ? items : undefined;
+}
+
 function asAgentTaskList(value: unknown): AgentTaskList | null {
   if (!isRecord(value) || !Array.isArray(value.items) || typeof value.id !== 'string') {
     return null;
@@ -1324,6 +1333,12 @@ function asAgentTaskList(value: unknown): AgentTaskList | null {
       newPath: typeof item.newPath === 'string' ? item.newPath : undefined,
       sourceExtension: typeof item.sourceExtension === 'string' ? item.sourceExtension : undefined,
       targetExtension: typeof item.targetExtension === 'string' ? item.targetExtension : undefined,
+      sourceExtensions: asOptionalStringArray(item.sourceExtensions),
+      targetExtensions: asOptionalStringArray(item.targetExtensions),
+      sourcePaths: asOptionalStringArray(item.sourcePaths),
+      excludePaths: asOptionalStringArray(item.excludePaths),
+      deferUntilAfterEdit: item.deferUntilAfterEdit === true,
+      requireSingle: item.requireSingle === true,
       lineStart: typeof item.lineStart === 'number' && Number.isFinite(item.lineStart) ? item.lineStart : undefined,
       lineEnd: typeof item.lineEnd === 'number' && Number.isFinite(item.lineEnd) ? item.lineEnd : undefined,
       contextItemId: typeof item.contextItemId === 'string' ? item.contextItemId : undefined,

@@ -113,6 +113,10 @@
                 {
                     "key": "APPWRITE_FIRMWARE_BUCKET_ID",
                     "value": "firmware_bucket"
+                },
+                {
+                    "key": "TANTALUM_APPWRITE_PUBLIC_ENDPOINT",
+                    "value": "https://api.metl.run/v1"
                 }
             ]
         },

@@ -4,6 +4,7 @@ import { Permission, Query, Role, databases, storage } from './appwrite';
 import { appwriteConfig, hasBoardAdminFunction } from './config';
 import { executeFunction } from './functions';
 import type { BoardDocument, FirmwareDocument } from './models';
+import { base64ToUint8Array, sha256HexBytes } from './utils';
 
 function firmwarePermissions(userId: string) {
   return [
@@ -21,10 +22,9 @@ function firmwareFilePermissions(userId: string) {
   ];
 }
 
-function base64ToFile(base64: string, filename: string) {
-  const binary = atob(base64);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new File([bytes], filename, { type: 'application/octet-stream' });
+function bytesToFirmwareFile(bytes: Uint8Array<ArrayBuffer>, filename: string) {
+  const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new File([data], filename, { type: 'application/octet-stream' });
 }
 
 const FIRMWARE_HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -96,7 +96,6 @@ export async function uploadFirmwareRelease(payload: {
     binData: string;
     binSize: number;
   };
-  checksum: string;
   notes?: string;
   progressId?: string;
   sourceSnapshot?: {
@@ -106,10 +105,13 @@ export async function uploadFirmwareRelease(payload: {
     createdAt: string;
   } | null;
 }) {
+  const firmwareBytes = base64ToUint8Array(payload.compileResult.binData);
+  const firmwareSize = firmwareBytes.byteLength;
+  const checksum = await sha256HexBytes(firmwareBytes);
   const file = await storage.createFile(
     appwriteConfig.firmwareBucketId,
     payload.firmwareId,
-    base64ToFile(payload.compileResult.binData, payload.compileResult.filename),
+    bytesToFirmwareFile(firmwareBytes, payload.compileResult.filename),
     firmwareFilePermissions(payload.user.$id),
     payload.progressId,
   );
@@ -139,8 +141,8 @@ export async function uploadFirmwareRelease(payload: {
       version: payload.version,
       fileId: file.$id,
       filename: payload.compileResult.filename,
-      size: payload.compileResult.binSize,
-      checksum: payload.checksum,
+      size: firmwareSize,
+      checksum,
       uploadedAt: now,
       deployed: true,
       notes: payload.notes ?? '',

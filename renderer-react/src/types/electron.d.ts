@@ -597,6 +597,12 @@ export type AgentTaskItem = {
   newPath?: string;
   sourceExtension?: string;
   targetExtension?: string;
+  sourceExtensions?: string[];
+  targetExtensions?: string[];
+  sourcePaths?: string[];
+  excludePaths?: string[];
+  deferUntilAfterEdit?: boolean;
+  requireSingle?: boolean;
   lineStart?: number;
   lineEnd?: number;
   contextItemId?: string;

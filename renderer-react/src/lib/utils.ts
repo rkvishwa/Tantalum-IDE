@@ -85,8 +85,33 @@ export function safeJsonParse<T>(value: string, fallback: T) {
 export async function sha256Hex(value: string) {
   const encoded = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest('SHA-256', encoded);
+  return digestToHex(digest);
+}
+
+function digestToHex(digest: ArrayBuffer) {
   const bytes = Array.from(new Uint8Array(digest));
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function base64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+export async function sha256HexBytes(bytes: Uint8Array<ArrayBuffer> | ArrayBuffer) {
+  const input = bytes instanceof ArrayBuffer
+    ? bytes
+    : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const digest = await crypto.subtle.digest('SHA-256', input);
+  return digestToHex(digest);
+}
+
+export async function sha256HexBase64(base64: string) {
+  return sha256HexBytes(base64ToUint8Array(base64));
 }
 
 export function generateToken(prefix = 'board') {

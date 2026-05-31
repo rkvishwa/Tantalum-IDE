@@ -9,6 +9,10 @@ import {
   applyAgentOutputPolicy,
   normalizeAgentOutputStyle,
 } from './outputPolicy.js';
+import {
+  createTemperatureRetryRequestBody,
+  isDefaultOnlyTemperatureError,
+} from './requestPolicy.js';
 import { resolveStoredApiKey } from './secretEnvelope.js';
 
 const {
@@ -599,11 +603,7 @@ async function debitCredits(databases, creditAccount, chargedCredits) {
   });
 }
 
-async function callUpstream(provider, requestBody, endpointPath) {
-  const upstreamBody = {
-    ...requestBody,
-    model: provider.model,
-  };
+async function postUpstream(provider, upstreamBody, endpointPath) {
   const headers = {
     Authorization: `Bearer ${provider.apiKey}`,
     'Content-Type': 'application/json',
@@ -638,6 +638,24 @@ async function callUpstream(provider, requestBody, endpointPath) {
   }
 
   return parsed;
+}
+
+async function callUpstream(provider, requestBody, endpointPath) {
+  const upstreamBody = {
+    ...requestBody,
+    model: provider.model,
+  };
+
+  try {
+    return await postUpstream(provider, upstreamBody, endpointPath);
+  } catch (error) {
+    const retryBody = isDefaultOnlyTemperatureError(error) ? createTemperatureRetryRequestBody(upstreamBody) : null;
+    if (!retryBody) {
+      throw error;
+    }
+
+    return postUpstream(provider, retryBody, endpointPath);
+  }
 }
 
 async function handleChatCompletion(req, res) {

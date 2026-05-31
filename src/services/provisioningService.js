@@ -19,26 +19,53 @@ const {
 } = require("../../arduinoHandler");
 
 const ARDUINO_CLI_OUTPUT_MAX_BUFFER = 50 * 1024 * 1024;
+const ESP32_NATIVE_USB_CDC_BOARD_MARKERS = ["esp32c3", "esp32s2", "esp32s3"];
 
-function withEsp32EraseFlashOption(fqbn) {
+function formatUsbWifiSerialError(error, port) {
+  const message = String(error?.message || error || "Serial port error.");
+  const writePortLabel = port ? ` to ${port}` : "";
+  const usePortLabel = port ? ` on ${port}` : "";
+
+  if (/GetOverlappedResult|operation aborted|aborted|cancelled|canceled/i.test(message)) {
+    return `USB WiFi provisioning was interrupted while writing${writePortLabel}. The board may have reset, disconnected, or changed COM ports. Reconnect the board, close any Serial Monitor using the port, run Auto detect if the COM port changed, then try again.`;
+  }
+
+  if (/access denied|busy|permission|in use|cannot open|failed to open/i.test(message)) {
+    return `Could not use the USB serial port${usePortLabel}. Close any Serial Monitor or other serial tool using the port, then try again.`;
+  }
+
+  return message;
+}
+
+function isEsp32NativeUsbCdcBoardId(boardId) {
+  const normalized = String(boardId || "").trim().toLowerCase();
+  return ESP32_NATIVE_USB_CDC_BOARD_MARKERS.some((marker) => normalized === marker || normalized.includes(marker));
+}
+
+function withEsp32CloudRuntimeUploadOptions(fqbn) {
   const value = String(fqbn || "").trim();
   if (!value.startsWith("esp32:")) {
     return value;
   }
 
   const parts = value.split(":");
-  if (parts.length < 4) {
-    return `${value}:EraseFlash=all`;
-  }
-
-  const options = parts.slice(3).join(":");
+  const boardId = String(parts[2] || "").trim().toLowerCase();
+  const enableUsbCdcOnBoot = isEsp32NativeUsbCdcBoardId(boardId);
+  const baseFqbn = parts.slice(0, 3).join(":");
+  const options = parts.length >= 4 ? parts.slice(3).join(":") : "";
   const optionList = options
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean)
-    .filter((entry) => !entry.toLowerCase().startsWith("eraseflash="));
+    .filter((entry) => !entry.toLowerCase().startsWith("eraseflash="))
+    .filter((entry) => !enableUsbCdcOnBoot || !entry.toLowerCase().startsWith("cdconboot="));
+
+  if (enableUsbCdcOnBoot) {
+    optionList.push("CDCOnBoot=cdc");
+  }
+
   optionList.push("EraseFlash=all");
-  return `${parts.slice(0, 3).join(":")}:${optionList.join(",")}`;
+  return `${baseFqbn}:${optionList.join(",")}`;
 }
 
 class ProvisioningService {
@@ -288,7 +315,7 @@ class ProvisioningService {
     let result;
 
     try {
-      const uploadBoardType = withEsp32EraseFlashOption(boardType);
+      const uploadBoardType = withEsp32CloudRuntimeUploadOptions(boardType);
       const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", uploadBoardType, "--port", port, sketchDir];
       if (uploadBoardType !== String(boardType || "").trim()) {
         onProgress?.("Erasing ESP32 flash before installing Tantalum Cloud so stale OTA slots cannot boot old firmware.\n", "stdout");
@@ -453,6 +480,8 @@ class ProvisioningService {
       let settled = false;
       let lineBuffer = "";
       let sendIntervalId = null;
+      let sendDelayId = null;
+      let timeoutId = null;
       const requestLine = `${JSON.stringify(request)}\n`;
       request.password = "";
 
@@ -461,9 +490,16 @@ class ProvisioningService {
           return;
         }
         settled = true;
-        clearTimeout(timeoutId);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        if (sendDelayId) {
+          clearTimeout(sendDelayId);
+          sendDelayId = null;
+        }
         if (sendIntervalId) {
           clearInterval(sendIntervalId);
+          sendIntervalId = null;
         }
         serial.removeAllListeners("data");
         if (serial.isOpen) {
@@ -473,12 +509,23 @@ class ProvisioningService {
         resolve(result);
       };
 
-      const timeoutId = setTimeout(() => {
+      timeoutId = setTimeout(() => {
         settle({
           success: false,
-          error: "The board did not confirm WiFi provisioning over USB. Make sure the Tantalum cloud runtime is flashed and the serial monitor is closed.",
+          error: "The board did not confirm WiFi provisioning over USB. Make sure the Tantalum cloud runtime is flashed, Serial Monitor is closed, and ESP32-S3/C3 boards were installed with USB CDC On Boot enabled.",
         });
       }, 60000);
+
+      serial.on("error", (error) => {
+        if (settled) {
+          return;
+        }
+
+        settle({
+          success: false,
+          error: formatUsbWifiSerialError(error, normalizedPort),
+        });
+      });
 
       serial.on("data", (chunk) => {
         lineBuffer += chunk.toString("utf8");
@@ -530,7 +577,7 @@ class ProvisioningService {
 
       serial.open((error) => {
         if (error) {
-          settle({ success: false, error: error.message });
+          settle({ success: false, error: formatUsbWifiSerialError(error, normalizedPort) });
           return;
         }
 
@@ -538,20 +585,42 @@ class ProvisioningService {
           if (settled) {
             return;
           }
-          serial.write(requestLine, (writeError) => {
-            if (writeError) {
-              settle({ success: false, error: writeError.message });
-              return;
-            }
-            serial.drain((drainError) => {
-              if (drainError) {
-                settle({ success: false, error: drainError.message });
+
+          try {
+            serial.write(requestLine, (writeError) => {
+              if (settled) {
+                return;
+              }
+
+              if (writeError) {
+                settle({ success: false, error: formatUsbWifiSerialError(writeError, normalizedPort) });
+                return;
+              }
+
+              try {
+                serial.drain((drainError) => {
+                  if (settled) {
+                    return;
+                  }
+
+                  if (drainError) {
+                    settle({ success: false, error: formatUsbWifiSerialError(drainError, normalizedPort) });
+                  }
+                });
+              } catch (drainError) {
+                settle({ success: false, error: formatUsbWifiSerialError(drainError, normalizedPort) });
               }
             });
-          });
+          } catch (writeError) {
+            settle({ success: false, error: formatUsbWifiSerialError(writeError, normalizedPort) });
+          }
         };
 
-        setTimeout(() => {
+        sendDelayId = setTimeout(() => {
+          sendDelayId = null;
+          if (settled) {
+            return;
+          }
           writeRequest();
           sendIntervalId = setInterval(writeRequest, 4000);
         }, 2500);
@@ -597,4 +666,9 @@ class ProvisioningService {
   }
 }
 
-module.exports = new ProvisioningService();
+const provisioningService = new ProvisioningService();
+provisioningService._test = {
+  withEsp32CloudRuntimeUploadOptions,
+};
+
+module.exports = provisioningService;

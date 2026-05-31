@@ -10,13 +10,20 @@ type SerialPortBlockerDialogProps = {
   port: string;
   title?: string;
   subtitle?: string;
+  closeLabel?: string;
   retryLabel?: string;
+  continueLabel?: string;
   onClose: () => void;
   onRetry?: () => void;
+  onContinue?: () => void;
 };
 
+function isBlockingSerialPortBlocker(blocker: SerialPortBlocker) {
+  return blocker.kind === 'tantalum-session' || (blocker.kind === 'external-process' && blocker.confidence === 'confirmed');
+}
+
 function blockerActionLabel(blocker: SerialPortBlocker) {
-  return blocker.kind === 'tantalum-session' ? 'Close session' : 'Terminate process';
+  return blocker.kind === 'tantalum-session' ? 'Stop Serial Monitor' : 'Terminate process';
 }
 
 export function SerialPortBlockerDialog({
@@ -24,15 +31,19 @@ export function SerialPortBlockerDialog({
   port,
   title = 'Serial port blockers',
   subtitle,
+  closeLabel = 'Close',
   retryLabel = 'Retry',
+  continueLabel = 'Continue',
   onClose,
   onRetry,
+  onContinue,
 }: SerialPortBlockerDialogProps) {
   const [blockers, setBlockers] = useState<SerialPortBlocker[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(onContinue));
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyBlockerId, setBusyBlockerId] = useState<string | null>(null);
+  const blockingBlockers = blockers.filter(isBlockingSerialPortBlocker);
 
   const loadBlockers = useCallback(async () => {
     const targetPort = port.trim();
@@ -151,11 +162,22 @@ export function SerialPortBlockerDialog({
             Rescan
           </button>
           <button className="secondary-button" type="button" onClick={onClose}>
-            Close
+            {closeLabel}
           </button>
           {onRetry ? (
             <button className="primary-button" type="button" onClick={onRetry} disabled={loading || Boolean(busyBlockerId)}>
               {retryLabel}
+            </button>
+          ) : null}
+          {onContinue ? (
+            <button
+              className="primary-button"
+              type="button"
+              onClick={onContinue}
+              disabled={loading || Boolean(busyBlockerId) || blockingBlockers.length > 0 || Boolean(error)}
+              title={blockingBlockers.length > 0 ? 'Stop the serial monitor or confirmed serial tool before continuing.' : undefined}
+            >
+              {continueLabel}
             </button>
           ) : null}
         </div>

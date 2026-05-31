@@ -2,6 +2,13 @@ import crypto from 'node:crypto';
 
 import { Client, Databases } from 'node-appwrite';
 
+import { buildDownloadUrl } from './otaDownloadUrl.js';
+import {
+  buildTelemetryUpdates,
+  hasPendingDesiredFirmware,
+  shouldOfferUpdate,
+} from './telemetry.js';
+
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
   APPWRITE_FUNCTION_PROJECT_ID,
@@ -45,32 +52,6 @@ function hashToken(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function compareVersions(left, right) {
-  const leftParts = String(left || '0.0.0').split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const rightParts = String(right || '0.0.0').split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const length = Math.max(leftParts.length, rightParts.length);
-
-  for (let index = 0; index < length; index += 1) {
-    const leftValue = leftParts[index] ?? 0;
-    const rightValue = rightParts[index] ?? 0;
-
-    if (leftValue > rightValue) {
-      return 1;
-    }
-
-    if (leftValue < rightValue) {
-      return -1;
-    }
-  }
-
-  return 0;
-}
-
-function buildDownloadUrl(fileId) {
-  const endpoint = APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/$/, '');
-  return `${endpoint}/storage/buckets/${encodeURIComponent(APPWRITE_FIRMWARE_BUCKET_ID)}/files/${encodeURIComponent(fileId)}/download?project=${encodeURIComponent(APPWRITE_FUNCTION_PROJECT_ID)}`;
-}
-
 function readPayload(req) {
   if (req.bodyJson && typeof req.bodyJson === 'object') {
     return req.bodyJson;
@@ -110,23 +91,6 @@ async function resolveDesiredFirmware(databases, board) {
   }
 }
 
-function hasPendingDesiredFirmware(board, payload) {
-  if (!board.desiredFirmwareId) {
-    return false;
-  }
-
-  const deploymentId = board.desiredDeploymentId || board.desiredFirmwareId;
-  if (deploymentId && (payload.lastAppliedDeploymentId === deploymentId || board.lastAppliedDeploymentId === deploymentId)) {
-    return false;
-  }
-
-  if (deploymentId && board.otaStatus === 'failed') {
-    return false;
-  }
-
-  return payload.firmwareId !== board.desiredFirmwareId || Boolean(deploymentId);
-}
-
 function signOtaCommand(apiToken, command) {
   const message = [
     command.deploymentId || '',
@@ -138,27 +102,6 @@ function signOtaCommand(apiToken, command) {
   ].join('\n');
 
   return crypto.createHmac('sha256', apiToken).update(message).digest('hex');
-}
-
-function shouldOfferUpdate(board, firmware, payload) {
-  if (!firmware) {
-    return false;
-  }
-
-  const deploymentId = board.desiredDeploymentId || firmware.$id;
-  if (deploymentId && (payload.lastAppliedDeploymentId === deploymentId || board.lastAppliedDeploymentId === deploymentId)) {
-    return false;
-  }
-
-  if (deploymentId && board.desiredDeploymentId === deploymentId && board.otaStatus === 'failed') {
-    return false;
-  }
-
-  if (payload.firmwareId && payload.firmwareId === firmware.$id && compareVersions(firmware.version, payload.currentVersion) <= 0) {
-    return false;
-  }
-
-  return compareVersions(firmware.version, payload.currentVersion) > 0 || payload.firmwareId !== firmware.$id;
 }
 
 function buildOtaCommand(board, firmware, payload) {
@@ -200,15 +143,7 @@ async function handleHeartbeat(databases, payload, res) {
   const board = await resolveBoard(databases, payload);
   const now = new Date().toISOString();
 
-  const updates = {
-    status: 'online',
-    lastSeen: now,
-    updatedAt: now,
-  };
-
-  if (payload.runtimeVersion) {
-    updates.runtimeVersion = String(payload.runtimeVersion);
-  }
+  const updates = buildTelemetryUpdates(board, payload, now);
 
   await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
   const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload);
@@ -218,16 +153,7 @@ async function handleHeartbeat(databases, payload, res) {
 async function handleCheckUpdate(databases, payload, res) {
   const board = await resolveBoard(databases, payload);
   const now = new Date().toISOString();
-  const updates = {
-    lastUpdateCheckAt: now,
-    lastSeen: now,
-    status: 'online',
-    updatedAt: now,
-  };
-
-  if (payload.runtimeVersion) {
-    updates.runtimeVersion = String(payload.runtimeVersion);
-  }
+  const updates = buildTelemetryUpdates(board, payload, now, { includeLastUpdateCheckAt: true });
 
   await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
   const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload, { resolveFirmware: true });
@@ -249,6 +175,10 @@ async function handleOtaResult(databases, payload, res) {
 
   if (payload.runtimeVersion) {
     updates.runtimeVersion = String(payload.runtimeVersion);
+  }
+
+  if (payload.currentVersion) {
+    updates.firmwareVersion = String(payload.currentVersion);
   }
 
   if (status === 'success') {

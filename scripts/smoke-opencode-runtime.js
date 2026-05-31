@@ -137,6 +137,7 @@ async function runPowerDirectModeSmoke() {
       assert.equal(gatewayCalls.length, 1);
       assert.equal(gatewayCalls[0].mode, "power");
       assert.equal(gatewayCalls[0].request.model, "openai/tantalum-power");
+      assert.equal(Object.prototype.hasOwnProperty.call(gatewayCalls[0].request, "temperature"), false);
     });
   }
 }
@@ -1576,6 +1577,125 @@ async function runApprovedMixedPromptSmoke() {
   });
 }
 
+async function runBulkHelperDeleteKeepInoRouteSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "rgb.ino"), "void setup() {}\nvoid loop() {}\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "rgb_utils.cpp"), '#include "rgb_utils.h"\nvoid setRgb() {}\n', "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "rgb_utils.h"), "void setRgb();\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "rgb_extra.hpp"), "void setExtraRgb();\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt: "delete all cpp, h file and just keep rgb ino file. move required stuffs to one that ino file",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-bulk-helper-delete-keep-ino",
+    });
+
+    assert.equal(route.requiresUserDecision, true);
+    assert.equal(route.decisionKind, "approve_skip");
+    const editTask = route.taskList.items.find((item) => item.kind === "opencode_edit");
+    assert.ok(editTask, "expected an edit task for the kept sketch");
+    assert.equal(editTask.targetPath, "rgb.ino");
+    assert.deepEqual(editTask.sourcePaths.sort(), ["rgb_extra.hpp", "rgb_utils.cpp", "rgb_utils.h"].sort());
+
+    const deleteTasks = route.taskList.items.filter((item) => item.kind === "delete_file");
+    assert.deepEqual(
+      deleteTasks.map((item) => item.targetPath).sort(),
+      ["rgb_extra.hpp", "rgb_utils.cpp", "rgb_utils.h"].sort(),
+    );
+    assert.ok(deleteTasks.every((item) => item.deferUntilAfterEdit === true), "expected helper deletes to wait until after edit");
+  });
+}
+
+async function runHeaderFollowupRouteSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "rgb.ino"), "void setup() {}\nvoid loop() {}\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "rgb_utils.h"), "void setRgb();\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+
+    const route = await manager.route({
+      prompt: "also remove header file and move all logic to ino file",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-header-followup-route",
+    });
+
+    assert.equal(route.requiresUserDecision, true);
+    const deleteTask = route.taskList.items.find((item) => item.kind === "delete_file");
+    const editTask = route.taskList.items.find((item) => item.kind === "opencode_edit");
+    assert.ok(deleteTask, "expected header delete task");
+    assert.equal(deleteTask.targetPath, "rgb_utils.h");
+    assert.equal(deleteTask.deferUntilAfterEdit, true);
+    assert.ok(editTask, "expected edit task to move header logic");
+    assert.equal(editTask.targetPath, "rgb.ino");
+    assert.deepEqual(editTask.sourcePaths, ["rgb_utils.h"]);
+  });
+}
+
+async function runHeaderClarificationSelectionSmoke() {
+  await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
+    await fs.writeFile(path.join(workspaceRoot, "rgb_utils.h"), "void setRgb();\n", "utf8");
+
+    const events = [];
+    const manager = createManager({
+      workspaceRoot,
+      userDataRoot,
+      events,
+      executeGatewayRequest: async () => fakeChatCompletion("not-json"),
+    });
+    const blockedTaskList = {
+      id: "tasks-header-blocked",
+      actionId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      items: [
+        {
+          id: "delete-header-blocked",
+          title: "Delete header",
+          status: "blocked",
+          kind: "delete_file",
+          targetPath: "header",
+          error: "I could not find header in this workspace. Please name the exact file to delete.",
+        },
+      ],
+    };
+
+    const route = await manager.route({
+      prompt: "i mean .h rgb utils file",
+      source: "managed",
+      mode: "fast",
+      intent: "agent",
+      threadId: "smoke-header-clarification-selection",
+      taskList: blockedTaskList,
+    });
+
+    assert.equal(route.engine, "opencode_edit");
+    assert.equal(route.decisionKind, "approve_skip");
+    assert.match(route.userMessage, /rgb_utils\.h/);
+    const deleteTask = route.taskList.items.find((item) => item.kind === "delete_file");
+    assert.ok(deleteTask, "expected clarified header delete task");
+    assert.equal(deleteTask.targetPath, "rgb_utils.h");
+    assert.equal(deleteTask.status, "pending");
+  });
+}
+
 async function runMoveAllInoRouteSmoke() {
   await withTempWorkspace(async ({ workspaceRoot, userDataRoot }) => {
     await fs.writeFile(path.join(workspaceRoot, "blink.ino"), "void setup() {}\n", "utf8");
@@ -2652,6 +2772,9 @@ async function main() {
   await runClarificationSelectionAmbiguousSmoke();
   await runClarificationSelectionRejectsProseSmoke();
   await runApprovedMixedPromptSmoke();
+  await runBulkHelperDeleteKeepInoRouteSmoke();
+  await runHeaderFollowupRouteSmoke();
+  await runHeaderClarificationSelectionSmoke();
   await runMoveAllInoRouteSmoke();
   await runApprovedMoveAllInoSmoke();
   await runMoveDuplicateDestinationSmoke();

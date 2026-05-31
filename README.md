@@ -96,12 +96,13 @@ Live function IDs:
 Function variables:
 
 - `board-admin`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`
-- `device-gateway`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`, `APPWRITE_FIRMWARE_BUCKET_ID`
+- `device-gateway`: `APPWRITE_DATABASE_ID`, `APPWRITE_BOARDS_COLLECTION_ID`, `APPWRITE_FIRMWARE_COLLECTION_ID`, `APPWRITE_FIRMWARE_BUCKET_ID`, `TANTALUM_APPWRITE_PUBLIC_ENDPOINT`
 - `agent-settings`: `APPWRITE_DATABASE_ID` plus agent collection IDs and `AGENT_DEFAULT_MONTHLY_CREDITS`
 - `agent-gateway`: `APPWRITE_DATABASE_ID` plus agent collection IDs and `AGENT_DEFAULT_MONTHLY_CREDITS`
 - `board-detection`: `APPWRITE_DATABASE_ID`, `APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID`, and board-detection cache/usage collection IDs
 - MQTT command variables for `board-admin`: `TANTALUM_MQTT_URL` or `TANTALUM_MQTT_HOST`/`TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_PUBLISHER_USERNAME`, `TANTALUM_MQTT_PUBLISHER_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`. MQTT requires `mqtts://` plus a CA certificate; if these are missing, HTTPS heartbeat fallback remains active.
 - MQTT device subscribe variables for desktop/runtime builds: `TANTALUM_MQTT_HOST`, `TANTALUM_MQTT_PORT`, `TANTALUM_MQTT_DEVICE_USERNAME`, `TANTALUM_MQTT_DEVICE_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
+- `TANTALUM_APPWRITE_PUBLIC_ENDPOINT` must be the public HTTPS Appwrite `/v1` endpoint, for example `https://api.metl.run/v1`; OTA firmware downloads must not use Appwrite's internal function runtime URL.
 - Set `TANTALUM_BOARD_SECRET_KEK_V1` on `board-admin` to encrypt per-board MQTT command secrets. Generate it with the same 32-byte base64 command shown below.
 - AI key functions (`agent-settings`, `agent-gateway`, `board-detection`) also require `TANTALUM_SECRET_KEK_V1` as an Appwrite secret variable. Generate it with:
 

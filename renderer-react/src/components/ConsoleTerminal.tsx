@@ -3,7 +3,7 @@ import { RefreshCcw } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
-import type { UiPreferences } from '@/lib/uiPreferences';
+import { SYSTEM_FONT_FAMILY, type UiPreferences } from '@/lib/uiPreferences';
 import type { TerminalDataEvent, TerminalExitEvent } from '@/types/electron';
 
 type ConsoleTerminalProps = {
@@ -110,7 +110,7 @@ export function ConsoleTerminal({ active, currentFolderPath, uiPreferences }: Co
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: uiPreferences.fontFamily,
+      fontFamily: SYSTEM_FONT_FAMILY,
       fontSize: uiPreferences.fontSize,
       theme: {
         background: '#0b1117',
@@ -150,7 +150,7 @@ export function ConsoleTerminal({ active, currentFolderPath, uiPreferences }: Co
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [uiPreferences.fontFamily, uiPreferences.fontSize]);
+  }, [uiPreferences.fontSize]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -158,10 +158,10 @@ export function ConsoleTerminal({ active, currentFolderPath, uiPreferences }: Co
       return;
     }
 
-    terminal.options.fontFamily = uiPreferences.fontFamily;
+    terminal.options.fontFamily = SYSTEM_FONT_FAMILY;
     terminal.options.fontSize = uiPreferences.fontSize;
     fitTerminal();
-  }, [fitTerminal, uiPreferences.fontFamily, uiPreferences.fontSize]);
+  }, [fitTerminal, uiPreferences.fontSize]);
 
   useEffect(() => {
     const offData = window.tantalum.terminal.onData((event) => {

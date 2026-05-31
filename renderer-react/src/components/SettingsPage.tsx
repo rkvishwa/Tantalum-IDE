@@ -779,16 +779,16 @@ export function SettingsPage({
                   <AlertTriangle size={18} />
                   <div>
                     <h3>Upload safety</h3>
-                    <p>Control whether USB uploads verify the sketch before writing to the board.</p>
+                    <p>Control whether USB and OTA uploads verify the sketch before upload work starts.</p>
                   </div>
                 </div>
                 <div className="settings-row-list">
-                  {renderToggleSetting('verifyBeforeUpload', 'Verify before upload', 'Compile and check the sketch before USB upload starts.')}
+                  {renderToggleSetting('verifyBeforeUpload', 'Verify before upload', 'Compile and check the sketch before USB or OTA upload starts.')}
                   {renderToggleSetting('sourceSnapshotsEnabled', 'Save source snapshots', 'Save compiled source during uploads so View code can restore exact files later.')}
                 </div>
                 {!preferences.verifyBeforeUpload ? (
                   <div className="inline-banner inline-banner-warning arduino-inline-banner">
-                    Direct upload skips the separate Verify step. Bad firmware or incorrect board settings can crash, lock up, or misconfigure attached hardware. Use at your own risk.
+                    Direct uploads skip the separate Verify step. Bad firmware or incorrect board settings can crash, lock up, or misconfigure attached hardware. Use at your own risk.
                   </div>
                 ) : null}
                 {!preferences.sourceSnapshotsEnabled ? (

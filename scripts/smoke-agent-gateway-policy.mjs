@@ -8,6 +8,10 @@ import {
   applyAgentOutputPolicy,
   normalizeAgentOutputStyle,
 } from '../functions/agent-gateway/src/outputPolicy.js';
+import {
+  createTemperatureRetryRequestBody,
+  isDefaultOnlyTemperatureError,
+} from '../functions/agent-gateway/src/requestPolicy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -110,6 +114,24 @@ function runStyleNormalizationSmoke() {
   assertNoLegacyStyleLeak(OUTPUT_STYLE_POLICIES);
 }
 
+function runTemperatureRetryPolicySmoke() {
+  const unsupported = new Error("Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.");
+  assert.equal(isDefaultOnlyTemperatureError(unsupported), true);
+  assert.equal(isDefaultOnlyTemperatureError(new Error('Provider request failed.')), false);
+
+  const original = {
+    model: 'openai/tantalum-power',
+    temperature: 0.2,
+    messages: [{ role: 'user', content: 'Hello' }],
+  };
+  const retry = createTemperatureRetryRequestBody(original);
+  assert.ok(retry);
+  assert.equal(Object.prototype.hasOwnProperty.call(retry, 'temperature'), false);
+  assert.equal(retry.model, original.model);
+  assert.equal(original.temperature, 0.2);
+  assert.equal(createTemperatureRetryRequestBody({ model: 'openai/tantalum-fast' }), null);
+}
+
 async function runPowerModeSourceSmoke() {
   const source = await fs.readFile(path.join(__dirname, '..', 'functions', 'agent-gateway', 'src', 'main.js'), 'utf8');
   assert.match(source, /value === 'power' \|\| value === 'plan' \? 'power' : 'fast'/);
@@ -124,6 +146,7 @@ runChatCompletionsMissingSystemSmoke();
 runResponsesPolicySmoke();
 runCompletionsPolicySmoke();
 runStyleNormalizationSmoke();
+runTemperatureRetryPolicySmoke();
 await runPowerModeSourceSmoke();
 
 console.log('agent gateway output policy smoke checks passed');

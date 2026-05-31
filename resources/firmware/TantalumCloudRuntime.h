@@ -199,6 +199,45 @@ OV+KmalBWQewLK8=
 -----END CERTIFICATE-----
 )EOF";
 
+// Common public root for Let's Encrypt-backed self-hosted Appwrite endpoints.
+static const char TANTALUM_PUBLIC_ISRG_ROOT_X1_CA_CERT[] PROGMEM = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+)EOF";
+
+#if defined(ESP32)
+static volatile int tantalumLastWifiDisconnectReason = 0;
+#endif
+
 #if defined(ESP8266)
 static ESP8266WebServer tantalumProvisioningServer(80);
 static String tantalumPendingSsid;
@@ -233,6 +272,7 @@ public:
 #endif
 
     configureSecureClients();
+    configureWifiDiagnostics();
     connectToWiFi();
     printRuntimeStatus("boot");
     reportPendingOtaResult(true);
@@ -405,7 +445,7 @@ private:
   BearSSL::WiFiClientSecure httpClient;
   BearSSL::WiFiClientSecure mqttSecureClient;
   BearSSL::X509List appwriteCloudTrustAnchor{TANTALUM_APPWRITE_CLOUD_ROOT_CA_CERT};
-  BearSSL::X509List appwriteCustomTrustAnchor{(sizeof(TANTALUM_TLS_CA_CERT) > 1) ? TANTALUM_TLS_CA_CERT : TANTALUM_APPWRITE_CLOUD_ROOT_CA_CERT};
+  BearSSL::X509List appwriteCustomTrustAnchor{(sizeof(TANTALUM_TLS_CA_CERT) > 1) ? TANTALUM_TLS_CA_CERT : TANTALUM_PUBLIC_ISRG_ROOT_X1_CA_CERT};
   BearSSL::X509List mqttTrustAnchor{TANTALUM_MQTT_CA_CERT};
 #endif
 #if TANTALUM_HAS_PUBSUBCLIENT
@@ -509,7 +549,7 @@ private:
       return TANTALUM_TLS_CA_CERT;
     }
 
-    return "";
+    return TANTALUM_PUBLIC_ISRG_ROOT_X1_CA_CERT;
   }
 
   const char* appwriteCaSource() {
@@ -521,7 +561,7 @@ private:
       return "custom TANTALUM_TLS_CA_CERT";
     }
 
-    return "missing";
+    return "public ISRG Root X1 fallback";
   }
 
   bool ensureTlsClockReady() {
@@ -610,8 +650,10 @@ private:
     Serial.println(ESP.getFreeHeap());
     Serial.print("  Current firmware version: ");
     Serial.println(TANTALUM_FIRMWARE_VERSION);
-    Serial.print("  Target OTA version: ");
-    Serial.println((targetVersion != nullptr && strlen(targetVersion) > 0) ? targetVersion : "none");
+    if (targetVersion != nullptr && strlen(targetVersion) > 0) {
+      Serial.print("  Target OTA version: ");
+      Serial.println(targetVersion);
+    }
   }
 
   void configureSecureClients() {
@@ -630,6 +672,122 @@ private:
       handleMqttMessage(topic, payload, length);
     });
 #endif
+  }
+
+  void configureWifiDiagnostics() {
+#if defined(ESP32)
+    WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+      if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        tantalumLastWifiDisconnectReason = static_cast<int>(info.wifi_sta_disconnected.reason);
+      }
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+#endif
+  }
+
+  const char* wifiStatusName(wl_status_t status) {
+    switch (status) {
+      case WL_IDLE_STATUS: return "IDLE";
+      case WL_NO_SSID_AVAIL: return "NO_SSID_AVAIL";
+      case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
+      case WL_CONNECTED: return "CONNECTED";
+      case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+      case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+      case WL_DISCONNECTED: return "DISCONNECTED";
+      default: return "UNKNOWN";
+    }
+  }
+
+  const char* wifiAuthModeName(int authMode) {
+#if defined(ESP32)
+    switch (static_cast<wifi_auth_mode_t>(authMode)) {
+      case WIFI_AUTH_OPEN: return "OPEN";
+      case WIFI_AUTH_WEP: return "WEP";
+      case WIFI_AUTH_WPA_PSK: return "WPA_PSK";
+      case WIFI_AUTH_WPA2_PSK: return "WPA2_PSK";
+      case WIFI_AUTH_WPA_WPA2_PSK: return "WPA_WPA2_PSK";
+      case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2_ENTERPRISE";
+      case WIFI_AUTH_WPA3_PSK: return "WPA3_PSK";
+      case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2_WPA3_PSK";
+      default: return "UNKNOWN";
+    }
+#else
+    (void)authMode;
+    return "UNKNOWN";
+#endif
+  }
+
+  void printWifiScanForSsid(const char* targetSsid) {
+    if (targetSsid == nullptr || strlen(targetSsid) == 0) {
+      return;
+    }
+
+    String target = String(targetSsid);
+    Serial.print("  Scanning for SSID: ");
+    Serial.println(target);
+    WiFi.disconnect(false);
+    delay(300);
+    WiFi.mode(WIFI_STA);
+#if defined(ESP32)
+    int networkCount = WiFi.scanNetworks(false, true);
+#else
+    int networkCount = WiFi.scanNetworks();
+#endif
+    if (networkCount < 0) {
+      Serial.print("  WiFi scan failed: ");
+      Serial.println(networkCount);
+      return;
+    }
+
+    int matchCount = 0;
+    for (int index = 0; index < networkCount; index++) {
+      if (WiFi.SSID(index) != target) {
+        continue;
+      }
+
+      matchCount++;
+      Serial.print("  SSID match ");
+      Serial.print(matchCount);
+      Serial.print(": RSSI ");
+      Serial.print(WiFi.RSSI(index));
+#if defined(ESP32)
+      Serial.print(", channel ");
+      Serial.print(WiFi.channel(index));
+      int authMode = static_cast<int>(WiFi.encryptionType(index));
+      Serial.print(", auth ");
+      Serial.print(authMode);
+      Serial.print(" ");
+      Serial.print(wifiAuthModeName(authMode));
+#endif
+      Serial.println();
+    }
+
+    if (matchCount == 0) {
+      Serial.print("  SSID was not found. Networks visible: ");
+      Serial.println(networkCount);
+    }
+
+    WiFi.scanDelete();
+  }
+
+  void printWifiConnectionFailure(const char* context, const char* targetSsid = nullptr) {
+    wl_status_t status = WiFi.status();
+    Serial.print(context);
+    Serial.print(" WiFi connect failed. Status: ");
+    Serial.print(static_cast<int>(status));
+    Serial.print(" ");
+    Serial.println(wifiStatusName(status));
+#if defined(ESP32)
+    int reason = tantalumLastWifiDisconnectReason;
+    if (reason > 0) {
+      Serial.print("  Disconnect reason: ");
+      Serial.print(reason);
+      Serial.print(" ");
+      Serial.println(WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)));
+    }
+#endif
+    Serial.print("  RSSI: ");
+    Serial.println(WiFi.RSSI());
+    printWifiScanForSsid(targetSsid);
   }
 
   void configureWifiStationIdentity() {
@@ -704,6 +862,7 @@ private:
     }
 
     writeSerialProvisioningStatus("accepted", "");
+    Serial.println("Accepted USB WiFi provisioning command.");
     bool connected = applyWifiCredentials(ssid, password);
     if (connected) {
       Serial.println("WiFi connected from USB provisioning; sending Tantalum heartbeat.");
@@ -745,7 +904,10 @@ private:
     WiFi.disconnect(true);
     delay(250);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     configureWifiStationIdentity();
+    Serial.println("USB provisioning WiFi connect attempt starting.");
+    printWifiScanForSsid(ssid);
 #if defined(ESP8266)
     WiFi.persistent(true);
 #endif
@@ -757,7 +919,12 @@ private:
     }
 
     provisioningActive = false;
-    return WiFi.status() == WL_CONNECTED;
+    if (WiFi.status() == WL_CONNECTED) {
+      return true;
+    }
+
+    printWifiConnectionFailure("USB provisioning", ssid);
+    return false;
   }
 
   bool connectToWiFi() {
@@ -766,13 +933,17 @@ private:
     }
 
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
     configureWifiStationIdentity();
 #if defined(ESP32)
     String savedSsid = preferences.getString("wifi_ssid", "");
     String savedPassword = preferences.getString("wifi_password", "");
     if (savedSsid.length() > 0) {
+      Serial.println("Using USB-provisioned WiFi credentials.");
+      printWifiScanForSsid(savedSsid.c_str());
       WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
     } else {
+      Serial.println("No USB-provisioned WiFi SSID is stored; trying SDK-stored WiFi credentials.");
       WiFi.begin();
     }
 #else
@@ -794,6 +965,7 @@ private:
       return true;
     }
 
+    printWifiConnectionFailure("Stored credentials", savedSsid.c_str());
     Serial.println("Stored WiFi credentials failed; opening provisioning mode.");
     startProvisioning("wifi-failed");
     return false;
@@ -1384,18 +1556,6 @@ private:
     Serial.print(" -> ");
     Serial.println(resolved);
 
-    WiFiClient tcpProbe;
-    if (!tcpProbe.connect(url.host.c_str(), url.port)) {
-      Serial.print(context);
-      Serial.print(" TCP probe failed for ");
-      Serial.print(url.host);
-      Serial.print(":");
-      Serial.println(url.port);
-      tcpProbe.stop();
-      return false;
-    }
-    tcpProbe.stop();
-
     if (!configureAppwriteSecureClient(client)) {
       return false;
     }
@@ -1431,18 +1591,6 @@ private:
     Serial.print(url.host);
     Serial.print(" -> ");
     Serial.println(resolved);
-
-    WiFiClient tcpProbe;
-    if (!tcpProbe.connect(url.host.c_str(), url.port)) {
-      Serial.print(context);
-      Serial.print(" TCP probe failed for ");
-      Serial.print(url.host);
-      Serial.print(":");
-      Serial.println(url.port);
-      tcpProbe.stop();
-      return false;
-    }
-    tcpProbe.stop();
 
     if (!configureAppwriteSecureClient(client)) {
       return false;
@@ -2199,8 +2347,19 @@ private:
       return false;
     }
 
-    if (pendingStatus == "success" && pendingVersion != TANTALUM_FIRMWARE_VERSION) {
-      return false;
+    if (pendingStatus == "success") {
+      bool versionMatches = pendingVersion == TANTALUM_FIRMWARE_VERSION;
+      bool firmwareMatches = pendingFirmware.length() == 0 || pendingFirmware == TANTALUM_FIRMWARE_ID;
+      if (!versionMatches || !firmwareMatches) {
+        pendingStatus = "failed";
+        pendingError = String("OTA success did not boot expected firmware. Running version ") +
+          TANTALUM_FIRMWARE_VERSION + " firmware " + TANTALUM_FIRMWARE_ID +
+          "; expected version " + pendingVersion + " firmware " + pendingFirmware + ".";
+        if (pendingError.length() > 240) {
+          pendingError = pendingError.substring(0, 240);
+        }
+        storePendingOtaResult(pendingDeploy.c_str(), pendingFirmware.c_str(), pendingVersion.c_str(), pendingStatus.c_str(), pendingError.c_str());
+      }
     }
 
     lastPendingOtaResultAt = now;

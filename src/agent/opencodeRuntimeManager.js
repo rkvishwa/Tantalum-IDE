@@ -40,6 +40,7 @@ const DEFAULT_EXCLUDED_NAMES = new Set([
   ".opencode",
   ".opencode.json",
   ".opencode.jsonc",
+  ".opencode-home",
   ".git",
   ".next",
   ".turbo",
@@ -66,6 +67,7 @@ const AGENT_ARTIFACT_PATTERNS = [
   /^\.aider\.tags\.cache(?:\.v\d+)?$/i,
   /^\.aider\.repo\.map$/i,
   /^\.opencode(?:\.jsonc?|\/.*)?$/i,
+  /^\.opencode-home(?:\/.*)?$/i,
 ];
 
 const AGENT_GITIGNORE_LINES = new Set([
@@ -108,6 +110,8 @@ const FAST_PLANNER_TASK_KINDS = new Set(["opencode_edit", "delete_file", "rename
 const TARGET_MATCH_MIN_SCORE = 0.82;
 const TARGET_MATCH_AMBIGUITY_GAP = 0.08;
 const KNOWN_TARGET_EXTENSIONS = new Set(["ino", "c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx", "md", "js", "ts", "tsx", "jsx", "json", "css", "html", "txt", "yml", "yaml", "toml", "py"]);
+const HEADER_TARGET_EXTENSIONS = ["h", "hh", "hpp", "hxx"];
+const SOURCE_HELPER_TARGET_EXTENSIONS = ["c", "cc", "cpp", "cxx", ...HEADER_TARGET_EXTENSIONS];
 const AGENT_STOPPED_ERROR_CODE = "AGENT_RUN_STOPPED";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const RESUMABLE_PENDING_STATUSES = new Set(["pending", "blocked"]);
@@ -368,6 +372,28 @@ function normalizeOptionalLineNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function normalizeExtensionList(value) {
+  const rawValues = Array.isArray(value) ? value : value ? [value] : [];
+  return [
+    ...new Set(
+      rawValues
+        .map((entry) => normalizeExtension(entry))
+        .filter((entry) => entry && KNOWN_TARGET_EXTENSIONS.has(entry)),
+    ),
+  ];
+}
+
+function normalizeRelativePathList(value) {
+  const rawValues = Array.isArray(value) ? value : value ? [value] : [];
+  return [
+    ...new Set(
+      rawValues
+        .map((entry) => normalizeSafeWorkspaceRelativePath(entry))
+        .filter(Boolean),
+    ),
+  ];
+}
+
 function normalizeTaskList(value) {
   if (!value || typeof value !== "object" || !Array.isArray(value.items)) {
     return null;
@@ -389,6 +415,12 @@ function normalizeTaskList(value) {
       newPath: item.newPath ? normalizeRelativePath(item.newPath) : undefined,
       sourceExtension: item.sourceExtension ? normalizeExtension(item.sourceExtension) : undefined,
       targetExtension: item.targetExtension ? normalizeExtension(item.targetExtension) : undefined,
+      sourceExtensions: normalizeExtensionList(item.sourceExtensions),
+      targetExtensions: normalizeExtensionList(item.targetExtensions),
+      sourcePaths: normalizeRelativePathList(item.sourcePaths),
+      excludePaths: normalizeRelativePathList(item.excludePaths),
+      deferUntilAfterEdit: item.deferUntilAfterEdit === true,
+      requireSingle: item.requireSingle === true,
       rootOnly: item.rootOnly === true,
       lineStart: normalizeOptionalLineNumber(item.lineStart),
       lineEnd: normalizeOptionalLineNumber(item.lineEnd),
@@ -563,6 +595,64 @@ function normalizeExtension(value) {
 function isBareExtensionTarget(value) {
   const normalized = normalizeExtension(value);
   return Boolean(normalized && KNOWN_TARGET_EXTENSIONS.has(normalized) && normalized === String(value || "").trim().replace(/^\./, "").toLowerCase());
+}
+
+function describeExtensionList(extensions) {
+  const values = normalizeExtensionList(extensions);
+  if (values.length === 0) {
+    return "files";
+  }
+
+  return values.map((extension) => `.${extension}`).join("/");
+}
+
+function pathHasAnyExtension(relativePath, extensions) {
+  const extension = path.posix.extname(String(relativePath || "")).slice(1).toLowerCase();
+  return normalizeExtensionList(extensions).includes(extension);
+}
+
+function isHeaderFilePhrase(value) {
+  return /\bheaders?\s+files?\b|\bheaders?\b|\.h(?:h|pp|xx)?\b/i.test(String(value || ""));
+}
+
+function normalizeFileSelectionPhrase(value) {
+  let phrase = String(value || "")
+    .trim()
+    .replace(/[.!?]+$/g, "")
+    .replace(/\b(?:i\s+mean|mean|actually|rather|instead|sorry|please)\b/gi, " ")
+    .replace(/\b(?:delete|remove|erase|discard|get\s+rid\s+of|edit|update|change|fix|rename|move)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const explicitExtension = phrase.match(/\.(ino|c|cc|cpp|cxx|h|hh|hpp|hxx|md|js|ts|tsx|jsx|json|css|html|txt|yml|yaml|toml|py)\b/i)?.[1];
+  const wordExtension = phrase.match(/\b(ino|c|cc|cpp|cxx|h|hh|hpp|hxx|md|js|ts|tsx|jsx|json|css|html|txt|yml|yaml|toml|py)\b/i)?.[1];
+  const headerExtension = isHeaderFilePhrase(phrase) ? "h" : "";
+  const extension = normalizeExtension(explicitExtension || wordExtension || headerExtension);
+  const stopWords = new Set([
+    "a",
+    "an",
+    "and",
+    "as",
+    "file",
+    "files",
+    "header",
+    "headers",
+    "sketch",
+    "the",
+    "this",
+    "that",
+  ]);
+
+  if (extension) {
+    const tokens = (phrase.match(/[A-Za-z0-9]+/g) || [])
+      .map((token) => token.toLowerCase())
+      .filter((token) => token !== extension && !stopWords.has(token));
+    if (tokens.length > 0) {
+      return normalizeRelativePath(`${tokens.join("_")}.${extension}`);
+    }
+  }
+
+  return normalizeFilePhraseForCommand(phrase);
 }
 
 function relativePathHasFileExtension(value) {
@@ -1301,6 +1391,141 @@ function inferBulkDeleteFileTask(segment) {
   };
 }
 
+function extractBulkDeleteExtensions(segment) {
+  const text = String(segment || "").trim();
+  if (!/\b(?:all|every)\b/i.test(text) || !hasDeleteIntent(text)) {
+    return [];
+  }
+
+  const match = text.match(/\b(?:delete|remove|erase|discard|get\s+rid\s+of)\s+(?:the\s+)?(?:all|every)\s+(.+?)(?:\s+(?:files?|sketches?)\b|[.!?]|$)/i);
+  const phrase = match?.[1] || "";
+  if (!phrase) {
+    return [];
+  }
+
+  const extensions = new Set();
+  for (const token of phrase.split(/[^A-Za-z0-9.]+/g).map((entry) => entry.trim()).filter(Boolean)) {
+    const normalized = token.replace(/^\.+/, "").toLowerCase();
+    if (normalized === "header" || normalized === "headers") {
+      HEADER_TARGET_EXTENSIONS.forEach((extension) => extensions.add(extension));
+      continue;
+    }
+    const extension = normalizeExtension(normalized);
+    if (SOURCE_HELPER_TARGET_EXTENSIONS.includes(extension)) {
+      if (extension === "h") {
+        HEADER_TARGET_EXTENSIONS.forEach((headerExtension) => extensions.add(headerExtension));
+      } else {
+        extensions.add(extension);
+      }
+    }
+  }
+
+  return [...extensions];
+}
+
+function extractKeepInoTarget(prompt) {
+  const text = String(prompt || "");
+  const explicitPath = text.match(/\bkeep\s+(?:only\s+|just\s+|the\s+)?([A-Za-z0-9_.\-\\/]+\.ino)\b/i)?.[1];
+  if (explicitPath) {
+    return normalizeSafeWorkspaceRelativePath(explicitPath);
+  }
+
+  const phrase = text.match(/\bkeep\s+(?:only\s+|just\s+|the\s+)?(.+?)\s+\.?ino\s+(?:file|sketch)\b/i)?.[1];
+  if (!phrase) {
+    return "";
+  }
+
+  const target = normalizeFilePhraseForCommand(`${phrase} ino file`);
+  return target && path.posix.extname(target).slice(1).toLowerCase() === DEFAULT_SKETCH_EXTENSION ? target : "";
+}
+
+function wantsLogicMovedIntoSketch(prompt) {
+  const normalized = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
+  return (
+    /\b(move|merge|copy|consolidate)\b/.test(normalized) &&
+    /\b(required|needed|logic|code|stuff|stuffs|helpers?)\b/.test(normalized) &&
+    /\b(ino|\.ino|sketch)\b/.test(normalized)
+  );
+}
+
+function createConsolidateIntoSketchTask(prompt, targetPath, sourceExtensions = []) {
+  const targetDescription = targetPath || ".ino sketch";
+  const sourceDescription = sourceExtensions.length > 0 ? `${describeExtensionList(sourceExtensions)} files` : "helper files";
+  return {
+    id: createTaskId("edit"),
+    title: targetPath ? `Move helper logic into ${targetPath}` : "Move helper logic into .ino sketch",
+    status: "pending",
+    kind: "opencode_edit",
+    targetPath: targetPath || undefined,
+    targetExtension: targetPath ? undefined : DEFAULT_SKETCH_EXTENSION,
+    requireSingle: !targetPath,
+    sourceExtensions,
+    instruction: `Move required logic from ${sourceDescription} into ${targetDescription} before those helper files are deleted. Preserve the sketch behavior and remove obsolete helper includes.`,
+  };
+}
+
+function inferBulkDeleteExtensionTasks(prompt, options = {}) {
+  const extensions = extractBulkDeleteExtensions(prompt);
+  if (extensions.length === 0) {
+    return [];
+  }
+
+  const keepTarget = extractKeepInoTarget(prompt) || normalizeSafeWorkspaceRelativePath(options.preferredImplicitEditTargetPath);
+  const shouldEdit = Boolean(keepTarget) || wantsLogicMovedIntoSketch(prompt);
+  const tasks = [];
+  if (shouldEdit) {
+    tasks.push(createConsolidateIntoSketchTask(prompt, keepTarget, extensions));
+  }
+
+  tasks.push({
+    id: createTaskId("delete"),
+    title: `Delete ${describeExtensionList(extensions)} files`,
+    status: "pending",
+    kind: "delete_file",
+    targetExtensions: extensions,
+    deferUntilAfterEdit: shouldEdit,
+  });
+
+  return tasks;
+}
+
+function inferHeaderDeleteTask(segment) {
+  const text = String(segment || "").trim();
+  if (!hasDeleteIntent(text) || /\b(?:all|every)\b/i.test(text) || !isHeaderFilePhrase(text)) {
+    return null;
+  }
+
+  const targetPhrase = text.match(/\b(?:delete|remove|erase|discard|get\s+rid\s+of)\s+(?:the\s+)?(.+?)(?:\s+file\b|$)/i)?.[1] || text;
+  const targetPath = normalizeFileSelectionPhrase(targetPhrase);
+  if (targetPath && relativePathHasFileExtension(targetPath) && pathHasAnyExtension(targetPath, HEADER_TARGET_EXTENSIONS)) {
+    return {
+      id: createTaskId("delete"),
+      title: `Delete ${targetPath}`,
+      status: "pending",
+      kind: "delete_file",
+      targetPath,
+    };
+  }
+
+  return {
+    id: createTaskId("delete"),
+    title: "Delete header file",
+    status: "pending",
+    kind: "delete_file",
+    targetExtensions: HEADER_TARGET_EXTENSIONS,
+    requireSingle: true,
+  };
+}
+
+function inferInoLogicEditTask(segment, options = {}) {
+  if (!wantsLogicMovedIntoSketch(segment)) {
+    return null;
+  }
+
+  const targetPath = extractKeepInoTarget(segment) || normalizeSafeWorkspaceRelativePath(options.preferredImplicitEditTargetPath);
+  return createConsolidateIntoSketchTask(segment, targetPath, []);
+}
+
 function explicitContextPaths(options = {}) {
   const paths = Array.isArray(options.contextRelativePaths) ? options.contextRelativePaths : [];
   return paths.map((entry) => normalizeRelativePath(entry)).filter(Boolean);
@@ -1632,6 +1857,13 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
     ...options,
     defaultMoveDestination: extractFolderCreateDestination(canonicalPrompt),
   };
+  const bulkExtensionTasks = inferBulkDeleteExtensionTasks(canonicalPrompt, {
+    ...options,
+    preferredImplicitEditTargetPath,
+  });
+  if (bulkExtensionTasks.length > 0) {
+    items.push(...bulkExtensionTasks);
+  }
 
   const renameExtensionTask = inferRenameExtensionTask(canonicalPrompt, options);
   if (renameExtensionTask) {
@@ -1648,6 +1880,10 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
   }
 
   for (const segment of renameExtensionTask ? [] : segments) {
+    if (bulkExtensionTasks.length > 0 && (extractBulkDeleteExtensions(segment).length > 0 || wantsLogicMovedIntoSketch(segment))) {
+      continue;
+    }
+
     const moveTarget = inferMoveFileTask(segment, moveOptions);
     if (moveTarget) {
       items.push(moveTarget);
@@ -1657,6 +1893,15 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
     const renameTarget = inferRenameFileTask(segment, options);
     if (renameTarget) {
       items.push(renameTarget);
+      continue;
+    }
+
+    const headerDeleteTarget = inferHeaderDeleteTask(segment);
+    if (headerDeleteTarget) {
+      items.push({
+        ...headerDeleteTarget,
+        deferUntilAfterEdit: headerDeleteTarget.deferUntilAfterEdit || wantsLogicMovedIntoSketch(canonicalPrompt),
+      });
       continue;
     }
 
@@ -1721,6 +1966,15 @@ function planAgentTaskList(prompt, actionId = null, options = {}) {
     const editTarget = inferEditFileTask(segment, options);
     if (editTarget) {
       items.push(editTarget);
+      continue;
+    }
+
+    const logicEditTarget = inferInoLogicEditTask(segment, {
+      ...options,
+      preferredImplicitEditTargetPath,
+    });
+    if (logicEditTarget) {
+      items.push(logicEditTarget);
       continue;
     }
 
@@ -1854,12 +2108,17 @@ function canUseDeleteTaskListAfterPlannerClarification(prompt, taskList) {
   }
 
   const normalized = normalizeTaskList(taskList);
-  return Boolean(normalized?.items?.some((item) => item.status !== "blocked" && item.kind === "delete_file" && (item.targetPath || item.targetExtension)));
+  return Boolean(
+    normalized?.items?.some((item) => item.status !== "blocked" && item.kind === "delete_file" && (item.targetPath || item.targetExtension || item.targetExtensions?.length)),
+  );
 }
 
 function hasBulkSketchDeleteIntent(prompt) {
   const normalizedPrompt = normalizePrompt(canonicalizeCommandVerbsInText(prompt)).toLowerCase();
-  return /\b(delete|remove)\b/.test(normalizedPrompt) && /\b(all|every)\b/.test(normalizedPrompt) && /\b(sketch|sketches|ino|\.ino)\b/.test(normalizedPrompt);
+  return (
+    extractBulkDeleteExtensions(normalizedPrompt).length > 0 ||
+    (/\b(delete|remove)\b/.test(normalizedPrompt) && /\b(all|every)\b/.test(normalizedPrompt) && /\b(sketch|sketches|ino|\.ino)\b/.test(normalizedPrompt))
+  );
 }
 
 function canUseBulkDeleteTaskListAfterPlannerClarification(prompt, taskList) {
@@ -1868,7 +2127,7 @@ function canUseBulkDeleteTaskListAfterPlannerClarification(prompt, taskList) {
   }
 
   const normalized = normalizeTaskList(taskList);
-  return Boolean(normalized?.items?.some((item) => item.status !== "blocked" && item.kind === "delete_file" && item.targetExtension));
+  return Boolean(normalized?.items?.some((item) => item.status !== "blocked" && item.kind === "delete_file" && (item.targetExtension || item.targetExtensions?.length)));
 }
 
 function shouldPreferDeterministicMoveTaskList(prompt, plannerTaskList, deterministicTaskList) {
@@ -1890,11 +2149,17 @@ function shouldPreferDeterministicBulkDeleteTaskList(prompt, plannerTaskList, de
   }
 
   const planner = normalizeTaskList(plannerTaskList);
+  const deterministic = normalizeTaskList(deterministicTaskList);
+  const deterministicHasExtensionGroup = deterministic?.items?.some((item) => item.kind === "delete_file" && item.targetExtensions?.length);
   if (!planner?.items?.length) {
     return true;
   }
 
-  return !planner.items.some((item) => item.kind === "delete_file" && item.targetExtension);
+  if (deterministicHasExtensionGroup && !planner.items.some((item) => item.kind === "delete_file" && item.targetExtensions?.length)) {
+    return true;
+  }
+
+  return !planner.items.some((item) => item.kind === "delete_file" && (item.targetExtension || item.targetExtensions?.length));
 }
 
 function shouldPreferDeterministicDeleteTaskList(prompt, plannerTaskList, deterministicTaskList) {
@@ -1907,7 +2172,7 @@ function shouldPreferDeterministicDeleteTaskList(prompt, plannerTaskList, determ
     return true;
   }
 
-  return !planner.items.some((item) => item.kind === "delete_file" && (item.targetPath || item.targetExtension));
+  return !planner.items.some((item) => item.kind === "delete_file" && (item.targetPath || item.targetExtension || item.targetExtensions?.length));
 }
 
 function deterministicFolderClarification(prompt, deterministicTaskList) {
@@ -1981,6 +2246,22 @@ function shouldPreferPreferredImplicitEditTarget(plannerTaskList, deterministicT
 
 function isDeterministicTaskKind(kind) {
   return ["delete_file", "create_project_structure_doc", "rename_file", "move_file"].includes(kind);
+}
+
+function isRunnableDeterministicTask(item, { deferred } = {}) {
+  if (!item || item.status === "skipped" || item.status === "completed" || !isDeterministicTaskKind(item.kind)) {
+    return false;
+  }
+
+  if (typeof deferred === "boolean") {
+    return item.deferUntilAfterEdit === deferred;
+  }
+
+  return true;
+}
+
+function hasRunnableDeterministicTask(taskList, options = {}) {
+  return Boolean(taskList?.items?.some((item) => isRunnableDeterministicTask(item, options)));
 }
 
 function isRunnableNonDeterministicTask(item) {
@@ -2315,6 +2596,10 @@ class LocalOpenAiBridge {
     if (request.stream !== true) {
       delete request.stream_options;
       delete request.streamOptions;
+    }
+
+    if (this.source === "managed" && this.mode === "power") {
+      delete request.temperature;
     }
 
     return request;
@@ -2723,9 +3008,15 @@ function formatTaskLineRange(item) {
 function formatTaskItemForPrompt(item, index, options = {}) {
   const status = options.includeStatus ? `[${item.status}] ` : "";
   const target = item.targetPath ? ` (${item.targetPath}${formatTaskLineRange(item)}${item.newPath ? ` -> ${item.newPath}` : ""})` : "";
-  const extension = item.targetExtension && !item.targetPath ? ` [target extension: .${item.targetExtension}]` : "";
+  const extension =
+    item.targetExtensions?.length && !item.targetPath
+      ? ` [target extensions: ${describeExtensionList(item.targetExtensions)}]`
+      : item.targetExtension && !item.targetPath
+        ? ` [target extension: .${item.targetExtension}]`
+        : "";
+  const sources = item.sourcePaths?.length ? `\n   Source files to consolidate before deletion: ${item.sourcePaths.slice(0, 12).join(", ")}` : "";
   const instruction = item.instruction ? `\n   Instruction: ${item.instruction}` : "";
-  return `${index + 1}. ${status}${item.title}${target}${extension}${instruction}`;
+  return `${index + 1}. ${status}${item.title}${target}${extension}${sources}${instruction}`;
 }
 
 function resolveOpenCodeContextWindow(mode, fastContextWindow, powerContextWindow) {
@@ -3705,6 +3996,70 @@ class AgentRuntimeManager {
     return `This looks like a ${pendingAction.riskLevel}-risk workspace change. Approve to run it, or skip it.`;
   }
 
+  #taskListFromBlockedTaskSelection(prompt, blockedTask, fallbackTaskList) {
+    const selectionTarget = normalizeFileSelectionPhrase(prompt);
+    if (!selectionTarget) {
+      return null;
+    }
+
+    const normalizedFallback = normalizeTaskList(fallbackTaskList);
+    const baseTaskList =
+      normalizedFallback ||
+      normalizeTaskList({
+        id: createTaskId("tasks"),
+        actionId: null,
+        items: [blockedTask],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    if (!baseTaskList) {
+      return null;
+    }
+
+    let replaced = false;
+    const items = baseTaskList.items.map((item) => {
+      if (replaced || (blockedTask.id && item.id !== blockedTask.id) || item.status !== "blocked") {
+        return item;
+      }
+
+      if (!["delete_file", "rename_file", "move_file", "opencode_edit"].includes(item.kind)) {
+        return item;
+      }
+
+      replaced = true;
+      const next = {
+        ...item,
+        status: "pending",
+        targetPath: selectionTarget,
+        targetExtension: undefined,
+        targetExtensions: [],
+        error: undefined,
+      };
+
+      if (item.kind === "delete_file") {
+        next.title = `Delete ${selectionTarget}`;
+      } else if (item.kind === "rename_file") {
+        next.title = item.newPath ? `Rename ${selectionTarget} to ${item.newPath}` : `Rename ${selectionTarget}`;
+      } else if (item.kind === "move_file") {
+        next.title = item.newPath ? `Move ${selectionTarget} to ${item.newPath}` : `Move ${selectionTarget}`;
+      } else {
+        next.title = `Edit ${selectionTarget}`;
+      }
+
+      return next;
+    });
+
+    if (!replaced) {
+      return null;
+    }
+
+    return normalizeTaskList({
+      ...baseTaskList,
+      items,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
   async #repairWorkspaceAction({
     route,
     prompt,
@@ -3739,6 +4094,32 @@ class AgentRuntimeManager {
 
     if (!workspaceRoot || (!forceClassifier && !looksLikeUncertainWorkspaceAction(prompt) && !blockedTask && !plannerClarification)) {
       return null;
+    }
+
+    const clarifiedTaskList = blockedTask ? this.#taskListFromBlockedTaskSelection(prompt, blockedTask, normalizedFallbackTaskList) : null;
+    if (clarifiedTaskList) {
+      const checkedTaskList = await this.#resolveTaskTargets(workspaceRoot, clarifiedTaskList, payload.threadMemory);
+      const resolvedBlockedTask = checkedTaskList.items.find((item) => item.status === "blocked");
+      if (!resolvedBlockedTask) {
+        const selectedTask = checkedTaskList.items.find((item) => item.id === blockedTask.id) || checkedTaskList.items.find((item) => item.targetPath);
+        const operation = selectedTask?.kind || "opencode_edit";
+        const requiresApproval = ["delete_file", "move_file", "rename_file"].includes(operation);
+        const pendingAction = requiresApproval ? createFallbackPendingAction(prompt, fallbackRiskForOperation(operation)) : null;
+        const taskList = pendingAction ? { ...checkedTaskList, actionId: pendingAction.id } : checkedTaskList;
+        const action = operation === "delete_file" ? "delete" : operation === "move_file" ? "move" : operation === "rename_file" ? "rename" : "change";
+        return {
+          ...route,
+          engine: OPENCODE_EDIT_ENGINE,
+          reason: `${reason || "action_repair"}_selection`,
+          confidence: 0.9,
+          persistThread: true,
+          userMessage: pendingAction && selectedTask?.targetPath ? `I resolved the file to ${selectedTask.targetPath}. Approve to ${action} it, or skip.` : undefined,
+          pendingAction: pendingAction || undefined,
+          requiresUserDecision: Boolean(pendingAction),
+          decisionKind: pendingAction ? "approve_skip" : "none",
+          taskList,
+        };
+      }
     }
 
     const classifier = await this.#classifyUncertainWorkspaceAction({ prompt, payload, workspaceRoot, blockedTask, plannerClarification, referentialFollowup }).catch(() => null);
@@ -4325,9 +4706,8 @@ class AgentRuntimeManager {
       let changes = [];
       let validationBlocked = null;
 
-      const hasDeterministicTasks =
-        intent !== "ask" && activeTaskList.items.some((item) => isDeterministicTaskKind(item.kind) && item.status !== "skipped" && item.status !== "completed");
-      if (hasDeterministicTasks) {
+      const hasPreEditDeterministicTasks = intent !== "ask" && hasRunnableDeterministicTask(activeTaskList, { deferred: false });
+      if (hasPreEditDeterministicTasks) {
         const deterministic = await this.#executeDeterministicTasks({
           workspaceRoot,
           sandboxRoot,
@@ -4335,6 +4715,7 @@ class AgentRuntimeManager {
           threadId,
           actionId,
           signal,
+          phase: "before_edit",
         });
         activeTaskList = deterministic.taskList;
         output = deterministic.output;
@@ -4344,6 +4725,19 @@ class AgentRuntimeManager {
       const needsOpenCode = intent !== "ask" && !deterministicBlocked && hasPendingNonDeterministicTask(activeTaskList);
 
       if (intent !== "ask" && !needsOpenCode) {
+        if (!deterministicBlocked && hasRunnableDeterministicTask(activeTaskList, { deferred: true })) {
+          const deterministic = await this.#executeDeterministicTasks({
+            workspaceRoot,
+            sandboxRoot,
+            taskList: activeTaskList,
+            threadId,
+            actionId,
+            signal,
+            phase: "after_edit",
+          });
+          activeTaskList = deterministic.taskList;
+          output = cleanOpenCodeOutput([output, deterministic.output].filter(Boolean).join("\n\n"));
+        }
         changes = await this.#collectChanges(workspaceRoot, sandboxRoot, skippedPaths, activeSnapshotBaselines);
       } else {
         activeTaskList = this.#markFirstRunnableTask(activeTaskList, "running");
@@ -4433,6 +4827,25 @@ class AgentRuntimeManager {
             output = cleanOpenCodeOutput([output, retryOutput].filter(Boolean).join("\n\n"));
             throwIfAgentStopped(signal);
             emitActivity("running", "Collecting changes", "Scanning sandbox changes after the approved retry.");
+            changes = await this.#collectChanges(workspaceRoot, sandboxRoot, skippedPaths, activeSnapshotBaselines);
+            emitActivity("completed", "Changes collected", `${changes.length} changed file${changes.length === 1 ? "" : "s"} found.`);
+          }
+
+          if (intent !== "ask" && changes.length > 0 && !validationBlocked && hasRunnableDeterministicTask(activeTaskList, { deferred: true })) {
+            emitActivity("running", "Applying deferred file operations", "Deleting helper files after the sketch update has been prepared.");
+            const deterministic = await this.#executeDeterministicTasks({
+              workspaceRoot,
+              sandboxRoot,
+              taskList: activeTaskList,
+              threadId,
+              actionId,
+              signal,
+              phase: "after_edit",
+            });
+            activeTaskList = deterministic.taskList;
+            output = cleanOpenCodeOutput([output, deterministic.output].filter(Boolean).join("\n\n"));
+            throwIfAgentStopped(signal);
+            emitActivity("running", "Collecting changes", "Scanning sandbox changes after deferred file operations.");
             changes = await this.#collectChanges(workspaceRoot, sandboxRoot, skippedPaths, activeSnapshotBaselines);
             emitActivity("completed", "Changes collected", `${changes.length} changed file${changes.length === 1 ? "" : "s"} found.`);
           }
@@ -4686,18 +5099,22 @@ class AgentRuntimeManager {
     }
 
     throwIfAgentStopped(signal);
+    const request = {
+      model,
+      messages: this.#buildDirectMessages(payload),
+      stream: false,
+    };
+    if (!(source === "managed" && mode === "power")) {
+      request.temperature = 0.2;
+    }
+
     const completion = await this.executeGatewayRequest({
       source,
       mode,
       customCredentialId: payload.customCredentialId || null,
       customModelName: payload.customModelName || null,
       apiPath: "/v1/chat/completions",
-      request: {
-        model,
-        messages: this.#buildDirectMessages(payload),
-        temperature: 0.2,
-        stream: false,
-      },
+      request,
     });
     throwIfAgentStopped(signal);
 
@@ -4821,7 +5238,7 @@ class AgentRuntimeManager {
 
   #markFirstRunnableTask(taskList, status, patch = {}) {
     const next = cloneTaskList(taskList);
-    const item = next.items.find((entry) => entry.status === "pending" || entry.status === "blocked");
+    const item = next.items.find((entry) => !isDeterministicTaskKind(entry.kind) && (entry.status === "pending" || entry.status === "blocked"));
     if (!item) {
       return next;
     }
@@ -4835,7 +5252,7 @@ class AgentRuntimeManager {
       ...taskList,
       updatedAt: now,
       items: taskList.items.map((item) =>
-        item.status === "skipped" || item.status === "completed"
+        item.status === "skipped" || item.status === "completed" || isDeterministicTaskKind(item.kind)
           ? item
           : {
               ...item,
@@ -4934,23 +5351,36 @@ class AgentRuntimeManager {
     const expandedItems = [];
 
     for (const item of next.items) {
-      if (item.kind !== "delete_file" || item.targetPath || !item.targetExtension || item.rootOnly !== true) {
+      const extensions = item.targetExtensions?.length ? item.targetExtensions : item.targetExtension ? [item.targetExtension] : [];
+      if (item.kind !== "delete_file" || item.targetPath || extensions.length === 0) {
         expandedItems.push(item);
         continue;
       }
 
-      const extension = normalizeExtension(item.targetExtension);
+      const targetExtensions = normalizeExtensionList(extensions);
+      const excludePaths = new Set(normalizeRelativePathList(item.excludePaths).map((entry) => entry.toLowerCase()));
       const files = await this.#collectFiles(workspaceRoot);
       const candidates = [...files.keys()]
-        .filter((candidate) => path.posix.extname(candidate).slice(1).toLowerCase() === extension)
-        .filter((candidate) => path.posix.dirname(candidate) === ".")
+        .filter((candidate) => pathHasAnyExtension(candidate, targetExtensions))
+        .filter((candidate) => !excludePaths.has(candidate.toLowerCase()))
+        .filter((candidate) => !item.rootOnly || path.posix.dirname(candidate) === ".")
         .sort();
 
       if (candidates.length === 0) {
+        const scope = item.rootOnly ? " in the workspace root" : " in this Project";
         expandedItems.push({
           ...item,
           status: "blocked",
-          error: `I could not find any .${extension} files in the workspace root to delete.`,
+          error: `I could not find any ${describeExtensionList(targetExtensions)} files${scope} to delete.`,
+        });
+        continue;
+      }
+
+      if (item.requireSingle && candidates.length !== 1) {
+        expandedItems.push({
+          ...item,
+          status: "blocked",
+          error: `I found multiple ${describeExtensionList(targetExtensions)} files: ${candidates.slice(0, 8).join(", ")}. Please name the exact file.`,
         });
         continue;
       }
@@ -4961,9 +5391,36 @@ class AgentRuntimeManager {
           id: createTaskId("delete"),
           title: `Delete ${candidate}`,
           targetPath: candidate,
-          rootOnly: undefined,
+          targetExtension: undefined,
+          targetExtensions: [],
+          rootOnly: false,
+          requireSingle: false,
         })),
       );
+    }
+
+    const deferredDeletePaths = expandedItems
+      .filter((item) => item.kind === "delete_file" && item.deferUntilAfterEdit && item.targetPath)
+      .map((item) => normalizeRelativePath(item.targetPath))
+      .filter(Boolean);
+    if (deferredDeletePaths.length > 0) {
+      for (const item of expandedItems) {
+        if (item.kind !== "opencode_edit") {
+          continue;
+        }
+
+        const sourceExtensions = normalizeExtensionList(item.sourceExtensions);
+        const matchingPaths = sourceExtensions.length > 0 ? deferredDeletePaths.filter((sourcePath) => pathHasAnyExtension(sourcePath, sourceExtensions)) : deferredDeletePaths;
+        if (matchingPaths.length === 0) {
+          continue;
+        }
+
+        item.sourcePaths = [...new Set([...(item.sourcePaths || []), ...matchingPaths])];
+        if (!item.instruction || !matchingPaths.every((sourcePath) => item.instruction.includes(sourcePath))) {
+          const sourceLine = `Read and consolidate relevant logic from ${matchingPaths.slice(0, 12).join(", ")} before those files are deleted.`;
+          item.instruction = item.instruction ? `${item.instruction} ${sourceLine}` : sourceLine;
+        }
+      }
     }
 
     return {
@@ -4993,6 +5450,21 @@ class AgentRuntimeManager {
         if (!item.title || item.title === "Apply requested workspace changes") {
           item.title = "Create or update .ino sketch";
         }
+      }
+
+      if (item.kind === "opencode_edit" && !item.targetPath && item.requireSingle && item.targetExtension) {
+        const resolved = await this.#resolveSingleWorkspaceFileByExtension(workspaceRoot, item.targetExtension);
+        if (resolved.status !== "ok") {
+          item.status = "blocked";
+          item.error =
+            resolved.status === "ambiguous"
+              ? `I found multiple .${item.targetExtension} files: ${resolved.candidates.slice(0, 8).join(", ")}. Please name the exact file to edit.`
+              : `I could not find a .${item.targetExtension} file in this Project. Please name the exact file to edit.`;
+          continue;
+        }
+
+        item.targetPath = resolved.path;
+        item.title = item.title && item.title !== "Move helper logic into .ino sketch" ? item.title : `Move helper logic into ${resolved.path}`;
       }
 
       if (item.kind === "rename_file" && !item.targetPath && item.sourceExtension && item.targetExtension) {
@@ -5271,12 +5743,13 @@ class AgentRuntimeManager {
     return { status: "missing", candidates: [] };
   }
 
-  async #executeDeterministicTasks({ workspaceRoot, sandboxRoot, taskList, threadId, actionId, signal }) {
+  async #executeDeterministicTasks({ workspaceRoot, sandboxRoot, taskList, threadId, actionId, signal, phase = "before_edit" }) {
     let nextTaskList = cloneTaskList(taskList);
+    const runDeferred = phase === "after_edit";
 
     for (const item of taskList.items) {
       throwIfAgentStopped(signal);
-      if (item.status === "skipped" || item.status === "completed" || !isDeterministicTaskKind(item.kind)) {
+      if (!isRunnableDeterministicTask(item, { deferred: runDeferred })) {
         continue;
       }
 
@@ -5353,12 +5826,13 @@ class AgentRuntimeManager {
     const deterministicItems = nextTaskList.items.filter((item) => isDeterministicTaskKind(item.kind));
     const blocked = deterministicItems.filter((item) => item.status === "blocked");
     const completed = deterministicItems.filter((item) => item.status === "completed");
+    const pendingDeterministic = deterministicItems.some((item) => item.status === "pending" || item.status === "running");
     const pendingNonDeterministic = hasPendingNonDeterministicTask(nextTaskList);
     const output =
       blocked.length > 0
         ? `Blocked ${blocked.length} task${blocked.length === 1 ? "" : "s"}: ${blocked.map((item) => item.error || item.title).join("; ")}`
         : `Completed ${completed.length} workspace file task${completed.length === 1 ? "" : "s"}.`;
-    this.#emitAgentProgress(threadId, actionId, nextTaskList, blocked.length > 0 ? "blocked" : pendingNonDeterministic ? "running" : "completed");
+    this.#emitAgentProgress(threadId, actionId, nextTaskList, blocked.length > 0 ? "blocked" : pendingDeterministic || pendingNonDeterministic ? "running" : "completed");
 
     return {
       taskList: nextTaskList,
@@ -5496,7 +5970,7 @@ class AgentRuntimeManager {
               tool_call: true,
               attachment: true,
               reasoning: mode === "power",
-              temperature: true,
+              temperature: !(source === "managed" && mode === "power"),
               limit: {
                 context: contextLimit,
                 output: DEFAULT_OPENCODE_OUTPUT_WINDOW,
@@ -5557,7 +6031,7 @@ class AgentRuntimeManager {
     };
   }
 
-  #buildOpenCodeEnv(token, config) {
+  #buildOpenCodeEnv(token, config, sandboxRoot) {
     const env = { ...process.env };
     for (const key of Object.keys(env)) {
       if (/(API_KEY|ACCESS_TOKEN|SECRET|OPENROUTER|GROQ|ANTHROPIC|AZURE_OPENAI|GOOGLE|VERTEX)/i.test(key)) {
@@ -5565,8 +6039,14 @@ class AgentRuntimeManager {
       }
     }
 
+    const homeRoot = path.join(sandboxRoot, ".opencode-home");
     return {
       ...env,
+      HOME: homeRoot,
+      USERPROFILE: homeRoot,
+      XDG_CACHE_HOME: path.join(homeRoot, ".cache"),
+      XDG_CONFIG_HOME: path.join(homeRoot, ".config"),
+      XDG_DATA_HOME: path.join(homeRoot, ".local", "share"),
       NODE_PATH: [path.resolve(__dirname, "..", "..", "node_modules"), env.NODE_PATH].filter(Boolean).join(path.delimiter),
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       OPENCODE_DISABLE_AUTOUPDATE: "true",
@@ -5586,7 +6066,7 @@ class AgentRuntimeManager {
     const port = await this.#findAvailablePort();
     const child = spawn(opencodePath, ["serve", "--hostname=127.0.0.1", `--port=${port}`, "--log-level=ERROR"], {
       cwd: sandboxRoot,
-      env: this.#buildOpenCodeEnv(token, config),
+      env: this.#buildOpenCodeEnv(token, config, sandboxRoot),
       windowsHide: true,
     });
 

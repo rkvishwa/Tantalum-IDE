@@ -4,7 +4,7 @@ import { CircleStop, Link2, LoaderCircle, RefreshCcw, Send, Trash2 } from 'lucid
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
-import type { UiPreferences } from '@/lib/uiPreferences';
+import { SYSTEM_FONT_FAMILY, type UiPreferences } from '@/lib/uiPreferences';
 import type { PortInfo, SerialMonitorCloseEvent, SerialMonitorDataEvent, SerialMonitorErrorEvent } from '@/types/electron';
 
 import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
@@ -228,13 +228,12 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
       return;
     }
 
-    const initialUiPreferences = initialUiPreferencesRef.current;
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: false,
       disableStdin: true,
-      fontFamily: initialUiPreferences.fontFamily,
-      fontSize: initialUiPreferences.fontSize,
+      fontFamily: SYSTEM_FONT_FAMILY,
+      fontSize: initialUiPreferencesRef.current.fontSize,
       theme: {
         background: '#0b1117',
         foreground: '#e3eaf2',
@@ -279,10 +278,10 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
       return;
     }
 
-    terminal.options.fontFamily = uiPreferences.fontFamily;
+    terminal.options.fontFamily = SYSTEM_FONT_FAMILY;
     terminal.options.fontSize = uiPreferences.fontSize;
     fitTerminal();
-  }, [fitTerminal, uiPreferences.fontFamily, uiPreferences.fontSize]);
+  }, [fitTerminal, uiPreferences.fontSize]);
 
   useEffect(() => {
     const offData = window.tantalum.serialMonitor.onData((event) => {

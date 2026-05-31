@@ -3,7 +3,7 @@ import { FolderOpen, Plus, X } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
-import type { UiPreferences } from '@/lib/uiPreferences';
+import { SYSTEM_FONT_FAMILY, type UiPreferences } from '@/lib/uiPreferences';
 import { fileNameFromPath } from '@/lib/utils';
 import type { TerminalDataEvent, TerminalExitEvent } from '@/types/electron';
 
@@ -92,7 +92,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences }: 
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: 'ui-monospace, Consolas, "Cascadia Code", "Cascadia Mono", "Fira Mono", monospace',
+      fontFamily: SYSTEM_FONT_FAMILY,
       fontSize: uiPreferences.fontSize,
       theme: {
         background: '#00000000',
@@ -122,10 +122,11 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences }: 
     });
 
     fitTerminal(sessionId);
-  }, [fitTerminal, uiPreferences.fontFamily, uiPreferences.fontSize]);
+  }, [fitTerminal, uiPreferences.fontSize]);
 
   useEffect(() => {
     terminalRefs.current.forEach((terminal, sessionId) => {
+      terminal.options.fontFamily = SYSTEM_FONT_FAMILY;
       terminal.options.fontSize = uiPreferences.fontSize;
       fitTerminal(sessionId);
     });
