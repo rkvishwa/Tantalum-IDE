@@ -86,7 +86,7 @@ async function runNormalAskSmoke() {
     });
 
     const result = await manager.run({
-      prompt: "explain this workspace structure",
+      prompt: "explain this project space structure",
       source: "managed",
       mode: "fast",
       intent: "agent",
@@ -162,7 +162,7 @@ async function runHangingGatewaySmoke() {
       try {
         await Promise.race([
           manager.run({
-            prompt: "explain this workspace structure",
+            prompt: "explain this project space structure",
             source: "managed",
             mode: "fast",
             intent: "agent",
@@ -543,7 +543,7 @@ async function runStandaloneRetryDoesNotUseDirectChatSmoke() {
 
     assert.equal(gatewayCalls, 0, "standalone retry should not call the lightweight chat model");
     assert.equal(result.engine, "local");
-    assert.match(result.output, /previous workspace request/i);
+    assert.match(result.output, /previous project space request/i);
     assert.doesNotMatch(result.output, /running lightweight chat|command prompt|powershell|terminal|file explorer|\b(del|rm)\b/i);
   });
 }
@@ -881,7 +881,7 @@ async function runFastIntentRouterQuestionSmoke() {
       threadId: "smoke-fast-intent-router-question",
     });
 
-    assert.equal(classifierRequests.length, 1, "expected workspace-like direct prompt to use the fast intent router");
+    assert.equal(classifierRequests.length, 1, "expected project-space-like direct prompt to use the fast intent router");
     assert.equal(route.engine, "direct_llm");
     assert.equal(route.requiresUserDecision, false);
     assert.equal(route.taskList, undefined);
@@ -894,7 +894,7 @@ async function runFastIntentRouterQuestionSmoke() {
       threadId: "smoke-fast-intent-router-plain-question",
     });
 
-    assert.equal(classifierRequests.length, 1, "expected plain non-workspace question to skip the fast intent router");
+    assert.equal(classifierRequests.length, 1, "expected plain non-project-space question to skip the fast intent router");
     assert.equal(plainQuestionRoute.engine, "direct_llm");
   });
 }
@@ -932,7 +932,7 @@ async function runFastIntentRouterLowConfidenceSmoke() {
       threadId: "smoke-fast-intent-router-low-confidence",
     });
 
-    assert.equal(classifierRequests.length, 1, "expected low-confidence workspace-like prompt to use the fast intent router");
+    assert.equal(classifierRequests.length, 1, "expected low-confidence project-space-like prompt to use the fast intent router");
     assert.equal(route.engine, "local");
     assert.equal(route.decisionKind, "clarify");
     assert.match(route.userMessage, /create agent\.md/i);
@@ -1020,7 +1020,7 @@ async function runReferentialFollowupNoActionClarificationSmoke() {
             candidatePath: "",
             candidateSource: "none",
             confidence: 0.42,
-            clarification: "What workspace change should I apply?",
+            clarification: "What project space change should I apply?",
             instruction: "",
           }),
         );
@@ -1042,7 +1042,7 @@ async function runReferentialFollowupNoActionClarificationSmoke() {
     assert.equal(classifierRequests.length, 1, "expected referential follow-up classifier");
     assert.equal(route.engine, "local");
     assert.equal(route.decisionKind, "clarify");
-    assert.match(route.userMessage, /workspace change/i);
+    assert.match(route.userMessage, /project space change/i);
   });
 }
 
@@ -1478,7 +1478,7 @@ async function runClarificationSelectionRejectsProseSmoke() {
           status: "blocked",
           kind: "delete_file",
           targetPath: "sensor.ino",
-          error: "I could not find sensor.ino in this workspace. Please name the exact file to delete.",
+          error: "I could not find sensor.ino in this project space. Please name the exact file to delete.",
         },
       ],
       createdAt: now,
@@ -1672,7 +1672,7 @@ async function runHeaderClarificationSelectionSmoke() {
           status: "blocked",
           kind: "delete_file",
           targetPath: "header",
-          error: "I could not find header in this workspace. Please name the exact file to delete.",
+          error: "I could not find header in this project space. Please name the exact file to delete.",
         },
       ],
     };
@@ -1935,7 +1935,7 @@ async function runDeleteRootSketchFilesEmptySmoke() {
 
     assert.equal(route.engine, "local");
     assert.equal(route.decisionKind, "clarify");
-    assert.match(route.userMessage, /could not find any \.ino files in the workspace root/i);
+    assert.match(route.userMessage, /could not find any \.ino files in the Project Space root/i);
   });
 }
 
@@ -2735,7 +2735,7 @@ async function runPermissionActivitySmoke() {
   assert.match(runtimeSource, /mode === "power" \? DEFAULT_OPENCODE_POWER_TIMEOUT_MS : DEFAULT_OPENCODE_FAST_TIMEOUT_MS/);
   assert.match(runtimeSource, /Retrying file edit/);
   assert.match(runtimeSource, /buildNoDiffRetryPrompt/);
-  assert.match(runtimeSource, /The previous response did not modify any workspace files/);
+  assert.match(runtimeSource, /The previous response did not modify any project space files/);
   assert.match(runtimeSource, /did not match the applied agent change after writing/);
   assert.match(runtimeSource, /still exists after the agent delete was applied/);
   assert.doesNotMatch(runtimeSource, /CAVEMAN_OUTPUT_STYLE_FALLBACK/);

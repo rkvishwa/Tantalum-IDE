@@ -1689,7 +1689,7 @@ function validateSourceSnapshotManifestForIdentity(manifest = {}, identity = {},
 
   if (isLikelyBroadWorkspaceSnapshot(manifest, metadata)) {
     report.unsafeScope = true;
-    report.reason = "Source snapshot appears to contain a whole workspace instead of the uploaded sketch. Upload this sketch again to replace the stale broad snapshot.";
+    report.reason = "Source snapshot appears to contain a whole Project Space instead of the uploaded sketch. Upload this sketch again to replace the stale broad snapshot.";
     return report;
   }
 

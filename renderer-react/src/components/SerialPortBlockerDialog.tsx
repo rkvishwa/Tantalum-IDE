@@ -4,6 +4,7 @@ import { AlertTriangle, CircleStop, LoaderCircle, RefreshCcw, SearchX } from 'lu
 import type { SerialPortBlocker } from '@/types/electron';
 
 import { Modal } from './Modal';
+import { useConfirm } from './ConfirmProvider';
 
 type SerialPortBlockerDialogProps = {
   open: boolean;
@@ -38,6 +39,7 @@ export function SerialPortBlockerDialog({
   onRetry,
   onContinue,
 }: SerialPortBlockerDialogProps) {
+  const { confirm } = useConfirm();
   const [blockers, setBlockers] = useState<SerialPortBlocker[]>([]);
   const [loading, setLoading] = useState(Boolean(onContinue));
   const [message, setMessage] = useState<string | null>(null);
@@ -84,7 +86,12 @@ export function SerialPortBlockerDialog({
     }
 
     if (blocker.kind === 'external-process') {
-      const confirmed = window.confirm(`Terminate ${blocker.name}${blocker.pid ? ` (${blocker.pid})` : ''}? Unsaved output in that serial tool may be lost.`);
+      const confirmed = await confirm({
+        message: `Terminate ${blocker.name}${blocker.pid ? ` (${blocker.pid})` : ''}?`,
+        detail: 'Unsaved output in that serial tool may be lost.',
+        tone: 'warning',
+        confirmLabel: 'Terminate',
+      });
       if (!confirmed) {
         return;
       }
@@ -101,7 +108,7 @@ export function SerialPortBlockerDialog({
     }
 
     await loadBlockers();
-  }, [loadBlockers, port]);
+  }, [confirm, loadBlockers, port]);
 
   return (
     <Modal open={open} title={title} subtitle={subtitle || (port ? `Checking ${port}` : undefined)} onClose={onClose} size="lg">

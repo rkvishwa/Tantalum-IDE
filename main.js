@@ -846,7 +846,7 @@ function addProjectFolder(projectPath) {
   const absolutePath = path.resolve(projectPath);
   const stats = fs.statSync(absolutePath);
   if (!stats.isDirectory()) {
-    throw new Error("Project path must be a directory.");
+    throw new Error("Project Space path must be a directory.");
   }
 
   registerTrustedPath(absolutePath);
@@ -980,7 +980,7 @@ function normalizeToolchainSketchSourcePayload(source) {
     .filter((part) => part !== "." && part !== "..")
     .join("/");
   if (entryFileName.includes("/") || !/\.(ino|pde)$/i.test(entryFileName)) {
-    throw new Error("Project entry must be a root .ino or .pde file.");
+    throw new Error("Project Space entry must be a root .ino or .pde file.");
   }
 
   const dirtyFiles = Array.isArray(source.dirtyFiles) ? source.dirtyFiles : [];
@@ -1159,7 +1159,7 @@ function createGitError(message, code, details = {}) {
 
 function getGitWorkspaceRoot() {
   if (!currentWorkspace) {
-    throw createGitError("Open a Project before using Git.", "NO_WORKSPACE");
+    throw createGitError("Open a Project Space before using Git.", "NO_WORKSPACE");
   }
 
   return currentWorkspace;
@@ -1506,7 +1506,7 @@ async function detectGitOperation(gitDir) {
 
 async function getGitStatus() {
   if (!currentWorkspace) {
-    return createGitStatusState("no-workspace", "Open a Project to use Git.");
+    return createGitStatusState("no-workspace", "Open a Project Space to use Git.");
   }
 
   try {
@@ -1607,6 +1607,114 @@ async function getGitDiff(payload = {}) {
   };
 }
 
+function getGitHubUsernameFromEmail(email) {
+  const normalized = String(email ?? "").trim().toLowerCase();
+  const match = normalized.match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/);
+  return match?.[1] ?? null;
+}
+
+function looksLikeGitHubUsername(value) {
+  const candidate = String(value ?? "").trim();
+  if (!candidate || /\s/.test(candidate)) {
+    return false;
+  }
+
+  return /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(candidate);
+}
+
+function buildGitHubAvatarUrl(username) {
+  return `https://avatars.githubusercontent.com/${encodeURIComponent(username)}?s=44&v=4`;
+}
+
+function getCommitAuthorAvatarUrl(authorEmail, author) {
+  const email = String(authorEmail ?? "").trim();
+  const normalizedEmail = email.toLowerCase();
+  const usernameFromEmail = getGitHubUsernameFromEmail(normalizedEmail);
+  if (usernameFromEmail) {
+    return buildGitHubAvatarUrl(usernameFromEmail);
+  }
+
+  const authorName = String(author ?? "").trim();
+  if (looksLikeGitHubUsername(authorName)) {
+    return buildGitHubAvatarUrl(authorName);
+  }
+
+  if (!email) {
+    return "";
+  }
+
+  const gravatarHash = crypto.createHash("md5").update(normalizedEmail).digest("hex");
+  return `https://www.gravatar.com/avatar/${gravatarHash}?s=44&d=404`;
+}
+
+const avatarDataUrlCache = new Map();
+const AVATAR_FETCH_TIMEOUT_MS = 8000;
+
+function isAllowedAvatarUrl(url) {
+  try {
+    const parsed = new URL(String(url ?? "").trim());
+    if (parsed.protocol !== "https:") {
+      return false;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === "avatars.githubusercontent.com" ||
+      host.endsWith(".githubusercontent.com") ||
+      host === "www.gravatar.com" ||
+      host === "gravatar.com" ||
+      host === "github.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function fetchAvatarDataUrl(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  if (!normalizedUrl || !isAllowedAvatarUrl(normalizedUrl)) {
+    return "";
+  }
+
+  if (avatarDataUrlCache.has(normalizedUrl)) {
+    return avatarDataUrlCache.get(normalizedUrl);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AVATAR_FETCH_TIMEOUT_MS);
+    const response = await fetch(normalizedUrl, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Tantalum-IDE",
+        Accept: "image/*"
+      }
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return "";
+    }
+
+    const contentType = String(response.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.startsWith("image/")) {
+      return "";
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length) {
+      return "";
+    }
+
+    const dataUrl = `data:${contentType.split(";")[0]};base64,${buffer.toString("base64")}`;
+    avatarDataUrlCache.set(normalizedUrl, dataUrl);
+    return dataUrl;
+  } catch {
+    return "";
+  }
+}
+
 async function getGitLog(limit = 80) {
   const normalizedLimit = Math.max(1, Math.min(250, Number.parseInt(limit, 10) || 80));
   const prettyFormat = "%x1e%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%D%x1f%S%x1f%s";
@@ -1673,6 +1781,7 @@ async function getGitLog(limit = 80) {
         subject: subject || "(no commit message)",
         author: author || "",
         authorEmail: authorEmail || "",
+        authorAvatarUrl: getCommitAuthorAvatarUrl(authorEmail, author),
         date: date || "",
         refs: refs || "",
         branch: branch || "",
@@ -2905,7 +3014,7 @@ async function readAgentContextFile(payload = {}) {
 
 function ensureActiveWorkspace() {
   if (!currentWorkspace) {
-    throw new Error("Open a Project before searching.");
+    throw new Error("Open a Project Space before searching.");
   }
 
   return currentWorkspace;
@@ -5027,12 +5136,12 @@ async function resolveBoardCodeDestination(destination = {}, boardName = "board"
 
   const rawWorkspacePath = String(destination.workspacePath || currentWorkspace || "").trim();
   if (!rawWorkspacePath) {
-    throw new Error("Open a Project before writing extracted code into the current Project.");
+    throw new Error("Open a Project Space before writing extracted code into the current Project Space.");
   }
   const workspacePath = path.resolve(rawWorkspacePath);
   const stats = await fsPromises.stat(workspacePath);
   if (!stats.isDirectory()) {
-    throw new Error("Current Project path is not a directory.");
+    throw new Error("Current Project Space path is not a directory.");
   }
   const outputDir = path.join(workspacePath, "extracted-board-code", boardCodeService.defaultExtractionFolderName(boardName));
   await fsPromises.mkdir(outputDir, { recursive: true });
@@ -6695,14 +6804,14 @@ function createMenu() {
         })),
         { type: "separator" },
         {
-          label: "Clear Recent Folders",
+          label: "Clear Recent Project Spaces",
           click: () => {
             preferenceStore?.set("recentWorkspaces", []);
             createMenu();
           }
         }
       ]
-    : [{ label: "No Recent Folders", enabled: false }];
+    : [{ label: "No Recent Project Spaces", enabled: false }];
 
   const recentFilesSubmenu = getRecentFiles().length
     ? [
@@ -6743,11 +6852,11 @@ function createMenu() {
       submenu: [
         { label: "New File", accelerator: "CmdOrCtrl+N", click: () => sendMenuAction({ type: "new-file" }) },
         { label: "Open File...", accelerator: "CmdOrCtrl+O", click: () => sendMenuAction({ type: "open-file" }) },
-        { label: "Open Project...", accelerator: "CmdOrCtrl+Shift+O", click: () => sendMenuAction({ type: "open-folder" }) },
+        { label: "Open Project Space...", accelerator: "CmdOrCtrl+Shift+O", click: () => sendMenuAction({ type: "open-folder" }) },
         {
           label: "Open Recent",
           submenu: [
-            { label: "Projects", submenu: recentWorkspacesSubmenu },
+            { label: "Project Spaces", submenu: recentWorkspacesSubmenu },
             { label: "Files", submenu: recentFilesSubmenu }
           ]
         },
@@ -6756,7 +6865,7 @@ function createMenu() {
         { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenuAction({ type: "save-file" }) },
         { label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", click: () => sendMenuAction({ type: "save-file-as" }) },
         { type: "separator" },
-        { label: "Show Project Folder", accelerator: "CmdOrCtrl+K", click: () => sendMenuAction({ type: "show-sketch-folder" }) },
+        { label: "Show Project Space Folder", accelerator: "CmdOrCtrl+K", click: () => sendMenuAction({ type: "show-sketch-folder" }) },
         { type: "separator" },
         isMac ? { role: "close" } : { role: "quit" }
       ]
@@ -6829,7 +6938,7 @@ function createMenu() {
 
 function getDefaultTerminalCwd() {
   const homePath = app.getPath("home") || process.cwd();
-  return path.parse(homePath).root || process.cwd();
+  return homePath || process.cwd();
 }
 
 function normalizeContextMenuCoordinate(value) {
@@ -6922,6 +7031,265 @@ function resolveTerminalWorkingDirectory(targetPath) {
 
   const stats = fs.statSync(candidatePath);
   return stats.isDirectory() ? candidatePath : path.dirname(candidatePath);
+}
+
+function pathIsExecutable(candidatePath) {
+  if (typeof candidatePath !== "string" || candidatePath.trim().length === 0) {
+    return false;
+  }
+
+  try {
+    fs.accessSync(candidatePath, fs.constants.X_OK);
+    return fs.statSync(candidatePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function findExecutableOnPath(commandName) {
+  const command = String(commandName || "").trim();
+  if (!command) {
+    return null;
+  }
+
+  if (path.isAbsolute(command) && pathIsExecutable(command)) {
+    return command;
+  }
+
+  const pathEntries = String(process.env.PATH || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+      .split(";")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+    : [""];
+  const commandHasExtension = Boolean(path.extname(command));
+
+  for (const pathEntry of pathEntries) {
+    const candidates = process.platform === "win32" && !commandHasExtension
+      ? extensions.map((extension) => path.join(pathEntry, `${command}${extension}`))
+      : [path.join(pathEntry, command)];
+
+    for (const candidate of candidates) {
+      if (pathIsExecutable(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+}
+
+function firstExistingExecutable(candidates) {
+  for (const candidate of candidates) {
+    if (pathIsExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function createTerminalShellProfile(profile) {
+  return {
+    id: String(profile.id),
+    label: String(profile.label),
+    shell: String(profile.shell),
+    args: Array.isArray(profile.args) ? profile.args.map((arg) => String(arg)) : [],
+    kind: String(profile.kind || "posix"),
+  };
+}
+
+function addUniqueTerminalProfile(profiles, seen, profile) {
+  const normalized = createTerminalShellProfile(profile);
+  const key = normalized.id.toLowerCase();
+  if (seen.has(key) || !normalized.shell) {
+    return;
+  }
+
+  seen.add(key);
+  profiles.push(normalized);
+}
+
+function getWindowsWslDistros() {
+  const wslPath = findExecutableOnPath("wsl.exe");
+  if (!wslPath) {
+    return [];
+  }
+
+  try {
+    const result = execFileSyncSafe(wslPath, ["-l", "-q"], { timeout: 5000 });
+    return String(result.stdout || "")
+      .replace(/\0/g, "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line, index, items) => items.findIndex((entry) => entry.toLowerCase() === line.toLowerCase()) === index)
+      .map((name) => ({
+        id: `wsl:${name.toLowerCase()}`,
+        label: name,
+        shell: wslPath,
+        args: ["-d", name],
+        kind: "wsl",
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function execFileSyncSafe(command, args, options = {}) {
+  const childProcess = require("node:child_process");
+  return {
+    stdout: childProcess.execFileSync(command, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+      ...options,
+    }),
+  };
+}
+
+function detectTerminalShellProfiles() {
+  const profiles = [];
+  const seen = new Set();
+
+  if (process.platform === "win32") {
+    const powershellPath = firstExistingExecutable([
+      findExecutableOnPath("powershell.exe"),
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    ].filter(Boolean));
+    const pwshPath = findExecutableOnPath("pwsh.exe");
+    const commandPromptPath = firstExistingExecutable([
+      process.env.COMSPEC,
+      findExecutableOnPath("cmd.exe"),
+      "C:\\Windows\\System32\\cmd.exe",
+    ].filter(Boolean));
+    const pathBash = findExecutableOnPath("bash.exe");
+    const gitBashPath = firstExistingExecutable([
+      pathBash && /[\\/]Git[\\/]/i.test(pathBash) ? pathBash : null,
+      "C:\\Program Files\\Git\\bin\\bash.exe",
+      "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+      "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+      "C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe",
+    ].filter(Boolean));
+    const nodePath = findExecutableOnPath("node.exe") || findExecutableOnPath("node");
+
+    if (powershellPath) {
+      addUniqueTerminalProfile(profiles, seen, { id: "powershell", label: "PowerShell", shell: powershellPath, kind: "powershell" });
+    }
+    if (pwshPath) {
+      addUniqueTerminalProfile(profiles, seen, { id: "pwsh", label: "PowerShell 7", shell: pwshPath, kind: "powershell" });
+    }
+    if (commandPromptPath) {
+      addUniqueTerminalProfile(profiles, seen, { id: "cmd", label: "Command Prompt", shell: commandPromptPath, kind: "cmd" });
+    }
+    if (gitBashPath) {
+      addUniqueTerminalProfile(profiles, seen, { id: "git-bash", label: "Git Bash", shell: gitBashPath, kind: "git-bash" });
+    }
+    if (nodePath) {
+      addUniqueTerminalProfile(profiles, seen, { id: "node", label: "Node REPL", shell: nodePath, kind: "node" });
+    }
+    for (const distro of getWindowsWslDistros()) {
+      addUniqueTerminalProfile(profiles, seen, distro);
+    }
+  } else {
+    const shellCandidates = [
+      { id: "user-shell", label: path.basename(process.env.SHELL || "Shell"), shell: process.env.SHELL, kind: "posix" },
+      { id: "zsh", label: "zsh", shell: findExecutableOnPath("zsh"), kind: "posix" },
+      { id: "bash", label: "bash", shell: findExecutableOnPath("bash"), kind: "posix" },
+      { id: "fish", label: "fish", shell: findExecutableOnPath("fish"), kind: "posix" },
+      { id: "sh", label: "sh", shell: findExecutableOnPath("sh"), kind: "posix" },
+      { id: "pwsh", label: "PowerShell", shell: findExecutableOnPath("pwsh"), kind: "powershell" },
+      { id: "node", label: "Node REPL", shell: findExecutableOnPath("node"), kind: "node" },
+    ];
+
+    for (const candidate of shellCandidates) {
+      if (candidate.shell) {
+        addUniqueTerminalProfile(profiles, seen, candidate);
+      }
+    }
+  }
+
+  if (profiles.length === 0) {
+    const fallbackShell = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/sh");
+    addUniqueTerminalProfile(profiles, seen, {
+      id: "default",
+      label: process.platform === "win32" ? "PowerShell" : path.basename(fallbackShell),
+      shell: fallbackShell,
+      kind: process.platform === "win32" ? "powershell" : "posix",
+    });
+  }
+
+  return {
+    profiles,
+    defaultShellId: profiles[0]?.id ?? null,
+  };
+}
+
+function inferTerminalShellKind(shellBinary) {
+  const normalized = String(shellBinary || "").toLowerCase();
+  if (normalized.includes("powershell") || normalized.includes("pwsh")) {
+    return "powershell";
+  }
+  if (normalized.endsWith("cmd.exe") || normalized === "cmd") {
+    return "cmd";
+  }
+  if (normalized.includes("wsl.exe") || normalized === "wsl") {
+    return "wsl";
+  }
+  if (normalized.includes("node.exe") || normalized.endsWith("/node") || normalized === "node") {
+    return "node";
+  }
+  if (normalized.includes("bash")) {
+    return process.platform === "win32" ? "git-bash" : "posix";
+  }
+  return process.platform === "win32" ? "cmd" : "posix";
+}
+
+function quoteSingleShellArg(value) {
+  return `'${String(value || "").replace(/'/g, "'\\''")}'`;
+}
+
+function windowsPathToGitBashPath(targetPath) {
+  const normalized = String(targetPath || "").replace(/\\/g, "/");
+  const driveMatch = normalized.match(/^([a-zA-Z]):\/(.*)$/);
+  if (!driveMatch) {
+    return normalized;
+  }
+
+  return `/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+}
+
+function resolveTerminalShell(options = {}) {
+  const requestedShellId = typeof options.shellId === "string" ? options.shellId.trim() : "";
+  const discovered = detectTerminalShellProfiles();
+  const profile = requestedShellId
+    ? discovered.profiles.find((entry) => entry.id === requestedShellId)
+    : null;
+
+  if (requestedShellId && !profile) {
+    throw new Error("The requested shell is not available on this system.");
+  }
+
+  if (profile) {
+    return profile;
+  }
+
+  if (typeof options.shell === "string" && options.shell.trim().length > 0) {
+    const shell = options.shell.trim();
+    return createTerminalShellProfile({
+      id: "custom",
+      label: path.basename(shell),
+      shell,
+      args: Array.isArray(options.args) ? options.args : [],
+      kind: inferTerminalShellKind(shell),
+    });
+  }
+
+  return discovered.profiles[0];
 }
 
 function createTerminalSessionId() {
@@ -7206,18 +7574,30 @@ async function terminateSerialPortBlocker(payload = {}) {
   return { success: true, port, blockerId, pid: blocker.pid };
 }
 
-function buildTerminalNavigationCommand(shellBinary, targetPath) {
-  const normalizedShell = String(shellBinary || "").toLowerCase();
+function buildTerminalNavigationCommand(session, targetPath) {
+  const shellKind = session?.shellKind || inferTerminalShellKind(session?.shellBinary);
 
-  if (process.platform === "win32") {
-    if (normalizedShell.includes("powershell") || normalizedShell.includes("pwsh")) {
-      return `Set-Location -LiteralPath '${targetPath.replace(/'/g, "''")}'\r`;
-    }
+  if (shellKind === "powershell") {
+    return `Set-Location -LiteralPath '${targetPath.replace(/'/g, "''")}'\r`;
+  }
 
+  if (shellKind === "cmd") {
     return `cd /d "${targetPath.replace(/"/g, '""')}"\r`;
   }
 
-  return `cd -- '${targetPath.replace(/'/g, "'\\''")}'\r`;
+  if (shellKind === "node") {
+    return `process.chdir(${JSON.stringify(targetPath)})\r`;
+  }
+
+  if (shellKind === "wsl") {
+    return `cd "$(wslpath -a ${quoteSingleShellArg(targetPath)})"\r`;
+  }
+
+  if (shellKind === "git-bash") {
+    return `cd ${quoteSingleShellArg(windowsPathToGitBashPath(targetPath))}\r`;
+  }
+
+  return `cd -- ${quoteSingleShellArg(targetPath)}\r`;
 }
 
 function disposeTerminalSession(sessionId) {
@@ -8004,7 +8384,7 @@ ipcMain.handle("fs:set-workspace", async (_event, folderPath) => {
     const stats = await fsPromises.stat(absolutePath);
 
     if (!stats.isDirectory()) {
-      throw new Error("Project path must be a directory.");
+      throw new Error("Project Space path must be a directory.");
     }
 
     setCurrentWorkspace(absolutePath);
@@ -8109,7 +8489,7 @@ ipcMain.handle("projects:update", async (_event, projectId, patch = {}) => {
       const stats = await fsPromises.stat(absolutePath);
 
       if (!stats.isDirectory()) {
-        throw new Error("Project path must be a directory.");
+        throw new Error("Project Space path must be a directory.");
       }
 
       const duplicateProject = projects.find((entry) => entry.id !== projectId && entry.path.toLowerCase() === absolutePath.toLowerCase());
@@ -8507,6 +8887,15 @@ ipcMain.handle("git:get-log", async (_event, payload = {}) => {
   try {
     const commits = await getGitLog(payload.limit);
     return { success: true, commits };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("git:get-avatar-data-url", async (_event, payload = {}) => {
+  try {
+    const dataUrl = await fetchAvatarDataUrl(payload.url);
+    return { success: Boolean(dataUrl), dataUrl };
   } catch (error) {
     return toErrorResult(error);
   }
@@ -9240,6 +9629,14 @@ ipcMain.handle("toolchain:install-esp32-support", async () => {
   }
 });
 
+ipcMain.handle("terminal:list-shells", async () => {
+  try {
+    return { success: true, ...detectTerminalShellProfiles() };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
 ipcMain.handle("terminal:create", async (_event, options = {}) => {
   try {
     if (!pty) {
@@ -9247,13 +9644,11 @@ ipcMain.handle("terminal:create", async (_event, options = {}) => {
     }
 
     const desiredCwd = resolveTerminalWorkingDirectory(options.cwd);
-    const shellBinary =
-      options.shell ||
-      process.env.SHELL ||
-      (process.platform === "win32" ? "powershell.exe" : "/bin/zsh");
+    const shellProfile = resolveTerminalShell(options);
+    const shellBinary = shellProfile.shell;
     const sessionId = createTerminalSessionId();
 
-    const terminalPty = pty.spawn(shellBinary, [], {
+    const terminalPty = pty.spawn(shellBinary, shellProfile.args, {
       name: "xterm-color",
       cols: Number.isInteger(options.cols) ? options.cols : 100,
       rows: Number.isInteger(options.rows) ? options.rows : 28,
@@ -9267,6 +9662,10 @@ ipcMain.handle("terminal:create", async (_event, options = {}) => {
     terminalSessions.set(sessionId, {
       ptyProcess: terminalPty,
       shellBinary,
+      shellArgs: shellProfile.args,
+      shellId: shellProfile.id,
+      shellLabel: shellProfile.label,
+      shellKind: shellProfile.kind,
       cwd: desiredCwd
     });
 
@@ -9283,7 +9682,14 @@ ipcMain.handle("terminal:create", async (_event, options = {}) => {
       });
     });
 
-    return { success: true, sessionId, cwd: desiredCwd, shell: shellBinary };
+    return {
+      success: true,
+      sessionId,
+      cwd: desiredCwd,
+      shell: shellBinary,
+      shellId: shellProfile.id,
+      shellLabel: shellProfile.label,
+    };
   } catch (error) {
     return toErrorResult(error);
   }
@@ -9311,7 +9717,7 @@ ipcMain.handle("terminal:navigate", async (_event, payload = {}) => {
     }
 
     const desiredCwd = resolveTerminalWorkingDirectory(payload.targetPath);
-    session.ptyProcess.write(buildTerminalNavigationCommand(session.shellBinary, desiredCwd));
+    session.ptyProcess.write(buildTerminalNavigationCommand(session, desiredCwd));
     session.cwd = desiredCwd;
 
     return { success: true, cwd: desiredCwd };

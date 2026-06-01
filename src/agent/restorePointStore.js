@@ -153,13 +153,13 @@ class AgentRestorePointStore {
     const currentWorkspace = this.getWorkspaceRoot();
     const requested = String(payload.workspacePath || currentWorkspace || "").trim();
     if (!currentWorkspace || !requested) {
-      throw new Error("Open a workspace before using agent restore points.");
+      throw new Error("Open a Project Space before using agent restore points.");
     }
 
     const resolvedCurrent = path.resolve(currentWorkspace);
     const resolvedRequested = path.resolve(requested);
     if (resolvedCurrent !== resolvedRequested) {
-      throw new Error("Agent restore points are only available for the active workspace.");
+      throw new Error("Agent restore points are only available for the active Project Space.");
     }
 
     return resolvedCurrent;

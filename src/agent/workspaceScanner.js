@@ -61,7 +61,7 @@ class WorkspaceScanner {
         targetPath: null,
         relativePath: ".",
         revision: this.revision,
-        tree: "No workspace is open.",
+        tree: "No Project Space is open.",
         totalEntries: 0,
         truncated: false,
       };
@@ -72,7 +72,7 @@ class WorkspaceScanner {
     const absoluteTargetPath = path.resolve(absoluteRootPath, normalizedRelativePath);
 
     if (!isPathInsideRoot(absoluteTargetPath, absoluteRootPath)) {
-      throw new Error("The requested path is outside the active workspace.");
+      throw new Error("The requested path is outside the active Project Space.");
     }
 
     const cacheKey = `${absoluteRootPath}:${absoluteTargetPath}:${this.revision}`;

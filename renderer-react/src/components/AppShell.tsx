@@ -35,6 +35,7 @@ import {
 } from '@/lib/uiPreferences';
 
 import { IDEWorkspace, type SidebarView } from './IDEWorkspace';
+import { ConfirmProvider } from './ConfirmProvider';
 import { Modal } from './Modal';
 import { SettingsPage, type SettingsTab } from './SettingsPage';
 
@@ -324,7 +325,10 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
   }, []);
 
   useEffect(() => {
-    if (currentView !== 'workspace' || (currentWorkspaceSidebar !== 'git' && currentWorkspaceSidebar !== 'my-projects')) {
+    if (
+      currentView !== 'workspace' ||
+      (currentWorkspaceSidebar !== 'git' && currentWorkspaceSidebar !== 'my-projects' && currentWorkspaceSidebar !== 'terminal')
+    ) {
       return;
     }
 
@@ -502,11 +506,12 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
   };
 
   return (
+    <ConfirmProvider>
     <div className="app-shell-container no-global-sidebar">
       <AppTitleBar
         appName={appName}
         version={version}
-        titleText={currentView === 'settings' ? 'Settings' : workspaceTitle || 'No Project open'}
+        titleText={currentView === 'settings' ? 'Settings' : workspaceTitle || 'No Project Space open'}
         user={user}
         view={currentView}
         leftPanelOpen={leftPanelOpen}
@@ -634,6 +639,7 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
         )}
       </Modal>
     </div>
+    </ConfirmProvider>
   );
 }
 
@@ -833,7 +839,7 @@ function AppTitleBar({
         title: folderPath,
         action: { type: 'open-recent-workspace', folderPath },
       }))
-    : [{ id: 'recent-workspaces-empty', label: 'No Recent Projects', disabled: true }];
+    : [{ id: 'recent-workspaces-empty', label: 'No Recent Project Spaces', disabled: true }];
 
   const recentFileItems: TitlebarMenuItem[] = recentFiles.length
     ? recentFiles.map((filePath) => ({
@@ -851,12 +857,12 @@ function AppTitleBar({
       items: [
         { id: 'new-file', label: 'New File', shortcut: 'Ctrl N', action: { type: 'new-file' } },
         { id: 'open-file', label: 'Open File...', shortcut: 'Ctrl O', action: { type: 'open-file' } },
-        { id: 'open-folder', label: 'Open Project...', shortcut: 'Ctrl Shift O', action: { type: 'open-folder' } },
+        { id: 'open-folder', label: 'Open Project Space...', shortcut: 'Ctrl Shift O', action: { type: 'open-folder' } },
         {
           id: 'open-recent',
           label: 'Open Recent',
           submenu: [
-            { id: 'recent-folders', label: 'Projects', submenu: recentWorkspaceItems },
+            { id: 'recent-folders', label: 'Project Spaces', submenu: recentWorkspaceItems },
             { id: 'recent-files', label: 'Files', submenu: recentFileItems },
           ],
         },
@@ -948,7 +954,7 @@ void loop() {
     },
     {
       id: 'sketch',
-      label: 'Project',
+      label: 'Project Space',
       items: [
         { id: 'compile', label: 'Verify / Compile', shortcut: 'Ctrl R', action: { type: 'compile' } },
         { id: 'upload', label: 'Upload', shortcut: 'Ctrl U', action: { type: 'upload-local' } },
@@ -1082,12 +1088,12 @@ void loop() {
             type="button"
             onClick={onOpenWorkspaceSearch}
             disabled={!workspaceSearchAvailable}
-            title={workspaceSearchAvailable ? 'Search Project' : 'Open a Project to search'}
+            title={workspaceSearchAvailable ? 'Search Project Space' : 'Open a Project Space to search'}
             aria-haspopup="dialog"
             aria-expanded={workspaceSearchOpen}
           >
             <Search size={14} />
-            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open Project to search'}</span>
+            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open Project Space to search'}</span>
             <kbd>Ctrl Shift F</kbd>
           </button>
         ) : (

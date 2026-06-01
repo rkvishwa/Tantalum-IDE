@@ -125,7 +125,7 @@ function intelHexRecord(address, type, data = Buffer.alloc(0)) {
   });
   assert.equal(broadSnapshotValidation.accepted, false);
   assert.equal(broadSnapshotValidation.unsafeScope, true);
-  assert.match(broadSnapshotValidation.reason, /whole workspace/);
+  assert.match(broadSnapshotValidation.reason, /whole Project Space/);
   const workspaceCompiledValidation = boardCodeService.validateSourceSnapshotManifestForIdentity({
     metadata: {
       manifestVersion: 2,

@@ -12,6 +12,7 @@ import type { ArduinoLibraryDirectoryInfo, ArduinoStorageInfo, GitConfiguration,
 
 import { AgentPanel } from './AgentPanel';
 import { Modal } from './Modal';
+import { useConfirm } from './ConfirmProvider';
 
 type SettingsPageProps = {
   appName: string;
@@ -57,6 +58,7 @@ export function SettingsPage({
   onPreferencesChange,
   onResetPreferences,
 }: SettingsPageProps) {
+  const { confirm } = useConfirm();
   const [boards, setBoards] = useState<BoardDocument[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
   const [boardModalOpen, setBoardModalOpen] = useState(false);
@@ -252,7 +254,12 @@ export function SettingsPage({
   }
 
   async function handleClearArduinoStorageFolder() {
-    if (!window.confirm('Use the default Arduino storage location again? Existing files on the other disk will not be deleted.')) {
+    if (!(await confirm({
+      message: 'Use the default Arduino storage location again?',
+      detail: 'Existing files on the other disk will not be deleted.',
+      tone: 'warning',
+      confirmLabel: 'Use default location',
+    }))) {
       return;
     }
 
@@ -332,7 +339,18 @@ export function SettingsPage({
   }
 
   async function handleDeleteBoard() {
-    if (!selectedBoard || !confirm('Delete board?')) return;
+    if (!selectedBoard) {
+      return;
+    }
+
+    if (!(await confirm({
+      message: 'Delete board?',
+      tone: 'danger',
+      confirmLabel: 'Delete board',
+    }))) {
+      return;
+    }
+
     setBusyAction('delete-board');
     try {
       await deleteBoard(selectedBoard.$id);

@@ -10,6 +10,8 @@ import type {
   WorkspaceSearchStats,
 } from '@/types/electron';
 
+import { useConfirm } from './ConfirmProvider';
+
 type WorkspaceSearchPopupProps = {
   open: boolean;
   workspacePath: string | null;
@@ -125,6 +127,7 @@ export function WorkspaceSearchPopup({
   onReplaceApplied,
   onNotify,
 }: WorkspaceSearchPopupProps) {
+  const { confirm } = useConfirm();
   const [query, setQuery] = useState('');
   const [replace, setReplace] = useState('');
   const [mode, setMode] = useState<WorkspaceSearchMode>('all');
@@ -276,7 +279,11 @@ export function WorkspaceSearchPopup({
       return;
     }
 
-    const confirmed = window.confirm(`Replace ${replacePreview.totalMatches} match${replacePreview.totalMatches === 1 ? '' : 'es'} across ${replacePreview.files.length} file${replacePreview.files.length === 1 ? '' : 's'}?`);
+    const confirmed = await confirm({
+      message: `Replace ${replacePreview.totalMatches} match${replacePreview.totalMatches === 1 ? '' : 'es'} across ${replacePreview.files.length} file${replacePreview.files.length === 1 ? '' : 's'}?`,
+      tone: 'warning',
+      confirmLabel: 'Replace all',
+    });
     if (!confirmed) {
       return;
     }
@@ -301,7 +308,7 @@ export function WorkspaceSearchPopup({
 
   return (
     <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="workspace-search-dialog" role="dialog" aria-modal="true" aria-label="Project search" onKeyDown={(event) => void handleKeyDown(event)}>
+      <div className="workspace-search-dialog" role="dialog" aria-modal="true" aria-label="Project Space search" onKeyDown={(event) => void handleKeyDown(event)}>
         <div className="workspace-search-head">
           <Search size={17} />
           <input
@@ -309,7 +316,7 @@ export function WorkspaceSearchPopup({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search files, folders, or text"
-            aria-label="Search Project"
+            aria-label="Search Project Space"
           />
           {searching ? <LoaderCircle size={16} className="spin" /> : null}
           <select className="workspace-search-mode-select" value={mode} onChange={(event) => setMode(event.target.value as WorkspaceSearchMode)} aria-label="Search mode">
@@ -330,7 +337,7 @@ export function WorkspaceSearchPopup({
               W
             </button>
           </div>
-          <button className="workspace-search-close" type="button" onClick={onClose} aria-label="Close Project search">
+          <button className="workspace-search-close" type="button" onClick={onClose} aria-label="Close Project Space search">
             <X size={16} />
           </button>
         </div>
@@ -381,9 +388,9 @@ export function WorkspaceSearchPopup({
           </div>
         ) : null}
 
-        <div className="workspace-search-results" role="listbox" aria-label="Project search results">
+        <div className="workspace-search-results" role="listbox" aria-label="Project Space search results">
           {!query.trim() ? (
-            <div className="workspace-search-empty">Type to search the Project.</div>
+            <div className="workspace-search-empty">Type to search the Project Space.</div>
           ) : results.length === 0 && !searching && !error ? (
             <div className="workspace-search-empty">No matches found.</div>
           ) : (

@@ -470,6 +470,14 @@ export type TerminalExitEvent = {
   signal: number;
 };
 
+export type TerminalShellProfile = {
+  id: string;
+  label: string;
+  shell: string;
+  args: string[];
+  kind: 'powershell' | 'cmd' | 'git-bash' | 'wsl' | 'posix' | 'node' | string;
+};
+
 export type SerialMonitorDataEvent = {
   sessionId: string;
   data: string;
@@ -786,6 +794,7 @@ export type GitCommit = {
   subject: string;
   author: string;
   authorEmail?: string;
+  authorAvatarUrl?: string;
   date: string;
   refs: string;
   branch: string;
@@ -1117,6 +1126,7 @@ export type DesktopApi = {
     checkoutBranch: (payload: { branch: string }) => Promise<Result<{ output?: string }>>;
     createBranch: (payload: { branch: string }) => Promise<Result<{ output?: string }>>;
     getLog: (payload?: { limit?: number }) => Promise<Result<{ commits: GitCommit[] }>>;
+    getAvatarDataUrl: (payload: { url: string }) => Promise<Result<{ dataUrl: string }>>;
     getRemotes: () => Promise<Result<{ remotes: GitRemote[] }>>;
     repairSafeDirectory: () => Promise<Result<{ output?: string }>>;
     initRepository: (payload?: { defaultBranch?: string }) => Promise<Result<{ output?: string }>>;
@@ -1215,7 +1225,8 @@ export type DesktopApi = {
     onLibraryMigrationProgress: (callback: (event: LibraryMigrationProgressEvent) => void) => () => void;
   };
   terminal: {
-    create: (options?: { cols?: number; rows?: number; cwd?: string; shell?: string }) => Promise<Result<{ sessionId: string; cwd: string; shell: string }>>;
+    listShells: () => Promise<Result<{ profiles: TerminalShellProfile[]; defaultShellId: string | null }>>;
+    create: (options?: { cols?: number; rows?: number; cwd?: string; shell?: string; shellId?: string; args?: string[] }) => Promise<Result<{ sessionId: string; cwd: string; shell: string; shellId?: string; shellLabel?: string }>>;
     close: (sessionId: string) => Promise<Result>;
     navigate: (payload: { sessionId: string; targetPath: string }) => Promise<Result<{ cwd: string }>>;
     write: (payload: { sessionId: string; data: string }) => void;

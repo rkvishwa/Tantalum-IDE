@@ -90,6 +90,7 @@ import type {
 
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { Modal } from './Modal';
+import { useConfirm } from './ConfirmProvider';
 
 export type AgentPendingReview = {
   id: string;
@@ -1822,6 +1823,7 @@ function threadSummaryLooksWaitingForApproval(thread: AgentThreadSummary) {
   const preview = thread.lastMessagePreview.toLowerCase();
   return (
     preview.includes('approve this workspace action') ||
+    preview.includes('approve this project space action') ||
     preview.includes('approve to run it') ||
     preview.includes('pending approval') ||
     preview.includes('needs approval') ||
@@ -2057,6 +2059,7 @@ export function AgentPanel({
   onOpenSettings,
   onClosePanel,
 }: AgentPanelProps) {
+  const { confirm } = useConfirm();
   const workspaceKey = workspacePath?.trim() || null;
   const initialDisplayCache = useMemo(
     () => (hasAgentCloudConfiguration() ? readAgentPanelDisplayCache(user.$id, workspaceKey) : null),
@@ -3394,7 +3397,7 @@ export function AgentPanel({
     }
 
     if (!workspacePath) {
-      pushToast('Open a Project before starting Tantalum AI.', 'info');
+      pushToast('Open a Project Space before starting Tantalum AI.', 'info');
       return;
     }
 
@@ -3602,7 +3605,7 @@ export function AgentPanel({
         const assistantMessage = await createAgentThreadMessage({
           threadId: runThreadId,
           role: 'assistant',
-          content: routed.userMessage || 'Approve this Project action to run it, or skip it.',
+          content: routed.userMessage || 'Approve this Project Space action to run it, or skip it.',
           metadata: {
             pendingAction,
             ...(pendingTaskList ? { taskList: pendingTaskList } : {}),
@@ -3610,7 +3613,7 @@ export function AgentPanel({
         });
         setMessages((current) => [...current, assistantMessage]);
         setThreadWaitingForApproval(runThreadId, true);
-        pushConsole('Waiting for approval before running Project changes.', 'info');
+        pushConsole('Waiting for approval before running Project Space changes.', 'info');
         await refreshThreads();
         return;
       }
@@ -3751,9 +3754,11 @@ export function AgentPanel({
       return;
     }
 
-    const confirmed = window.confirm(
-      'Restore files touched by Tantalum AI after this message and remove later chat messages from this thread?',
-    );
+    const confirmed = await confirm({
+      message: 'Restore files touched by Tantalum AI after this message and remove later chat messages from this thread?',
+      tone: 'warning',
+      confirmLabel: 'Restore',
+    });
     if (!confirmed) {
       return;
     }
@@ -3794,12 +3799,12 @@ export function AgentPanel({
     }
 
     if (agentIntent === 'ask') {
-      pushToast('Switch to Agent mode to approve Project changes.', 'info');
+      pushToast('Switch to Agent mode to approve Project Space changes.', 'info');
       return;
     }
 
     if (!workspacePath) {
-      pushToast('Open a Project before running this action.', 'info');
+      pushToast('Open a Project Space before running this action.', 'info');
       return;
     }
 
@@ -3909,7 +3914,11 @@ export function AgentPanel({
   }
 
   async function handleDeleteThread(thread: AgentThreadSummary) {
-    if (!window.confirm(`Delete "${thread.title}"?`)) {
+    if (!(await confirm({
+      message: `Delete "${thread.title}"?`,
+      tone: 'danger',
+      confirmLabel: 'Delete',
+    }))) {
       return;
     }
 
@@ -4157,7 +4166,7 @@ export function AgentPanel({
             title={
               agentPermissionMode === 'bypass'
                 ? 'Bypass intermediate approval prompts; final Keep/Revert review still applies.'
-                : 'Ask for approval before high-risk Project actions.'
+                : 'Ask for approval before high-risk Project Space actions.'
             }
           >
             <KeyRound size={12} />
@@ -4499,9 +4508,9 @@ export function AgentPanel({
               ? isReplyingToThread && activeThread
                 ? 'Ask for follow-up changes'
                 : agentIntent === 'ask'
-                  ? 'Ask about this Project'
+                  ? 'Ask about this Project Space'
                   : 'Start a new agent thread'
-              : 'Open a Project to start coding'
+              : 'Open a Project Space to start coding'
           }
           rows={2}
           onKeyDown={handleComposerKeyDown}
@@ -4889,7 +4898,7 @@ export function AgentPanel({
         ? `${pendingFileChanges.length} ${pendingFileChanges.length === 1 ? 'file' : 'files'} ${approvalStateLabel}`
         : taskList?.items.length
           ? `${taskList.items.length} planned ${taskList.items.length === 1 ? 'update' : 'updates'} ${approvalStateLabel}`
-          : `${action.riskLevel || 'project'} risk Project change`;
+          : `${action.riskLevel || 'project'} risk Project Space change`;
     const permissionCopy =
       isToolAction
         ? effectiveStatus === 'executed'
@@ -4902,14 +4911,14 @@ export function AgentPanel({
                 ? 'Tantalum AI needs approval again before it can continue.'
                 : 'Tantalum AI needs permission before it can run this IDE tool.'
         : effectiveStatus === 'executed'
-          ? 'This Project change was approved and applied.'
+          ? 'This Project Space change was approved and applied.'
           : effectiveStatus === 'skipped'
-            ? 'This Project change was skipped.'
+            ? 'This Project Space change was skipped.'
             : effectiveStatus === 'expired'
               ? 'A newer permission request replaced this one.'
               : effectiveStatus === 'blocked'
                 ? 'Tantalum AI needs approval again before it can continue.'
-                : 'Tantalum AI needs permission before it can make changes in this Project.';
+                : 'Tantalum AI needs permission before it can make changes in this project space.';
 
     return (
       <div className={`pending-agent-action-card pending-agent-action-card-${effectiveStatus}`}>

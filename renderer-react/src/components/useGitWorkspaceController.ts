@@ -4,6 +4,8 @@ import { fileNameFromPath, joinPath, normalizeOutput } from '@/lib/utils';
 import type { UiPreferences } from '@/lib/uiPreferences';
 import type { GitBranch as GitBranchInfo, GitCommit, GitDiff, GitDiffMode, GitFileChange, GitRemote, GitStatus } from '@/types/electron';
 
+import { useConfirm } from './ConfirmProvider';
+
 type GitControllerProps = {
   workspacePath: string | null;
   active: boolean;
@@ -20,7 +22,7 @@ type GitControllerProps = {
   ) => void;
 };
 
-export type GitChangeGroupId = 'conflicts' | 'staged' | 'unstaged' | 'untracked';
+export type GitChangeGroupId = 'conflicts' | 'staged' | 'unstaged';
 
 type GitChangeGroup = {
   id: GitChangeGroupId;
@@ -46,7 +48,7 @@ const EMPTY_STATUS: GitStatus = {
   conflictedFiles: [],
   hasChanges: false,
   safeDirectoryRequired: false,
-  message: 'Open a Project to use Git.',
+  message: 'Open a Project Space to use Git.',
 };
 
 function inferEditorLanguage(filePath: string | null) {
@@ -105,6 +107,7 @@ export function useGitWorkspaceController({
   pushConsole,
   pushToast,
 }: GitControllerProps) {
+  const { confirm } = useConfirm();
   const [status, setStatus] = useState<GitStatus>(EMPTY_STATUS);
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
   const [commits, setCommits] = useState<GitCommit[]>([]);
@@ -125,6 +128,7 @@ export function useGitWorkspaceController({
     visibility: 'private' as 'private' | 'public',
     initialCommitMessage: 'Initial commit',
   });
+  const [hoveredCommit, setHoveredCommit] = useState<GitCommit | null>(null);
   const selectedGroupRef = useRef<GitChangeGroupId>('unstaged');
   const callbacksRef = useRef({ onOpenFile, onRefreshWorkspace, onStatusChange, pushConsole, pushToast });
   const refreshRunRef = useRef(0);
@@ -137,8 +141,7 @@ export function useGitWorkspaceController({
     () => [
       { id: 'conflicts', title: 'Conflicts', changes: status.conflictedFiles },
       { id: 'staged', title: 'Staged Changes', changes: status.stagedFiles },
-      { id: 'unstaged', title: 'Changes', changes: status.unstagedFiles },
-      { id: 'untracked', title: 'Untracked', changes: status.untrackedFiles },
+      { id: 'unstaged', title: 'Changes', changes: [...status.unstagedFiles, ...status.untrackedFiles] },
     ],
     [status.conflictedFiles, status.stagedFiles, status.unstagedFiles, status.untrackedFiles],
   );
@@ -163,6 +166,7 @@ export function useGitWorkspaceController({
     setRemotes([]);
     setSelectedChange(null);
     setDiff(null);
+    setHoveredCommit(null);
   }, [workspacePath]);
 
   useEffect(() => {
@@ -248,7 +252,7 @@ export function useGitWorkspaceController({
       ...nextStatus.conflictedFiles.map((change) => ({ groupId: 'conflicts' as const, change })),
       ...nextStatus.stagedFiles.map((change) => ({ groupId: 'staged' as const, change })),
       ...nextStatus.unstagedFiles.map((change) => ({ groupId: 'unstaged' as const, change })),
-      ...nextStatus.untrackedFiles.map((change) => ({ groupId: 'untracked' as const, change })),
+      ...nextStatus.untrackedFiles.map((change) => ({ groupId: 'unstaged' as const, change })),
     ];
 
     setSelectedChange((current) => {
@@ -360,15 +364,20 @@ export function useGitWorkspaceController({
     void runMutation(`unstage:${change.path}`, () => window.tantalum.git.unstage({ path: change.path }), `Unstaged ${fileNameFromPath(change.path)}`);
   }
 
-  function handleDiscard(change: GitFileChange, groupId: GitChangeGroupId) {
-    const confirmed = window.confirm(`Discard changes in ${change.path}? This cannot be undone.`);
+  async function handleDiscard(change: GitFileChange, groupId: GitChangeGroupId) {
+    const confirmed = await confirm({
+      message: `Discard changes in ${change.path}?`,
+      detail: 'This cannot be undone.',
+      tone: 'danger',
+      confirmLabel: 'Discard',
+    });
     if (!confirmed) {
       return;
     }
 
     void runMutation(
       `discard:${change.path}`,
-      () => window.tantalum.git.discard({ path: change.path, staged: groupId === 'staged', untracked: groupId === 'untracked' || change.untracked }),
+      () => window.tantalum.git.discard({ path: change.path, staged: groupId === 'staged', untracked: change.untracked }),
       `Discarded ${fileNameFromPath(change.path)}`,
     );
   }
@@ -390,6 +399,46 @@ export function useGitWorkspaceController({
     void runMutation('unstage-all', () => window.tantalum.git.unstage({ paths: status.stagedFiles.map((change) => change.path) }), 'Unstaged all changes');
   }
 
+  async function handleDiscardAllChanges() {
+    const unstagedPaths = status.unstagedFiles.map((change) => change.path);
+    const untrackedPaths = status.untrackedFiles.map((change) => change.path);
+    if (unstagedPaths.length === 0 && untrackedPaths.length === 0) {
+      return;
+    }
+
+    const confirmed = await confirm({
+      message: 'Discard all changes?',
+      detail: 'This will revert modified files and delete untracked files. This cannot be undone.',
+      tone: 'danger',
+      confirmLabel: 'Discard All',
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    void runMutation(
+      'discard-all',
+      async () => {
+        if (unstagedPaths.length > 0) {
+          const result = await window.tantalum.git.discard({ paths: unstagedPaths, staged: false, untracked: false });
+          if (!result.success) {
+            return result;
+          }
+        }
+
+        if (untrackedPaths.length > 0) {
+          const result = await window.tantalum.git.discard({ paths: untrackedPaths, untracked: true });
+          if (!result.success) {
+            return result;
+          }
+        }
+
+        return { success: true as const, output: 'Discarded all changes.' };
+      },
+      'Discarded all changes',
+    );
+  }
+
   function handleCommit() {
     const message = commitMessage.trim();
     if (!message) {
@@ -407,6 +456,28 @@ export function useGitWorkspaceController({
         return result;
       },
       'Commit created',
+    );
+  }
+
+  function handleCommitAndPush() {
+    const message = commitMessage.trim();
+    if (!message) {
+      callbacksRef.current.pushToast('Write a commit message before committing.', 'info');
+      return;
+    }
+
+    void runMutation(
+      'commit-push',
+      async () => {
+        const commitResult = await window.tantalum.git.commit({ message });
+        if (!commitResult.success) {
+          return commitResult;
+        }
+
+        setCommitMessage('');
+        return window.tantalum.git.push();
+      },
+      'Committed and pushed',
     );
   }
 
@@ -450,8 +521,12 @@ export function useGitWorkspaceController({
     );
   }
 
-  function handleTrustRepository() {
-    const confirmed = window.confirm('Trust this repository for Git by adding it to your global safe.directory list?');
+  async function handleTrustRepository() {
+    const confirmed = await confirm({
+      message: 'Trust this repository for Git by adding it to your global safe.directory list?',
+      tone: 'warning',
+      confirmLabel: 'Trust repository',
+    });
     if (!confirmed) {
       return;
     }
@@ -533,6 +608,8 @@ export function useGitWorkspaceController({
     isDetectingRepository,
     totalChanges,
     currentRemoteName,
+    hoveredCommit,
+    setHoveredCommit,
     setCommitMessage,
     setNewBranchName,
     setPublishModalOpen,
@@ -545,7 +622,9 @@ export function useGitWorkspaceController({
     handleDiscard,
     handleStageAll,
     handleUnstageAll,
+    handleDiscardAllChanges,
     handleCommit,
+    handleCommitAndPush,
     handleFetch,
     handlePull,
     handlePush,

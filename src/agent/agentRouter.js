@@ -31,7 +31,7 @@ function buildGreetingResponse(prompt) {
     return "Ready when you are. Tell me what you want to inspect, explain, or change.";
   }
 
-  return "Hello! What would you like to work on in this workspace?";
+  return "Hello! What would you like to work on in this project space?";
 }
 
 function isLowSignalPrompt(prompt) {
@@ -234,7 +234,7 @@ function routeAgentPrompt(payload = {}) {
         confidence: 0.92,
         persistThread: false,
         titleSuggestion,
-        userMessage: "Ask mode is read-only. Switch to Agent mode to approve pending workspace changes.",
+        userMessage: "Ask mode is read-only. Switch to Agent mode to approve pending project space changes.",
         requiresUserDecision: false,
         decisionKind: "none",
       };
@@ -288,7 +288,7 @@ function routeAgentPrompt(payload = {}) {
       confidence: 0.88,
       persistThread: false,
       titleSuggestion,
-      userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply workspace changes.",
+      userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply project space changes.",
       requiresUserDecision: false,
       decisionKind: "none",
     };
@@ -304,7 +304,7 @@ function routeAgentPrompt(payload = {}) {
         confidence: 0.9,
         persistThread: true,
         titleSuggestion,
-        userMessage: `This looks like a ${risk.riskLevel}-risk workspace change. Approve to run it, or skip it.`,
+        userMessage: `This looks like a ${risk.riskLevel}-risk Project Space change. Approve to run it, or skip it.`,
         pendingAction: nextPendingAction,
         requiresUserDecision: true,
         decisionKind: "approve_skip",

@@ -1,7 +1,8 @@
 import '@knurdz/jack-file-tree/keyboard-shield';
 
 import { startTransition, useCallback, useDeferredValue, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent as ReactWheelEvent } from 'react';
+import type { CSSProperties, DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, WheelEvent as ReactWheelEvent } from 'react';
+import { createPortal } from 'react-dom';
 import type { Models } from 'appwrite';
 import {
   EditorTabs,
@@ -30,9 +31,11 @@ import {
   BookOpen,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   CircleStop,
   Clipboard,
+  Cloud,
   Copy,
   Cpu,
   Eye,
@@ -43,20 +46,26 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  GripVertical,
   HardDriveUpload,
   LayoutGrid,
   LayoutList,
+  Columns2,
+  Rows2,
   Library,
   Link2,
   ListChevronsDownUp,
   ListChevronsUpDown,
   LoaderCircle,
   MoreHorizontal,
+  PanelBottom,
+  PanelRight,
   PencilLine,
   Plus,
   RefreshCcw,
   Search,
   Scissors,
+  SquarePen,
   Star,
   TerminalSquare,
   Trash2,
@@ -119,15 +128,17 @@ import type {
 } from '@/types/electron';
 import type { AgentChangePreview, AgentRestoredFile, AgentRestorePointSummary } from '@/types/electron';
 
-import { ConsoleTerminal } from './ConsoleTerminal';
 import { AgentPanel, type AgentEditorSelectionContext, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
 import { GitHistoryPanel, GitSourceControlPanel, GitWorkspace } from './GitWorkspace';
 import { SerialMonitor } from './SerialMonitor';
 import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
 import { useGitWorkspaceController } from './useGitWorkspaceController';
 import { Modal } from './Modal';
-import { TerminalWorkspace } from './TerminalWorkspace';
+import { TerminalWorkspace, type TerminalDropZone, type TerminalSplitZone, type TerminalWorkspaceCommand, type TerminalWorkspaceCommandInput, type TerminalWorkspaceSessionSnapshot, type TerminalWorkspaceState } from './TerminalWorkspace';
 import { WorkspaceSearchPopup } from './WorkspaceSearchPopup';
+import { BoardsHubSelect, BoardsHubToggle, type BoardsHubSelectOption } from './BoardsHubControls';
+import { ConfirmDialog } from './ConfirmDialog';
+import { useConfirm } from './ConfirmProvider';
 
 type IDEWorkspaceProps = {
   active?: boolean;
@@ -157,7 +168,7 @@ type IDEWorkspaceProps = {
 };
 
 export type SidebarView = 'explorer' | 'boards' | 'libraries' | 'git' | 'platforms' | 'terminal' | 'my-projects';
-type ConsoleView = 'output' | 'terminal' | 'serial';
+type ConsoleView = 'output' | 'serial';
 type LibraryManagerTab = 'all' | 'installed';
 type LibraryDetailTab = 'overview' | 'versions' | 'examples' | 'dependencies';
 type PlatformDetailTab = 'overview' | 'versions';
@@ -1291,11 +1302,77 @@ type ResizeSession = {
 
 const DEFAULT_PANEL_SIZES: PanelSizes = {
   left: 280,
-  right: 330,
+  right: 380,
   bottom: 260,
 };
 
-const MANAGER_DETAIL_PANEL_WIDTH = 460;
+const TERMINAL_RIGHT_PANEL_WIDTH_RATIO = 0.85;
+const TERMINAL_SESSION_DRAG_MIME = 'application/x-tantalum-terminal-session';
+const TERMINAL_POINTER_DRAG_THRESHOLD_PX = 4;
+const TERMINAL_DRAG_PREVIEW_OFFSET_X = 18;
+const TERMINAL_DRAG_PREVIEW_OFFSET_Y = 18;
+
+type TerminalDropTargetState = {
+  paneId: string;
+  sessionId?: string;
+  zone: TerminalDropZone;
+  targetIndex?: number;
+  gapIndex?: number;
+};
+
+type TerminalPointerDragState = {
+  sessionId: string;
+  paneId: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  dragging: boolean;
+  captureElement: HTMLElement | null;
+  previewTitle: string;
+  previewShellLabel: string | null;
+  previewWidth: number;
+  previewHeight: number;
+};
+
+type TerminalDragPreviewState = {
+  sessionId: string;
+  title: string;
+  shellLabel: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function getDefaultTerminalRightPanelWidth() {
+  return Math.round(DEFAULT_PANEL_SIZES.right * TERMINAL_RIGHT_PANEL_WIDTH_RATIO);
+}
+
+type RightPanelWidthProfile = 'agent' | 'detail' | 'terminal';
+
+function getRightPanelWidthProfile(sidebar: SidebarView): RightPanelWidthProfile {
+  if (sidebar === 'explorer') {
+    return 'agent';
+  }
+
+  if (sidebar === 'terminal') {
+    return 'terminal';
+  }
+
+  return 'detail';
+}
+
+function createDefaultRightPanelWidths(): Record<RightPanelWidthProfile, number> {
+  return {
+    agent: DEFAULT_PANEL_SIZES.right,
+    detail: DEFAULT_PANEL_SIZES.right,
+    terminal: getDefaultTerminalRightPanelWidth(),
+  };
+}
+
+type BoardsHubInspectorTarget =
+  | { kind: 'local'; rowKey: string }
+  | { kind: 'cloud'; boardId: string };
 
 const MIN_PANEL_SIZES: PanelSizes = {
   left: 220,
@@ -2717,9 +2794,40 @@ export function IDEWorkspace({
   resolvedTheme,
   restoreToolchainNotificationRequest,
 }: IDEWorkspaceProps) {
+  const { confirm, alert } = useConfirm();
   const setSidebar = useCallback((nextSidebar: SidebarView) => onSidebarChange(nextSidebar), [onSidebarChange]);
   const [consoleView, setConsoleView] = useState<ConsoleView>('output');
-  const [panelSizes, setPanelSizes] = useState<PanelSizes>(() => normalizePanelSizes(DEFAULT_PANEL_SIZES));
+  const [terminalCommand, setTerminalCommand] = useState<TerminalWorkspaceCommand | null>(null);
+  const [terminalWorkspaceState, setTerminalWorkspaceState] = useState<TerminalWorkspaceState>({
+    sessions: [],
+    panes: [],
+    groups: [],
+    activePaneId: null,
+    activeGroupId: null,
+    activeSessionId: null,
+    shellProfiles: [],
+    defaultShellId: null,
+  });
+  const [terminalRenamingSessionId, setTerminalRenamingSessionId] = useState<string | null>(null);
+  const [terminalRenameValue, setTerminalRenameValue] = useState('');
+  const [terminalContextMenu, setTerminalContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  const [terminalDragSessionId, setTerminalDragSessionId] = useState<string | null>(null);
+  const [terminalDropTarget, setTerminalDropTarget] = useState<TerminalDropTargetState | null>(null);
+  const [terminalDragPreview, setTerminalDragPreview] = useState<TerminalDragPreviewState | null>(null);
+  const terminalRenameCancelRef = useRef(false);
+  const terminalRenameStartedAtRef = useRef(0);
+  const terminalDragSessionIdRef = useRef<string | null>(null);
+  const terminalDropTargetRef = useRef<TerminalDropTargetState | null>(null);
+  const terminalPointerDragRef = useRef<TerminalPointerDragState | null>(null);
+  const sidebarRef = useRef(sidebar);
+  const rightPanelWidthsRef = useRef(createDefaultRightPanelWidths());
+  const [panelSizes, setPanelSizes] = useState<PanelSizes>(() => {
+    const defaultRightWidths = createDefaultRightPanelWidths();
+    return normalizePanelSizes({
+      ...DEFAULT_PANEL_SIZES,
+      right: defaultRightWidths[getRightPanelWidthProfile(sidebar)],
+    });
+  });
   const [activeResizePanel, setActiveResizePanel] = useState<ResizablePanel | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [projectIntegrity, setProjectIntegrity] = useState<ProjectIntegrityState>(EMPTY_PROJECT_INTEGRITY);
@@ -2752,7 +2860,6 @@ export function IDEWorkspace({
   const [localBoardsError, setLocalBoardsError] = useState<string | null>(null);
   const [localBoardEdits, setLocalBoardEdits] = useState<Record<string, LocalBoardEdit>>({});
   const [manualLocalBoardKeys, setManualLocalBoardKeys] = useState<string[]>([]);
-  const [expandedLocalBoardKeys, setExpandedLocalBoardKeys] = useState<Record<string, boolean>>({});
   const [selectedLocalBoardId, setSelectedLocalBoardId] = useState(() => readStoredSelectedLocalBoardId());
   const [editorBoardSelection, setEditorBoardSelection] = useState('');
   const [localBoardCatalog, setLocalBoardCatalog] = useState<LocalBoardOption[]>([]);
@@ -2760,6 +2867,13 @@ export function IDEWorkspace({
   const [localBoardCatalogError, setLocalBoardCatalogError] = useState<string | null>(null);
   const [localBoardCatalogQuery, setLocalBoardCatalogQuery] = useState('');
   const [localBoardAdvancedOpenKey, setLocalBoardAdvancedOpenKey] = useState<string | null>(null);
+  const [boardsHubCenterTab, setBoardsHubCenterTab] = useState<'local' | 'cloud'>('local');
+  const [boardsHubInspectorTarget, setBoardsHubInspectorTarget] = useState<BoardsHubInspectorTarget | null>(null);
+  const [boardsHubLocalFilter, setBoardsHubLocalFilter] = useState<'all' | 'connected' | 'saved'>('all');
+  const [boardsHubLocalQuery, setBoardsHubLocalQuery] = useState('');
+  const [boardsHubCloudQuery, setBoardsHubCloudQuery] = useState('');
+  const [localBoardPickerOpen, setLocalBoardPickerOpen] = useState<{ rowKey: string; picker: 'board' | 'port' } | null>(null);
+  const [cloudLinkLocalPickerOpen, setCloudLinkLocalPickerOpen] = useState(false);
   const [selectedBoardSecrets, setSelectedBoardSecrets] = useState<BoardSecret | null>(null);
   const [firmwareHistory, setFirmwareHistory] = useState<FirmwareDocument[]>([]);
   const [boardModalOpen, setBoardModalOpen] = useState(false);
@@ -3066,13 +3180,10 @@ export function IDEWorkspace({
         })
       : projectFolders;
 
-    return [...filteredProjects].sort((left, right) => {
-      if (projectSortMode === 'favorites') {
-        if (left.favorite !== right.favorite) {
-          return left.favorite ? -1 : 1;
-        }
-      }
+    const tabFiltered =
+      projectSortMode === 'favorites' ? filteredProjects.filter((project) => project.favorite) : filteredProjects;
 
+    return [...tabFiltered].sort((left, right) => {
       if (projectSortMode === 'name') {
         return getProjectDisplayName(left).localeCompare(getProjectDisplayName(right));
       }
@@ -3268,7 +3379,7 @@ export function IDEWorkspace({
     return tabsRef.current.map(syncFileTabDirtyState).filter((tab) => Boolean(tab.isDirty));
   }
 
-  function confirmWorkspaceSwitch(targetWorkspacePath: string) {
+  async function confirmWorkspaceSwitch(targetWorkspacePath: string) {
     const currentWorkspacePath = workspacePathRef.current;
     if (currentWorkspacePath && areSameWorkspaceEditorStoragePath(currentWorkspacePath, targetWorkspacePath)) {
       return true;
@@ -3278,10 +3389,13 @@ export function IDEWorkspace({
     if (unsavedTabs.length > 0) {
       const tabLabel = unsavedTabs.length === 1 ? 'tab has' : 'tabs have';
       const message = currentWorkspacePath
-        ? `Switch Projects? ${unsavedTabs.length} unsaved ${tabLabel} changes. They will be kept with ${fileNameFromPath(currentWorkspacePath)} and restored when you reopen it.`
-        : `Open Project? ${unsavedTabs.length} unsaved ${tabLabel} changes outside a Project. They will be closed if you continue.`;
+        ? `${unsavedTabs.length} unsaved ${tabLabel} changes. They will be kept with ${fileNameFromPath(currentWorkspacePath)} and restored when you reopen it.`
+        : `${unsavedTabs.length} unsaved ${tabLabel} changes outside a Project Space. They will be closed if you continue.`;
 
-      if (!window.confirm(message)) {
+      if (!(await confirm({
+        title: currentWorkspacePath ? 'Switch Project Spaces?' : 'Open Project Space?',
+        message,
+      }))) {
         return false;
       }
     }
@@ -3296,6 +3410,20 @@ export function IDEWorkspace({
     }
 
     onBottomPanelOpenChange(true);
+  }
+
+  function openTerminalPage() {
+    setSidebar('terminal');
+    onRightPanelOpenChange(true);
+    onBottomPanelOpenChange(false);
+  }
+
+  function sendTerminalCommand(command: TerminalWorkspaceCommandInput) {
+    if (sidebar !== 'terminal') {
+      openTerminalPage();
+    }
+
+    setTerminalCommand((current) => ({ id: (current?.id ?? 0) + 1, ...command } as TerminalWorkspaceCommand));
   }
 
   function toggleConsolePanel() {
@@ -3316,11 +3444,27 @@ export function IDEWorkspace({
   }
 
   function setSinglePanelSize(panel: ResizablePanel, value: number) {
-    applyPanelSizes((current) => normalizePanelSizes({ ...current, [panel]: value }));
+    applyPanelSizes((current) => {
+      const next = normalizePanelSizes({ ...current, [panel]: value });
+      if (panel === 'right') {
+        rightPanelWidthsRef.current[getRightPanelWidthProfile(sidebarRef.current)] = next.right;
+      }
+      return next;
+    });
   }
 
   function resetPanelSize(panel: ResizablePanel) {
     setSinglePanelSize(panel, DEFAULT_PANEL_SIZES[panel]);
+  }
+
+  function resetPanelSizeToDefault(panel: ResizablePanel) {
+    applyPanelSizes((current) => {
+      const next = normalizePanelSizes({ ...current, [panel]: DEFAULT_PANEL_SIZES[panel] });
+      if (panel === 'right') {
+        rightPanelWidthsRef.current[getRightPanelWidthProfile(sidebarRef.current)] = next.right;
+      }
+      return next;
+    });
   }
 
   function adjustPanelSize(panel: ResizablePanel, delta: number) {
@@ -3329,14 +3473,18 @@ export function IDEWorkspace({
 
   const ensureManagerDetailPanelVisible = useCallback(() => {
     onRightPanelOpenChange(true);
-    setPanelSizes((current) => {
-      const targetRightWidth = Math.min(MANAGER_DETAIL_PANEL_WIDTH, getPanelMaxSize('right', current));
-      if (current.right >= targetRightWidth) {
-        return current;
-      }
+  }, [onRightPanelOpenChange]);
 
-      return normalizePanelSizes({ ...current, right: targetRightWidth });
-    });
+  const ensureBoardsDetailPanelVisible = useCallback(() => {
+    onRightPanelOpenChange(true);
+  }, [onRightPanelOpenChange]);
+
+  const ensureProjectsDetailPanelVisible = useCallback(() => {
+    onRightPanelOpenChange(true);
+  }, [onRightPanelOpenChange]);
+
+  const ensureTerminalDetailPanelVisible = useCallback(() => {
+    onRightPanelOpenChange(true);
   }, [onRightPanelOpenChange]);
 
   function beginResize(panel: ResizablePanel, event: ReactPointerEvent<HTMLDivElement>) {
@@ -3970,7 +4118,7 @@ export function IDEWorkspace({
     } catch (error) {
       const nextIntegrity: ProjectIntegrityState = {
         ...EMPTY_PROJECT_INTEGRITY,
-        error: error instanceof Error ? error.message : 'Unable to inspect Project entry point.',
+        error: error instanceof Error ? error.message : 'Unable to inspect Project Space entry point.',
       };
       projectIntegrityRef.current = nextIntegrity;
       setProjectIntegrity(nextIntegrity);
@@ -4369,9 +4517,13 @@ export function IDEWorkspace({
       };
     }
 
-    const continueWithoutMarker = window.confirm(
-      `Tantalum could not save the cloud source restore marker:\n\n${result.error}\n\nContinue uploading without cloud exact-restore from board firmware?`,
-    );
+    const continueWithoutMarker = await confirm({
+      title: 'Cloud restore marker failed',
+      message: 'Continue uploading without cloud exact-restore from board firmware?',
+      detail: result.error,
+      tone: 'warning',
+      confirmLabel: 'Continue',
+    });
     if (!continueWithoutMarker) {
       throw new Error(`Upload canceled because the cloud source restore marker could not be saved: ${result.error}`);
     }
@@ -4556,7 +4708,7 @@ export function IDEWorkspace({
     const rootPath = workspacePathRef.current;
     const entryFile = rootProjectFileName(filePath, rootPath);
     if (!rootPath || !entryFile || !normalizeProjectEntryFileName(entryFile)) {
-      pushToast('Only root .ino files can be Project entry points.', 'error');
+      pushToast('Only root .ino files can be Project Space entry points.', 'error');
       return;
     }
 
@@ -4565,12 +4717,12 @@ export function IDEWorkspace({
       const integrity = await refreshProjectIntegrity(rootPath);
       refreshFileTree();
       const conflicts = integrity.conflictFiles.filter((name) => name.toLowerCase() !== entryFile.toLowerCase());
-      pushToast(`${entryFile} is now the Project entry point.`, 'success', undefined, conflicts.length > 0 ? {
+      pushToast(`${entryFile} is now the Project Space entry point.`, 'success', undefined, conflicts.length > 0 ? {
         detail: `${conflicts.join(', ')} still defines setup() or loop().`,
       } : undefined);
       refreshActiveEditorDiagnostics(activeEditorFilePath);
     } catch (error) {
-      pushToast(error instanceof Error ? error.message : 'Unable to update Project entry point.', 'error');
+      pushToast(error instanceof Error ? error.message : 'Unable to update Project Space entry point.', 'error');
     }
   }
 
@@ -4967,14 +5119,6 @@ export function IDEWorkspace({
     }
   }
 
-  function handleToggleLocalBoardAdvanced(rowKey: string) {
-    const willOpen = localBoardAdvancedOpenKey !== rowKey;
-    setLocalBoardAdvancedOpenKey(willOpen ? rowKey : null);
-    if (willOpen) {
-      void loadLocalBoardCatalog();
-    }
-  }
-
   async function handleAutoScanLocalBoard() {
     if (isLocalUploadBusyAction(busyAction) || localBoardUploadInProgressRef.current) {
       return;
@@ -5041,9 +5185,10 @@ export function IDEWorkspace({
 
       const needsReviewProfile = replaceResult.profiles.find((profile) => !isUploadableBoardFqbn(profile.fqbn));
       if (needsReviewProfile) {
-        setExpandedLocalBoardKeys({ [localBoardProfileKey(needsReviewProfile.id)]: true });
+        setBoardsHubCenterTab('local');
+        setBoardsHubInspectorTarget({ kind: 'local', rowKey: localBoardProfileKey(needsReviewProfile.id) });
       } else {
-        setExpandedLocalBoardKeys({});
+        setBoardsHubInspectorTarget(null);
       }
 
       const nextSelectedProfile =
@@ -5160,7 +5305,7 @@ export function IDEWorkspace({
   async function openWorkspace(folderPath: string) {
     const previousWorkspacePath = workspacePathRef.current;
     const maySwitchWorkspace = !previousWorkspacePath || !areSameWorkspaceEditorStoragePath(previousWorkspacePath, folderPath);
-    if (maySwitchWorkspace && !confirmWorkspaceSwitch(folderPath)) {
+    if (maySwitchWorkspace && !(await confirmWorkspaceSwitch(folderPath))) {
       return false;
     }
 
@@ -5190,6 +5335,9 @@ export function IDEWorkspace({
     void refreshAgentRestorePoints(result.path);
 
     if (didSwitchWorkspace) {
+      rightPanelWidthsRef.current.detail = DEFAULT_PANEL_SIZES.right;
+      rightPanelWidthsRef.current.terminal = getDefaultTerminalRightPanelWidth();
+      resetPanelSizeToDefault('right');
       const storedEditorState = readStoredWorkspaceEditorTabs(result.path);
       const restoredTabs = sanitizeRestoredEditorTabs(storedEditorState?.tabs ?? [], validReview);
       if (restoredTabs.length > 0) {
@@ -5202,7 +5350,7 @@ export function IDEWorkspace({
     await refreshProjectIntegrity(result.path);
     refreshFileTree();
     void refreshGitChangeIndicator(result.path);
-    pushConsole(`Opened Project: ${result.path}`, 'success');
+    pushConsole(`Opened Project Space: ${result.path}`, 'success');
     void clearInternalTrash(result.path);
     return true;
   }
@@ -5216,14 +5364,17 @@ export function IDEWorkspace({
 
   async function promptProjectEntryFileName(rootPath: string) {
     while (true) {
-      const requestedName = window.prompt('Project entry file name', WORKSPACE_MAIN_SKETCH_FILE);
+      const requestedName = window.prompt('Project Space entry file name', WORKSPACE_MAIN_SKETCH_FILE);
       if (requestedName === null) {
         return null;
       }
 
       const entryFile = normalizeProjectEntryFileName(requestedName);
       if (!entryFile) {
-        window.alert('Use a root .ino filename, for example main.ino. Folders and other extensions are not allowed.');
+        await alert({
+          message: 'Use a root .ino filename, for example main.ino. Folders and other extensions are not allowed.',
+          tone: 'warning',
+        });
         continue;
       }
 
@@ -5234,7 +5385,10 @@ export function IDEWorkspace({
 
       const existing = directory.items.find((item) => !item.isDirectory && item.name.toLowerCase() === entryFile.toLowerCase());
       if (existing) {
-        window.alert(`${entryFile} already exists. Choose a new root .ino filename.`);
+        await alert({
+          message: `${entryFile} already exists. Choose a new root .ino filename.`,
+          tone: 'warning',
+        });
         continue;
       }
 
@@ -5269,7 +5423,7 @@ export function IDEWorkspace({
       await refreshProjectIntegrity(folderResult.path);
       refreshFileTree();
       await openFile(createResult.path, { preview: false });
-      pushToast(`Created Project entry ${entryFile}.`, 'success');
+      pushToast(`Created Project Space entry ${entryFile}.`, 'success');
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to create Project.', 'error');
     }
@@ -5307,7 +5461,7 @@ export function IDEWorkspace({
 
   async function addCurrentWorkspaceToProjects() {
     if (!workspacePath) {
-      pushToast('Open a Project before adding it to My Projects.', 'info');
+      pushToast('Open a Project Space before adding it to My Projects.', 'info');
       return;
     }
 
@@ -5467,9 +5621,10 @@ export function IDEWorkspace({
       return;
     }
 
+    setSidebar('explorer');
     await openFile(filePath, options);
     await refreshProjectFolders(project.id);
-    setSidebar('explorer');
+    window.requestAnimationFrame(() => editorRef.current?.focus());
   }
 
   function getDroppedProjectFolderPaths(event: ReactDragEvent<HTMLElement>) {
@@ -5799,6 +5954,19 @@ export function IDEWorkspace({
     void window.tantalum.fs.addRecentFile(filePath);
   }
 
+  async function openWorkspaceTreeFile(filePath: string, options?: { preview?: boolean }) {
+    const shouldSwitchToProject = sidebar !== 'explorer';
+    if (shouldSwitchToProject) {
+      setSidebar('explorer');
+    }
+
+    await openFile(filePath, options);
+
+    if (shouldSwitchToProject) {
+      window.requestAnimationFrame(() => editorRef.current?.focus());
+    }
+  }
+
   async function openFileWithWorkspace(filePath: string) {
     if (!workspacePath || !isPathInsideRoot(filePath, workspacePath)) {
       const opened = await openWorkspace(parentPath(filePath));
@@ -5896,14 +6064,18 @@ export function IDEWorkspace({
     activateTab(nextTab);
   }
 
-  function closeTab(tabPath: string) {
+  async function closeTab(tabPath: string) {
     const closingIndex = tabs.findIndex((tab) => tab.path === tabPath);
     if (closingIndex === -1) {
       return;
     }
 
     const closingTab = syncFileTabDirtyState(tabs[closingIndex]);
-    if (closingTab.isDirty && !window.confirm(`Close ${closingTab.name} without saving your changes?`)) {
+    if (closingTab.isDirty && !(await confirm({
+      message: `Close ${closingTab.name} without saving your changes?`,
+      tone: 'warning',
+      confirmLabel: 'Close without saving',
+    }))) {
       return;
     }
 
@@ -6021,7 +6193,7 @@ export function IDEWorkspace({
         refreshFileTree();
         const rootName = fileNameFromPath(destinationPath).toLowerCase();
         if (integrity.conflictFiles.some((name) => name.toLowerCase() === rootName)) {
-          pushToast('Only the Project entry file can define setup() or loop().', 'error', undefined, {
+          pushToast('Only the Project Space entry file can define setup() or loop().', 'error', undefined, {
             detail: `${fileNameFromPath(destinationPath)} is not the current entry point.`,
           });
         }
@@ -6054,7 +6226,7 @@ export function IDEWorkspace({
   function resolveVerifyBoard() {
     const compileBoard = selectedEditorCloudBoard?.boardType || selectedEditorLocalBoard?.fqbn || (localBoardProfiles.length === 0 && boards.length === 0 ? 'arduino:avr:uno' : '');
     if (!compileBoard) {
-      pushToast('Choose a local or cloud board before verifying this Project.', 'info');
+      pushToast('Choose a local or cloud board before verifying this Project Space.', 'info');
       return '';
     }
 
@@ -6088,9 +6260,9 @@ export function IDEWorkspace({
     }
     if (!integrity.entryFile) {
       if (integrity.conflictFiles.length > 1) {
-        return `Choose one Project entry point. These files define setup() or loop(): ${integrity.conflictFiles.join(', ')}.`;
+        return `Choose one Project Space entry point. These files define setup() or loop(): ${integrity.conflictFiles.join(', ')}.`;
       }
-      return 'Create a Project entry point before verifying or uploading.';
+      return 'Create a Project Space entry point before verifying or uploading.';
     }
     if (integrity.conflictFiles.length > 0) {
       return `Only ${integrity.entryFile} can define setup() or loop(). Remove lifecycle functions from ${integrity.conflictFiles.join(', ')} or make one of them the entry point.`;
@@ -6113,7 +6285,7 @@ export function IDEWorkspace({
 
     openConsolePanel('output');
     pushConsole(blocker, 'error');
-    pushToast('Project entry point needs attention.', 'error', undefined, { detail: blocker });
+    pushToast('Project Space entry point needs attention.', 'error', undefined, { detail: blocker });
     refreshActiveEditorDiagnostics(activeEditorFilePath);
     return false;
   }
@@ -6162,7 +6334,7 @@ export function IDEWorkspace({
     setBusyAction(options.busyAction);
     openConsolePanel('output');
     const compileSubject = sketchSource.kind === 'workspace'
-      ? `Project ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
+      ? `Project Space ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
       : activeTab?.name || 'current file';
     pushConsole(`Compiling ${compileSubject} for ${getBoardOptionLabel(options.board)}...`);
     const toastId = pushToast(options.title, 'info', undefined, {
@@ -6495,7 +6667,7 @@ export function IDEWorkspace({
     let destination: { mode: 'current' | 'new'; workspacePath?: string | null; folderPath?: string | null };
     if (mode === 'current') {
       if (!workspacePath) {
-        pushToast('Open a Project before restoring code into it.', 'info');
+        pushToast('Open a Project Space before restoring code into it.', 'info');
         return;
       }
       destination = { mode: 'current', workspacePath };
@@ -6769,7 +6941,7 @@ export function IDEWorkspace({
       return;
     }
     const uploadSubject = sketchSource.kind === 'workspace'
-      ? `Project ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
+      ? `Project Space ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
       : activeTab?.name || 'current file';
     const uploadFileName = activeTab?.name || (sketchSource.kind === 'workspace' ? sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE : 'current file');
     persistToolchainNotification({
@@ -7834,12 +8006,15 @@ export function IDEWorkspace({
     await handleUploadLocal(selectedEditorLocalBoard);
   }
 
-  function confirmTantalumCloudRuntimeFlash(board: BoardDocument, row: LocalBoardRow | null) {
+  async function confirmTantalumCloudRuntimeFlash(board: BoardDocument, row: LocalBoardRow | null) {
     const action = row?.lastCloudProvisionedAt ? 'Reinstalling' : 'Installing';
     const target = row ? `${localBoardDisplayName(row)} linked to ${board.name}` : board.name;
-    return window.confirm(
-      `${action} Tantalum Cloud on ${target} will flash the runtime and replace the sketch currently on the board.\n\nContinue?`,
-    );
+    return confirm({
+      title: `${action} Tantalum Cloud`,
+      message: `${action} Tantalum Cloud on ${target} will flash the runtime and replace the sketch currently on the board.`,
+      tone: 'warning',
+      confirmLabel: 'Continue',
+    });
   }
 
   async function handleProvisionBoard() {
@@ -7848,7 +8023,7 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!confirmTantalumCloudRuntimeFlash(selectedBoard, selectedBoardLinkedLocalRow)) {
+    if (!(await confirmTantalumCloudRuntimeFlash(selectedBoard, selectedBoardLinkedLocalRow))) {
       pushToast('Tantalum Cloud install cancelled.', 'info');
       return;
     }
@@ -8020,9 +8195,11 @@ export function IDEWorkspace({
 
     if (row.cloudBoardId && row.cloudBoardId !== board.$id) {
       const existingBoard = boards.find((entry) => entry.$id === row.cloudBoardId);
-      const confirmed = window.confirm(
-        `${localBoardDisplayName(row)} is already linked to ${existingBoard?.name || row.cloudBoardId}. Relink it to ${board.name}?`,
-      );
+      const confirmed = await confirm({
+        message: `${localBoardDisplayName(row)} is already linked to ${existingBoard?.name || row.cloudBoardId}. Relink it to ${board.name}?`,
+        tone: 'warning',
+        confirmLabel: 'Relink',
+      });
       if (!confirmed) {
         return null;
       }
@@ -8153,7 +8330,7 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!confirmTantalumCloudRuntimeFlash(board, row)) {
+    if (!(await confirmTantalumCloudRuntimeFlash(board, row))) {
       pushToast('Tantalum Cloud install cancelled.', 'info');
       return;
     }
@@ -8273,13 +8450,30 @@ export function IDEWorkspace({
   function handleAddManualLocalBoard() {
     const key = createManualLocalBoardKey();
     setManualLocalBoardKeys((current) => [...current, key]);
-    setExpandedLocalBoardKeys((current) => ({ ...current, [key]: true }));
+    setBoardsHubCenterTab('local');
+    selectLocalBoardInspector(key);
     setLocalBoardAdvancedOpenKey(null);
     setLocalBoardCatalogQuery('');
   }
 
-  function toggleLocalBoardExpanded(rowKey: string) {
-    setExpandedLocalBoardKeys((current) => ({ ...current, [rowKey]: !current[rowKey] }));
+  function selectLocalBoardInspector(rowKey: string) {
+    setBoardsHubInspectorTarget({ kind: 'local', rowKey });
+    setCloudLinkLocalPickerOpen(false);
+    ensureBoardsDetailPanelVisible();
+  }
+
+  function selectCloudBoardInspector(boardId: string) {
+    setSelectedBoardId(boardId);
+    setBoardsHubInspectorTarget({ kind: 'cloud', boardId });
+    setCloudLinkLocalPickerOpen(false);
+    ensureBoardsDetailPanelVisible();
+  }
+
+  function switchBoardsHubCenterTab(tab: 'local' | 'cloud') {
+    setBoardsHubCenterTab(tab);
+    setBoardsHubInspectorTarget(null);
+    setLocalBoardPickerOpen(null);
+    setCloudLinkLocalPickerOpen(false);
   }
 
   async function handleSaveLocalBoard(row: LocalBoardRow) {
@@ -8342,12 +8536,7 @@ export function IDEWorkspace({
 
         return current.map((profile, index) => (index === existingIndex ? result.profile : profile));
       });
-      setExpandedLocalBoardKeys((current) => {
-        const next = { ...current };
-        delete next[row.key];
-        next[localBoardProfileKey(result.profile.id)] = true;
-        return next;
-      });
+      selectLocalBoardInspector(localBoardProfileKey(result.profile.id));
       setSelectedLocalBoardId(result.profile.id);
       await refreshLocalBoardProfiles();
       pushToast(`Saved ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}`, 'success');
@@ -8369,11 +8558,9 @@ export function IDEWorkspace({
         setDetectedLocalBoards((current) => current.filter((detection) => localBoardDetectedKey(detection) !== row.key));
       }
       setManualLocalBoardKeys((current) => current.filter((key) => key !== row.key));
-      setExpandedLocalBoardKeys((current) => {
-        const next = { ...current };
-        delete next[row.key];
-        return next;
-      });
+      if (boardsHubInspectorTarget?.kind === 'local' && boardsHubInspectorTarget.rowKey === row.key) {
+        setBoardsHubInspectorTarget(null);
+      }
       setLocalBoardCatalogQuery('');
       return;
     }
@@ -8391,11 +8578,9 @@ export function IDEWorkspace({
         delete next[row.key];
         return next;
       });
-      setExpandedLocalBoardKeys((current) => {
-        const next = { ...current };
-        delete next[row.key];
-        return next;
-      });
+      if (boardsHubInspectorTarget?.kind === 'local' && boardsHubInspectorTarget.rowKey === row.key) {
+        setBoardsHubInspectorTarget(null);
+      }
       if (row.profileId === selectedLocalBoardId) {
         const nextSelectedProfile = result.profiles.find((profile) => Boolean(profile.connected)) ?? result.profiles[0] ?? null;
         setSelectedLocalBoardId(nextSelectedProfile?.id ?? '');
@@ -8410,6 +8595,16 @@ export function IDEWorkspace({
 
   async function handleRotateBoardToken() {
     if (!selectedBoard) {
+      return;
+    }
+
+    if (!(await confirm({
+      title: 'Rotate credentials',
+      message: `Rotate credentials for ${selectedBoard.name}?`,
+      detail: 'This invalidates the current API token and related secrets. Install Tantalum Cloud runtime again over USB before the board can reconnect.',
+      tone: 'warning',
+      confirmLabel: 'Rotate',
+    }))) {
       return;
     }
 
@@ -8462,7 +8657,11 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!window.confirm(`Delete ${selectedBoard.name}?`)) {
+    if (!(await confirm({
+      message: `Delete ${selectedBoard.name}?`,
+      tone: 'danger',
+      confirmLabel: 'Delete board',
+    }))) {
       return;
     }
 
@@ -8496,7 +8695,11 @@ export function IDEWorkspace({
   }
 
   async function handleDeleteFirmware(firmware: FirmwareDocument) {
-    if (!window.confirm(`Delete firmware ${firmware.version}?`)) {
+    if (!(await confirm({
+      message: `Delete firmware ${firmware.version}?`,
+      tone: 'danger',
+      confirmLabel: 'Delete firmware',
+    }))) {
       return;
     }
 
@@ -8694,7 +8897,11 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!window.confirm(`Stop installing ${name}?`)) {
+    if (!(await confirm({
+      message: `Stop installing ${name}?`,
+      tone: 'warning',
+      confirmLabel: 'Stop install',
+    }))) {
       return;
     }
 
@@ -8862,7 +9069,11 @@ export function IDEWorkspace({
   }
 
   async function handleRemoveLibrary(library: LibraryEntry) {
-    if (!window.confirm(`Remove ${library.name}?`)) {
+    if (!(await confirm({
+      message: `Remove ${library.name}?`,
+      tone: 'danger',
+      confirmLabel: 'Remove',
+    }))) {
       return;
     }
 
@@ -8974,7 +9185,11 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!window.confirm(`Stop installing ${name}?`)) {
+    if (!(await confirm({
+      message: `Stop installing ${name}?`,
+      tone: 'warning',
+      confirmLabel: 'Stop install',
+    }))) {
       return;
     }
 
@@ -9301,7 +9516,11 @@ export function IDEWorkspace({
   }
 
   async function handleRemovePlatform(platform: BoardPlatform) {
-    if (!window.confirm(`Remove ${platform.name}?`)) {
+    if (!(await confirm({
+      message: `Remove ${platform.name}?`,
+      tone: 'danger',
+      confirmLabel: 'Remove',
+    }))) {
       return;
     }
 
@@ -9455,7 +9674,7 @@ export function IDEWorkspace({
         break;
       case 'find-in-workspace':
         if (!workspacePath) {
-          pushToast('Open a Project before searching.', 'info');
+          pushToast('Open a Project Space before searching.', 'info');
           return;
         }
         onWorkspaceSearchOpenChange(true);
@@ -9520,7 +9739,7 @@ export function IDEWorkspace({
         editorRef.current?.trigger('keyboard', 'editor.action.formatDocument', null);
         break;
       case 'toggle-terminal':
-        openConsolePanel('terminal');
+        openTerminalPage();
         break;
       case 'about':
         pushToast(`${appName} ${version}`, 'info');
@@ -9805,7 +10024,7 @@ export function IDEWorkspace({
     void refreshProjectIntegrity().then((integrity) => {
       const rootName = fileNameFromPath(createdPath).toLowerCase();
       if (integrity.conflictFiles.some((name) => name.toLowerCase() === rootName)) {
-        pushToast('Only the Project entry file can define setup() or loop().', 'error', undefined, {
+        pushToast('Only the Project Space entry file can define setup() or loop().', 'error', undefined, {
           detail: `${fileNameFromPath(createdPath)} is not the current entry point.`,
         });
       }
@@ -10423,7 +10642,7 @@ export function IDEWorkspace({
 
   async function restoreAgentThreadToMessage(message: AgentThreadMessage, currentMessages: AgentThreadMessage[]) {
     if (!workspacePath) {
-      throw new Error('Open a Project before restoring agent changes.');
+      throw new Error('Open a Project Space before restoring agent changes.');
     }
 
     const userMessageIds = currentMessages.filter((entry) => entry.role === 'user').map((entry) => entry.id);
@@ -10458,13 +10677,15 @@ export function IDEWorkspace({
   }
 
   const activeExplorerPath = activeTab && !activeTab.path.startsWith('untitled:') ? activeTab.path : null;
+  const workspaceTreeActiveFilePath = sidebar === 'boards' || sidebar === 'my-projects' ? null : activeExplorerPath;
   const activeProjectExplorerPath =
     activeExplorerPath && selectedProject?.exists && isPathInsideRoot(activeExplorerPath, selectedProject.path) ? activeExplorerPath : null;
-  const currentTerminalFolderPath = activeTab && !activeTab.path.startsWith('untitled:') ? parentPath(activeTab.path) : workspacePath;
+  const projectTreeActiveFilePath = sidebar === 'my-projects' ? null : activeProjectExplorerPath;
+  const currentTerminalFolderPath = workspacePath;
   const isTerminalWorkspaceActive = sidebar === 'terminal';
   const renderLegacyLeftTools = false;
   const isConsoleVisible = bottomPanelOpen && !isTerminalWorkspaceActive;
-  const consoleViewLabel = consoleView === 'serial' ? 'Serial Monitor' : consoleView === 'terminal' ? 'Terminal' : 'Output';
+  const consoleViewLabel = consoleView === 'serial' ? 'Serial Monitor' : 'Output';
   const leftPanelMax = getPanelMaxSize('left', panelSizes);
   const rightPanelMax = getPanelMaxSize('right', panelSizes);
   const bottomPanelMax = getPanelMaxSize('bottom', panelSizes);
@@ -10641,6 +10862,45 @@ export function IDEWorkspace({
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
+
+  useEffect(() => {
+    terminalDragSessionIdRef.current = terminalDragSessionId;
+  }, [terminalDragSessionId]);
+
+  useEffect(() => {
+    terminalDropTargetRef.current = terminalDropTarget;
+  }, [terminalDropTarget]);
+
+  useEffect(() => {
+    if (!terminalContextMenu) {
+      return;
+    }
+
+    const closeTerminalContextMenu = () => setTerminalContextMenu(null);
+    const handleTerminalContextMenuPointerDown = (event: PointerEvent) => {
+      if (event.button === 2) {
+        return;
+      }
+
+      if (event.target instanceof Element && event.target.closest('.terminal-inspector-context-menu')) {
+        return;
+      }
+
+      closeTerminalContextMenu();
+    };
+    const handleTerminalContextMenuKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeTerminalContextMenu();
+      }
+    };
+
+    document.addEventListener('pointerdown', handleTerminalContextMenuPointerDown);
+    document.addEventListener('keydown', handleTerminalContextMenuKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handleTerminalContextMenuPointerDown);
+      document.removeEventListener('keydown', handleTerminalContextMenuKeyDown);
+    };
+  }, [terminalContextMenu]);
 
   useEffect(() => {
     editorValueRef.current = editorValue;
@@ -10923,8 +11183,25 @@ export function IDEWorkspace({
   useEffect(() => {
     if (sidebar === 'libraries' || sidebar === 'platforms') {
       ensureManagerDetailPanelVisible();
+    } else if (sidebar === 'boards') {
+      ensureBoardsDetailPanelVisible();
+    } else if (sidebar === 'my-projects') {
+      ensureProjectsDetailPanelVisible();
+    } else if (sidebar === 'terminal') {
+      ensureTerminalDetailPanelVisible();
     }
-  }, [ensureManagerDetailPanelVisible, sidebar]);
+  }, [ensureBoardsDetailPanelVisible, ensureManagerDetailPanelVisible, ensureProjectsDetailPanelVisible, ensureTerminalDetailPanelVisible, sidebar]);
+
+  useEffect(() => {
+    const previousSidebar = sidebarRef.current;
+    if (previousSidebar === sidebar) {
+      return;
+    }
+
+    rightPanelWidthsRef.current[getRightPanelWidthProfile(previousSidebar)] = panelSizesRef.current.right;
+    sidebarRef.current = sidebar;
+    setSinglePanelSize('right', rightPanelWidthsRef.current[getRightPanelWidthProfile(sidebar)]);
+  }, [sidebar]);
 
   useEffect(() => {
     if (sidebar !== 'libraries') {
@@ -11090,210 +11367,223 @@ export function IDEWorkspace({
     window.requestAnimationFrame(refreshActiveEditorSelection);
   };
 
-  function renderBoardDetails() {
+  function renderRemoteBoardDetailsPanel() {
     if (!selectedBoard) {
-      return (
-        <div className="empty-panel">
-          <Cpu size={22} />
-          <p>Select a board to view its firmware history, token state, and provisioning options.</p>
-        </div>
-      );
+      return null;
     }
 
     const liveStatus = calculateBoardStatus(selectedBoard.lastSeen, selectedBoard.status);
     const linkableLocalBoards = localBoardRows.filter((row) => row.profileId && isCloudCapableBoardFqbn(row.fqbn));
+    const linkLocalBoardOptions: BoardsHubSelectOption[] = [
+      { value: '', label: 'Select a saved local board' },
+      ...linkableLocalBoards.map((row) => ({
+        value: row.profileId ?? '',
+        label: `${localBoardDisplayName(row)}${row.port ? ` (${row.port})` : ''}`,
+      })),
+    ];
     const needsRuntimeInstall = liveStatus === 'pending' || !selectedBoard.lastSeen || !selectedBoard.runtimeVersion;
     const canOpenRemoteWifiSetup = liveStatus === 'online';
     const canInstallFromLinkedLocal = Boolean(selectedBoardLinkedLocalRow?.profile && (selectedBoardLinkedLocalRow.port || selectedBoardLinkedLocalRow.fingerprint));
     const linkedLocalInstallBusy = selectedBoardLinkedLocalRow ? busyAction === `install-cloud-runtime:${selectedBoardLinkedLocalRow.key}` : false;
+    const cloudInspectorMeta = [
+      selectedBoardLinkedLocalRow ? 'Local linked' : 'No local link',
+      selectedBoard.sourceCodeVisibility === 'public' ? 'Public code' : 'Private code',
+      needsRuntimeInstall ? 'Install needed' : null,
+    ].filter(Boolean);
 
     return (
-      <div className="detail-stack">
-        <section className="detail-card">
-          <div className="detail-head">
-            <div>
-              <h3>{selectedBoard.name}</h3>
-              <p>{selectedBoard.boardType}</p>
-            </div>
+      <section className="boards-inspector" aria-label={`${selectedBoard.name} details`}>
+        <header className="boards-inspector-header">
+          <div className="boards-inspector-headline">
+            <h3>{selectedBoard.name}</h3>
+          </div>
+          <p className="boards-inspector-subtitle boards-inspector-subtitle-mono">{selectedBoard.boardType}</p>
+          <div className="boards-inspector-meta">
             <span className={`status-pill status-${liveStatus}`}>{liveStatus}</span>
+            {cloudInspectorMeta.map((item) => (
+              <span
+                key={item}
+                className={`boards-inspector-meta-item ${item === 'Install needed' ? 'boards-inspector-meta-warning' : ''}`}
+              >
+                {item}
+              </span>
+            ))}
           </div>
-          <dl className="detail-grid">
-            <div>
-              <dt>Provisioning</dt>
-              <dd>{selectedBoard.provisioningStatus || 'pending'}</dd>
-            </div>
-            <div>
-              <dt>Actual version</dt>
-              <dd>{selectedBoard.firmwareVersion || '0.0.0'}</dd>
-            </div>
-            <div>
-              <dt>Desired version</dt>
-              <dd>{selectedBoard.desiredVersion || 'No deployment'}</dd>
-            </div>
-            <div>
-              <dt>OTA status</dt>
-              <dd>{selectedBoard.otaStatus || 'idle'}</dd>
-            </div>
-            <div>
-              <dt>Runtime</dt>
-              <dd>{selectedBoard.runtimeVersion || 'Not reported'}</dd>
-            </div>
-            <div>
-              <dt>Provisioning code</dt>
-              <dd>{selectedBoardSecrets?.provisioningPop || selectedBoard.provisioningPop || 'Missing locally'}</dd>
-            </div>
-            <div>
-              <dt>Token preview</dt>
-              <dd>••••••{selectedBoard.tokenPreview || 'n/a'}</dd>
-            </div>
-            <div>
-              <dt>Local secrets</dt>
-              <dd>{selectedBoardSecrets?.apiToken && selectedBoardSecrets?.commandSecret && selectedBoardSecrets?.mqttTopic ? 'Available on this machine' : 'Missing locally'}</dd>
-            </div>
-            <div>
-              <dt>WiFi credentials</dt>
-              <dd>Stored only on board</dd>
-            </div>
-            <div>
-              <dt>Local link</dt>
-              <dd>{selectedBoardLinkedLocalRow ? `${localBoardDisplayName(selectedBoardLinkedLocalRow)} on ${selectedBoardLinkedLocalRow.port || 'saved port'}` : 'Not linked'}</dd>
-            </div>
-            <div>
-              <dt>Code visibility</dt>
-              <dd>{selectedBoard.sourceCodeVisibility === 'public' ? 'Public to signed-in users' : 'Private'}</dd>
-            </div>
-          </dl>
-          <div className="inline-banner">
-            Your WiFi name and password are sent directly over USB, Bluetooth, or SoftAP to the board. They are not uploaded to Tantalum Cloud and are not stored by the IDE.
-          </div>
-          <div className="compound-row">
-            <select value={selectedLinkLocalProfileId} onChange={(event) => setSelectedLinkLocalProfileId(event.target.value)}>
-              <option value="">Select local board link</option>
-              {linkableLocalBoards.map((row) => (
-                <option key={row.profileId} value={row.profileId}>
-                  {localBoardDisplayName(row)}{row.port ? ` (${row.port})` : ''}
-                </option>
-              ))}
-            </select>
-            <button className="secondary-button compact" type="button" onClick={() => void handleLinkSelectedCloudBoardToLocal()} disabled={Boolean(busyAction?.startsWith('link-cloud-board')) || !selectedLinkLocalProfileId}>
-              <Link2 size={14} />
-              Link local
-            </button>
-          </div>
-          {selectedBoard.lastOtaError ? <div className="inline-banner inline-banner-warning">{selectedBoard.lastOtaError}</div> : null}
-          {needsRuntimeInstall ? (
-            <div className="inline-banner inline-banner-warning">
-              Tantalum Cloud install needed. Select or connect the matching local board, link it here, then install Tantalum Cloud over USB.
-            </div>
-          ) : null}
-          <div className="action-row">
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => openBoardCodeDestination(remoteBoardCodeTarget(selectedBoard, selectedBoardLinkedLocalRow))}
-              disabled={busyAction === 'view-code'}
-            >
-              <FileCode2 size={14} />
-              View code
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => void handleSetCloudBoardCodeVisibility(selectedBoard, selectedBoard.sourceCodeVisibility === 'public' ? 'private' : 'public')}
-              disabled={busyAction === `code-visibility:${selectedBoard.$id}`}
-              title={selectedBoard.sourceCodeVisibility === 'public' ? 'Only your account can restore future snapshots after switching to private.' : 'Any signed-in Tantalum account can restore snapshots from this board marker after switching to public.'}
-            >
-              {busyAction === `code-visibility:${selectedBoard.$id}` ? <LoaderCircle size={14} className="spin" /> : null}
-              Code {selectedBoard.sourceCodeVisibility === 'public' ? 'public' : 'private'}
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => {
-                if (selectedBoardLinkedLocalRow?.profileId) {
-                  setPendingCloudRuntimeInstall({ profileId: selectedBoardLinkedLocalRow.profileId, boardId: selectedBoard.$id });
-                }
-              }}
-              disabled={!hasDeviceGatewayFunction() || !canInstallFromLinkedLocal || linkedLocalInstallBusy}
-              title={!canInstallFromLinkedLocal ? 'Link the matching local board before installing Tantalum Cloud.' : undefined}
-            >
-              {linkedLocalInstallBusy ? 'Installing...' : 'Install Tantalum Cloud'}
-            </button>
-            <button className="secondary-button" type="button" onClick={() => void handleRequestBoardProvisioning()} disabled={busyAction === 'start-provisioning' || !hasBoardAdminFunction() || !canOpenRemoteWifiSetup}>
-              Open WiFi setup
-            </button>
-            <button className="secondary-button" type="button" onClick={() => void handleRotateBoardToken()} disabled={busyAction === 'rotate-token'}>
-              Rotate token
-            </button>
-            <button className="danger-button" type="button" onClick={() => void handleDeleteBoard()} disabled={busyAction === 'delete-board'}>
-              Delete board
-            </button>
-          </div>
-          {!hasDeviceGatewayFunction() ? (
-            <div className="inline-banner inline-banner-warning">
-              Add `VITE_APPWRITE_DEVICE_GATEWAY_FUNCTION_ID` before installing Tantalum Cloud so OTA updates can work.
-            </div>
-          ) : null}
-          {selectedBoardLinkedLocalRow && !canInstallFromLinkedLocal ? (
-            <div className="inline-banner inline-banner-warning">
-              Linked local board is not connected over USB. Connect {localBoardDisplayName(selectedBoardLinkedLocalRow)}; the IDE will refresh the live port before installing Tantalum Cloud.
-            </div>
-          ) : null}
-          {!selectedBoardLinkedLocalRow ? (
-            <div className="inline-banner">
-              Install Tantalum Cloud requires a linked local board. Select a connected local board and link it first.
-            </div>
-          ) : null}
-          {!canOpenRemoteWifiSetup ? (
-            <div className="inline-banner">
-              Board is not online. Send WiFi directly over USB, or use BLE/SoftAP provisioning from mobile.
-            </div>
-          ) : null}
-        </section>
+        </header>
 
-        <section className="detail-card">
-          <div className="detail-head">
-            <div>
-              <h3>Firmware history</h3>
-              <p>{firmwareHistory.length} release{firmwareHistory.length === 1 ? '' : 's'}</p>
+        <div className="boards-inspector-body">
+          {selectedBoard.lastOtaError ? <div className="boards-hub-note boards-hub-note-warning">{selectedBoard.lastOtaError}</div> : null}
+          {needsRuntimeInstall ? <div className="boards-hub-note boards-hub-note-warning">Install Tantalum Cloud from a linked local board over USB.</div> : null}
+          {!hasDeviceGatewayFunction() ? <div className="boards-hub-note boards-hub-note-warning">Device gateway env var is missing for OTA installs.</div> : null}
+          {selectedBoardLinkedLocalRow && !canInstallFromLinkedLocal ? (
+            <div className="boards-hub-note boards-hub-note-warning">Connect {localBoardDisplayName(selectedBoardLinkedLocalRow)} over USB before installing.</div>
+          ) : null}
+          {!selectedBoardLinkedLocalRow ? <div className="boards-hub-note">Link a local board to enable cloud runtime install.</div> : null}
+          {!canOpenRemoteWifiSetup ? <div className="boards-hub-note">Board is offline. Use USB WiFi setup from a linked local board.</div> : null}
+
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Actions</h4>
+            <div className="boards-inspector-action-stack">
+              <button
+                className="boards-hub-btn boards-hub-btn-primary"
+                type="button"
+                onClick={() => {
+                  if (selectedBoardLinkedLocalRow?.profileId) {
+                    setPendingCloudRuntimeInstall({ profileId: selectedBoardLinkedLocalRow.profileId, boardId: selectedBoard.$id });
+                  }
+                }}
+                disabled={!hasDeviceGatewayFunction() || !canInstallFromLinkedLocal || linkedLocalInstallBusy}
+                title={!canInstallFromLinkedLocal ? 'Link the matching local board before installing Tantalum Cloud.' : undefined}
+              >
+                {linkedLocalInstallBusy ? <LoaderCircle size={14} className="spin" /> : <HardDriveUpload size={14} />}
+                {linkedLocalInstallBusy ? 'Installing…' : 'Install runtime'}
+              </button>
+              <button className="boards-hub-btn" type="button" onClick={() => void handleRequestBoardProvisioning()} disabled={busyAction === 'start-provisioning' || !hasBoardAdminFunction() || !canOpenRemoteWifiSetup}>
+                <Wifi size={14} />
+                WiFi setup
+              </button>
             </div>
-            <button className="primary-button compact" type="button" onClick={() => setReleaseModalOpen(true)}>
-              New release
-            </button>
-          </div>
-          <div className="release-list">
-            {firmwareHistory.length === 0 ? (
-              <div className="empty-panel compact">
-                <HardDriveUpload size={20} />
-                <p>No firmware uploaded yet.</p>
+          </section>
+
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Code</h4>
+            <div className="boards-inspector-code-row boards-inspector-code-row-3">
+              <button
+                className="boards-hub-btn"
+                type="button"
+                onClick={() => openBoardCodeDestination(remoteBoardCodeTarget(selectedBoard, selectedBoardLinkedLocalRow))}
+                disabled={busyAction === 'view-code'}
+              >
+                View code
+              </button>
+              <button
+                className="boards-hub-btn"
+                type="button"
+                onClick={() => void handleSetCloudBoardCodeVisibility(selectedBoard, selectedBoard.sourceCodeVisibility === 'public' ? 'private' : 'public')}
+                disabled={busyAction === `code-visibility:${selectedBoard.$id}`}
+              >
+                {busyAction === `code-visibility:${selectedBoard.$id}` ? 'Updating…' : selectedBoard.sourceCodeVisibility === 'public' ? 'Make private' : 'Make public'}
+              </button>
+              <button className="boards-hub-btn" type="button" onClick={() => void handleRotateBoardToken()} disabled={busyAction === 'rotate-token'}>
+                Rotate token
+              </button>
+            </div>
+          </section>
+
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Link local board</h4>
+            <div className="boards-inspector-fields">
+              <div className="boards-hub-field">
+                <span>Saved local board</span>
+                <BoardsHubSelect
+                  value={selectedLinkLocalProfileId}
+                  options={linkLocalBoardOptions}
+                  placeholder="Select a saved local board"
+                  open={cloudLinkLocalPickerOpen}
+                  onOpenChange={(open) => {
+                    if (open) {
+                      setCloudLinkLocalPickerOpen(true);
+                      setLocalBoardPickerOpen(null);
+                      return;
+                    }
+                    setCloudLinkLocalPickerOpen(false);
+                  }}
+                  onChange={(profileId) => setSelectedLinkLocalProfileId(profileId)}
+                />
               </div>
+              <button className="boards-hub-btn" type="button" onClick={() => void handleLinkSelectedCloudBoardToLocal()} disabled={Boolean(busyAction?.startsWith('link-cloud-board')) || !selectedLinkLocalProfileId}>
+                <Link2 size={14} />
+                Link board
+              </button>
+            </div>
+          </section>
+
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Status</h4>
+            <dl className="boards-hub-kv boards-inspector-kv">
+              <div>
+                <dt>Provisioning</dt>
+                <dd>{selectedBoard.provisioningStatus || 'pending'}</dd>
+              </div>
+              <div>
+                <dt>Actual version</dt>
+                <dd>{selectedBoard.firmwareVersion || '0.0.0'}</dd>
+              </div>
+              <div>
+                <dt>Desired version</dt>
+                <dd>{selectedBoard.desiredVersion || 'No deployment'}</dd>
+              </div>
+              <div>
+                <dt>OTA status</dt>
+                <dd>{selectedBoard.otaStatus || 'idle'}</dd>
+              </div>
+              <div>
+                <dt>Runtime</dt>
+                <dd>{selectedBoard.runtimeVersion || 'Not reported'}</dd>
+              </div>
+              <div>
+                <dt>Provisioning code</dt>
+                <dd>{selectedBoardSecrets?.provisioningPop || selectedBoard.provisioningPop || 'Missing locally'}</dd>
+              </div>
+              <div>
+                <dt>Local secrets</dt>
+                <dd>{selectedBoardSecrets?.apiToken && selectedBoardSecrets?.commandSecret && selectedBoardSecrets?.mqttTopic ? 'Available on this machine' : 'Missing locally'}</dd>
+              </div>
+              <div>
+                <dt>Local link</dt>
+                <dd>{selectedBoardLinkedLocalRow ? `${localBoardDisplayName(selectedBoardLinkedLocalRow)} on ${selectedBoardLinkedLocalRow.port || 'saved port'}` : 'Not linked'}</dd>
+              </div>
+              <div>
+                <dt>Token</dt>
+                <dd>••••••{selectedBoard.tokenPreview || 'n/a'}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="boards-inspector-block">
+            <div className="boards-inspector-block-head">
+              <h4 className="boards-inspector-block-title">Firmware</h4>
+              <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => setReleaseModalOpen(true)}>
+                New release
+              </button>
+            </div>
+            {firmwareHistory.length === 0 ? (
+              <div className="boards-hub-note">No firmware uploaded yet.</div>
             ) : (
-              firmwareHistory.map((firmware) => (
-                <article key={firmware.$id} className="release-item">
-                  <div>
-                    <div className="release-title">
-                      <strong>{firmware.version}</strong>
-                      {firmware.deployed ? <span className="release-badge">Desired</span> : null}
+              <div className="boards-hub-firmware-list">
+                {firmwareHistory.map((firmware) => (
+                  <article key={firmware.$id} className="boards-hub-firmware-item">
+                    <div className="boards-hub-firmware-copy">
+                      <div className="boards-hub-firmware-head">
+                        <strong>{firmware.version}</strong>
+                        {firmware.deployed ? <span className="release-badge">Desired</span> : null}
+                      </div>
+                      <p>{firmware.filename}</p>
+                      <small>{formatBytes(firmware.size)} • {new Date(firmware.uploadedAt).toLocaleString()}</small>
                     </div>
-                    <p>{firmware.filename}</p>
-                    <small>{formatBytes(firmware.size)} • {new Date(firmware.uploadedAt).toLocaleString()}</small>
-                  </div>
-                  <div className="release-actions">
-                    {!firmware.deployed ? (
-                      <button className="secondary-button compact" type="button" onClick={() => void handlePromoteFirmware(firmware)}>
-                        Deploy
+                    <div className="boards-hub-actions">
+                      {!firmware.deployed ? (
+                        <button className="boards-hub-btn" type="button" onClick={() => void handlePromoteFirmware(firmware)}>
+                          Deploy
+                        </button>
+                      ) : null}
+                      <button className="boards-hub-btn boards-hub-btn-danger" type="button" onClick={() => void handleDeleteFirmware(firmware)}>
+                        Delete
                       </button>
-                    ) : null}
-                    <button className="danger-button compact" type="button" onClick={() => void handleDeleteFirmware(firmware)}>
-                      Delete
-                    </button>
-                  </div>
-                </article>
-              ))
+                    </div>
+                  </article>
+                ))}
+              </div>
             )}
-          </div>
-        </section>
-      </div>
+          </section>
+        </div>
+
+        <footer className="boards-inspector-footer">
+          <button className="boards-hub-btn boards-inspector-footer-action boards-inspector-footer-danger boards-inspector-save" type="button" onClick={() => void handleDeleteBoard()} disabled={busyAction === 'delete-board'}>
+            {busyAction === 'delete-board' ? 'Deleting…' : 'Delete board'}
+          </button>
+        </footer>
+      </section>
     );
   }
 
@@ -11327,8 +11617,38 @@ export function IDEWorkspace({
     return <div className="manager-inline-status manager-inline-error">{message}</div>;
   }
 
-  function renderLocalBoardCard(row: LocalBoardRow, portOptions: LocalBoardPort[]) {
+  function renderLocalBoardCard(row: LocalBoardRow) {
     const displayName = localBoardDisplayName(row);
+    const needsReview = !isUploadableBoardFqbn(row.fqbn) || row.ai?.status === 'suggested';
+    const statusText = row.connected ? (row.portChanged ? 'port changed' : needsReview ? 'needs review' : 'connected') : row.profileId ? 'disconnected' : 'not set';
+    const statusClass = row.connected ? (row.portChanged || needsReview ? 'pending' : 'online') : row.profileId ? 'offline' : 'pending';
+    const isInspectorSelected = boardsHubInspectorTarget?.kind === 'local' && boardsHubInspectorTarget.rowKey === row.key;
+    const hubSubtitle = `${row.boardLabel || row.fqbn || 'Board type not set'} · ${row.port || 'No port'}`;
+
+    return (
+      <article key={row.key} className={`boards-hub-card ${isInspectorSelected ? 'selected' : ''}`}>
+        <button
+          className="boards-hub-card-trigger"
+          type="button"
+          aria-pressed={isInspectorSelected}
+          aria-label={`${displayName}, ${statusText}`}
+          onClick={() => selectLocalBoardInspector(row.key)}
+        >
+          <span className="boards-hub-card-icon">
+            <Cpu size={18} />
+            <span className={`boards-hub-status-dot status-${statusClass}`} aria-hidden="true" />
+          </span>
+          <span className="boards-hub-card-text">
+            <strong>{displayName}</strong>
+            <span>{hubSubtitle}</span>
+          </span>
+          <ChevronRight size={16} className="boards-hub-card-chevron" aria-hidden="true" />
+        </button>
+      </article>
+    );
+  }
+
+  function renderLocalBoardDetailsPanel(row: LocalBoardRow, portOptions: LocalBoardPort[]) {
     const commonBoardOptions = BOARD_OPTIONS.map((option) => ({ value: option.value, label: option.label }));
     const commonBoardValues = new Set(commonBoardOptions.map((option) => option.value));
     const detectedBoardOptions = uniqueBoardOptions(
@@ -11359,14 +11679,11 @@ export function IDEWorkspace({
 
     const exactChipProbe = row.detectionSource === 'esptool-chip-probe';
     const hasDetectionHint = row.matchingBoards?.some((match) => match.isHidden || isNonUploadableBoardFqbn(match.fqbn));
-    const needsReview = !isUploadableBoardFqbn(row.fqbn) || row.ai?.status === 'suggested';
     const shouldShowAccuracyAdvisory =
       row.connected &&
       isUploadableBoardFqbn(row.fqbn) &&
       !exactChipProbe &&
       !isOfficialArduinoBoardFqbn(row.fqbn);
-    const statusText = row.connected ? (row.portChanged ? 'port changed' : needsReview ? 'needs review' : 'connected') : row.profileId ? 'disconnected' : 'not set';
-    const statusClass = row.connected ? (row.portChanged || needsReview ? 'pending' : 'online') : row.profileId ? 'offline' : 'pending';
     const canUseBoard = isUploadableBoardFqbn(row.fqbn) && Boolean(row.port);
     const aiMessage =
       row.ai?.status && row.ai.status !== 'suggested' && row.ai.status !== 'no-suggestion'
@@ -11390,8 +11707,7 @@ export function IDEWorkspace({
     const deleteBusy = busyAction === `delete-local-board:${row.key}`;
     const makeCloudBusy = busyAction === `make-cloud-board:${row.key}`;
     const installCloudBusy = busyAction === `install-cloud-runtime:${row.key}`;
-    const isExpanded = Boolean(expandedLocalBoardKeys[row.key]);
-    const isSelected = Boolean(row.profileId && row.profileId === selectedLocalBoardId);
+    const isActiveBoard = Boolean(row.profileId && row.profileId === selectedLocalBoardId);
     const advancedOpen = localBoardAdvancedOpenKey === row.key;
     const linkedCloudBoard = row.cloudBoardId ? boards.find((board) => board.$id === row.cloudBoardId) ?? null : null;
     const linkedCloudStatus = linkedCloudBoard ? calculateBoardStatus(linkedCloudBoard.lastSeen, linkedCloudBoard.status) : null;
@@ -11402,264 +11718,267 @@ export function IDEWorkspace({
     const canEnableTantalumCloud = Boolean(row.profileId && isCloudCapableBoardFqbn(row.fqbn) && canResolveUsbPort);
     const canInstallTantalumCloud = Boolean(row.profileId && row.cloudBoardId && linkedCloudBoard && canResolveUsbPort);
 
+    const boardTypeOptions: BoardsHubSelectOption[] = [
+      ...commonBoardOptions.map((option) => ({ ...option, group: 'Common boards' })),
+      ...detectedBoardOptions.map((option) => ({ ...option, group: 'Detected candidates' })),
+      ...(currentBoardOption ? [{ ...currentBoardOption, group: 'Current selection' }] : []),
+    ];
+    const portSelectOptions: BoardsHubSelectOption[] = fullPortOptions.map((port) => ({
+      value: port.path,
+      label: localBoardPortLabel(port),
+      group: 'Available ports',
+    }));
+    const panelAlerts = [
+      aiMessage ? { tone: 'error' as const, text: aiMessage } : null,
+      row.matchingBoards && row.matchingBoards.length > 1 && !exactChipProbe
+        ? { tone: 'default' as const, text: 'Multiple board matches found. Confirm the board type before saving.' }
+        : null,
+      hasDetectionHint && !exactChipProbe
+        ? { tone: 'default' as const, text: 'ESP32 Family Device is a hint only. Select the exact board type.' }
+        : null,
+      shouldShowAccuracyAdvisory
+        ? { tone: 'default' as const, text: 'Auto scan is advisory. Confirm the exact board before uploading.' }
+        : null,
+      selectedPortIsKnownGeneric && !row.connected
+        ? { tone: 'default' as const, text: `${row.port} is a serial port but not detected as a board.` }
+        : null,
+      row.portChanged && row.stalePort
+        ? { tone: 'default' as const, text: `USB port changed from ${row.stalePort} to ${row.port}.` }
+        : null,
+      linkedCloudBoard && !row.lastCloudProvisionedAt
+        ? { tone: 'warning' as const, text: 'Cloud runtime install needed for OTA and WiFi provisioning.' }
+        : null,
+      cloudLinkMissing ? { tone: 'error' as const, text: 'Cloud link is missing from the current board list.' } : null,
+      likelyCloudBoard && !row.cloudBoardId
+        ? { tone: 'default' as const, text: `Likely match: ${likelyCloudBoard.name}. Link it before USB upload.` }
+        : null,
+      !row.cloudBoardId && isCloudCapableBoardFqbn(row.fqbn) && (!row.connected || !row.port)
+        ? { tone: 'default' as const, text: 'Connect and save this board over USB before enabling cloud.' }
+        : null,
+    ].filter((entry): entry is { tone: 'default' | 'warning' | 'error'; text: string } => Boolean(entry)).slice(0, 2);
+
+    const inspectorMeta = [
+      row.port || null,
+      row.manufacturer || null,
+      localBoardConfidenceText(row),
+    ].filter(Boolean);
+    if (linkedCloudBoard) {
+      inspectorMeta.push(`Cloud ${linkedCloudStatus}${row.lastCloudProvisionedAt ? '' : ', needs runtime'}`);
+    } else if (cloudLinkMissing) {
+      inspectorMeta.push('Cloud link missing');
+    }
+
     return (
-      <article key={row.key} className={`local-board-card ${isSelected ? 'active' : ''} ${row.connected ? 'connected' : 'disconnected'}`}>
-        <button className="local-board-card-head local-board-accordion-trigger" type="button" aria-expanded={isExpanded} onClick={() => toggleLocalBoardExpanded(row.key)}>
-          <div>
-            <strong>{displayName}</strong>
-            <span>{row.boardLabel || row.fqbn || 'Board type not set'}{row.port ? ` • ${row.port}` : ' • No port selected'}</span>
+      <section className="boards-inspector" aria-label={`${localBoardDisplayName(row)} details`}>
+        <header className="boards-inspector-header">
+          <div className="boards-inspector-headline">
+            <h3>{localBoardDisplayName(row)}</h3>
+            {isActiveBoard ? <span className="boards-inspector-flag">Active</span> : null}
           </div>
-          <span className="local-board-summary-badges">
-            {isSelected ? <span className="release-badge">Selected</span> : null}
-            {row.cloudBoardId ? <span className="release-badge">Cloud linked</span> : null}
-            {row.lastCloudProvisionedAt ? <span className="release-badge">Tantalum Cloud installed</span> : null}
-            {row.cloudBoardId && !row.lastCloudProvisionedAt ? <span className="release-badge">Tantalum Cloud install needed</span> : null}
-            {!row.cloudBoardId && likelyCloudBoard ? <span className="release-badge">Cloud link missing</span> : null}
-            {!row.cloudBoardId && !likelyCloudBoard && isCloudCapableBoardFqbn(row.fqbn) ? <span className="release-badge">Plain local upload</span> : null}
-            <span className={`status-pill status-${statusClass}`}>{statusText}</span>
-            {isExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-          </span>
-        </button>
+          {inspectorMeta.length > 0 ? <p className="boards-inspector-subtitle">{inspectorMeta.join(' · ')}</p> : null}
+        </header>
 
-        <div className="local-board-meta">
-          <span>{row.manufacturer || 'Unknown manufacturer'}</span>
-          <span>{localBoardConfidenceText(row)}</span>
-          {linkedCloudBoard ? <span>Cloud {linkedCloudStatus}</span> : null}
-          {cloudLinkMissing ? <span>Cloud link missing</span> : null}
-          {likelyCloudBoard ? <span>Likely cloud board: {likelyCloudBoard.name}</span> : null}
-          {row.ai?.status === 'suggested' ? <span>AI suggested</span> : null}
-        </div>
+        <div className="boards-inspector-body">
+          {panelAlerts.length > 0 ? (
+            <div className="boards-inspector-alerts">
+              {panelAlerts.map((alert) => (
+                <div
+                  key={alert.text}
+                  className={`boards-hub-note ${alert.tone === 'warning' ? 'boards-hub-note-warning' : ''} ${alert.tone === 'error' ? 'boards-hub-note-error' : ''}`}
+                >
+                  {alert.text}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
-        {isExpanded ? (
-          <>
-            {aiMessage ? <div className="manager-inline-status manager-inline-error">{aiMessage}</div> : null}
-            {row.matchingBoards && row.matchingBoards.length > 1 && !exactChipProbe ? (
-              <div className="manager-inline-status">Multiple board matches found. Confirm the board type before saving.</div>
-            ) : null}
-            {hasDetectionHint && !exactChipProbe ? (
-              <div className="manager-inline-status">
-                ESP32 Family Device is a detection hint, not an upload target. Select the exact board type, for example ESP32-C3.
-              </div>
-            ) : null}
-            {exactChipProbe ? <div className="manager-inline-status">Auto scan identified the ESP chip family from the board bootloader.</div> : null}
-            {shouldShowAccuracyAdvisory ? (
-              <div className="manager-inline-status">
-                Auto scan is an advisory match for this board type. If this is a clone or vendor-specific board, confirm the exact board in Advanced search before uploading.
-              </div>
-            ) : null}
-            {selectedPortIsKnownGeneric && !row.connected ? (
-              <div className="manager-inline-status">
-                {row.port} is available as a serial port, but it is not detected as a board. Select a USB board port or run Auto detect.
-              </div>
-            ) : null}
-            {row.portChanged && row.stalePort ? (
-              <div className="manager-inline-status">
-                USB port changed from {row.stalePort} to {row.port}. The IDE will use the live port for USB actions.
-              </div>
-            ) : null}
-            {linkedCloudBoard ? (
-              <div className="manager-inline-status">
-                Linked to cloud board {linkedCloudBoard.name}. Wired uploads keep the Tantalum cloud runtime installed.
-              </div>
-            ) : null}
-            {linkedCloudBoard && !row.lastCloudProvisionedAt ? (
-              <div className="manager-inline-status">
-                Tantalum Cloud install needed. Install it to enable heartbeat, OTA updates, and secure WiFi provisioning.
-              </div>
-            ) : null}
-            {!row.cloudBoardId && isCloudCapableBoardFqbn(row.fqbn) && (!row.connected || !row.port) ? (
-              <div className="manager-inline-status">
-                Connect and save this board over USB before enabling Tantalum Cloud.
-              </div>
-            ) : null}
-            {cloudLinkMissing ? (
-              <div className="manager-inline-status manager-inline-error">
-                This saved local board has a cloud link, but that remote board is not in the current list. Refresh cloud boards or relink before uploading.
-              </div>
-            ) : null}
-            {likelyCloudBoard ? (
-              <div className="manager-inline-status">
-                This looks like cloud board {likelyCloudBoard.name}. Link it before USB upload to keep OTA and provisioning installed.
-              </div>
-            ) : null}
-
-            <div className="local-board-fields">
-              <label>
-                Name
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Configuration</h4>
+            <div className="boards-inspector-fields">
+              <label className="boards-hub-field">
+                <span>Name</span>
                 <input value={row.name} onChange={(event) => updateLocalBoardEdit(row.key, { name: event.target.value })} placeholder={row.boardLabel || 'Workbench board'} />
               </label>
-              <label>
-                Board type
-                <select value={row.fqbn} onChange={(event) => selectBoardType(event.target.value)}>
-                  <option value="">Select exact board type</option>
-                  <optgroup label="Common boards">
-                    {commonBoardOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                  {detectedBoardOptions.length > 0 ? (
-                    <optgroup label="Detected candidates">
-                      {detectedBoardOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                  {currentBoardOption ? (
-                    <optgroup label="Current selection">
-                      <option value={currentBoardOption.value}>{currentBoardOption.label}</option>
-                    </optgroup>
-                  ) : null}
-                </select>
-              </label>
-              <div className="local-board-advanced-toggle">
-                <button className="secondary-button compact" type="button" onClick={() => handleToggleLocalBoardAdvanced(row.key)}>
-                  <Search size={13} />
-                  {advancedOpen ? 'Hide installed boards' : 'Advanced board search'}
-                </button>
-              </div>
-              {advancedOpen ? (
-                <div className="local-board-advanced">
-                  <div className="search-strip local-board-search-strip">
-                    <Search size={16} />
-                    <input value={localBoardCatalogQuery} onChange={(event) => setLocalBoardCatalogQuery(event.target.value)} placeholder="Search installed boards by name or FQBN" />
-                  </div>
-                  {localBoardCatalogLoading ? renderManagerInlineLoading('Loading installed boards...') : null}
-                  {localBoardCatalogError ? renderManagerInlineError(localBoardCatalogError) : null}
-                  {!localBoardCatalogLoading && !localBoardCatalogError && visibleLocalBoardCatalog.length === 0 ? (
-                    <div className="manager-inline-status">No installed board matches found.</div>
-                  ) : null}
-                  {visibleLocalBoardCatalog.length > 0 ? (
-                    <div className="local-board-catalog-list">
-                      {visibleLocalBoardCatalog.map((option) => (
-                        <button
-                          key={option.value}
-                          className={`local-board-catalog-item ${row.fqbn === option.value ? 'active' : ''}`}
-                          type="button"
-                          onClick={() => chooseInstalledBoard(option)}
-                        >
-                          <strong>{option.label}</strong>
-                          <span>{option.value}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              <label>
-                Port
+              <label className="boards-hub-field">
+                <span>Port</span>
                 {fullPortOptions.length > 0 ? (
-                  <select value={row.port} onChange={(event) => updateLocalBoardEdit(row.key, { port: event.target.value })}>
-                    <option value="">Select port</option>
-                    {fullPortOptions.map((port) => (
-                      <option key={port.path} value={port.path}>
-                        {localBoardPortLabel(port)}
-                      </option>
-                    ))}
-                  </select>
+                  <BoardsHubSelect
+                    value={row.port}
+                    options={portSelectOptions}
+                    placeholder="Select port"
+                    open={localBoardPickerOpen?.rowKey === row.key && localBoardPickerOpen.picker === 'port'}
+                    onOpenChange={(open) => {
+                      if (open) {
+                        setCloudLinkLocalPickerOpen(false);
+                        setLocalBoardPickerOpen({ rowKey: row.key, picker: 'port' });
+                        return;
+                      }
+                      setLocalBoardPickerOpen((current) => (current?.rowKey === row.key && current.picker === 'port' ? null : current));
+                    }}
+                    onChange={(port) => updateLocalBoardEdit(row.key, { port })}
+                  />
                 ) : (
                   <input value={row.port} onChange={(event) => updateLocalBoardEdit(row.key, { port: event.target.value })} placeholder="COM3 or /dev/ttyUSB0" />
                 )}
               </label>
+              <div className="boards-hub-field">
+                <span>Board type</span>
+                <BoardsHubSelect
+                  value={row.fqbn}
+                  options={boardTypeOptions}
+                  placeholder="Select exact board type"
+                  open={localBoardPickerOpen?.rowKey === row.key && localBoardPickerOpen.picker === 'board'}
+                  onOpenChange={(open) => {
+                    if (open) {
+                      setCloudLinkLocalPickerOpen(false);
+                      setLocalBoardPickerOpen({ rowKey: row.key, picker: 'board' });
+                      return;
+                    }
+                    setLocalBoardPickerOpen((current) => (current?.rowKey === row.key && current.picker === 'board' ? null : current));
+                  }}
+                  onChange={selectBoardType}
+                />
+              </div>
             </div>
 
-            <div className="local-board-actions">
-              {row.profileId ? (
-                <button className="secondary-button compact" type="button" onClick={() => setSelectedLocalBoardId(row.profileId ?? '')} disabled={isSelected}>
-                  {isSelected ? 'Selected' : 'Select'}
-                </button>
-              ) : null}
-              <button className="secondary-button compact" type="button" onClick={() => handleResetLocalBoardEdit(row.key)}>
-                Reset
-              </button>
-              <button
-                className="secondary-button compact"
-                type="button"
-                onClick={() => openBoardCodeDestination(localBoardCodeTarget(row))}
-                disabled={busyAction === 'view-code'}
-              >
-                <FileCode2 size={13} />
-                View code
-              </button>
-              {row.profileId ? (
+            <BoardsHubToggle
+              checked={advancedOpen}
+              label="Advanced board search"
+              description="Search installed cores by name or FQBN"
+              onChange={(checked) => {
+                if (checked) {
+                  setLocalBoardAdvancedOpenKey(row.key);
+                  void loadLocalBoardCatalog();
+                } else {
+                  setLocalBoardAdvancedOpenKey((current) => (current === row.key ? null : current));
+                  setLocalBoardCatalogQuery('');
+                }
+              }}
+            />
+
+            {advancedOpen ? (
+              <div className="boards-hub-advanced-panel">
+                <label className="boards-hub-field">
+                  <span>Search installed boards</span>
+                  <input value={localBoardCatalogQuery} onChange={(event) => setLocalBoardCatalogQuery(event.target.value)} placeholder="Name or FQBN" />
+                </label>
+                {localBoardCatalogLoading ? renderManagerInlineLoading('Loading installed boards...') : null}
+                {localBoardCatalogError ? renderManagerInlineError(localBoardCatalogError) : null}
+                {!localBoardCatalogLoading && !localBoardCatalogError && visibleLocalBoardCatalog.length === 0 ? (
+                  <div className="boards-hub-note">No installed board matches found.</div>
+                ) : null}
+                {visibleLocalBoardCatalog.length > 0 ? (
+                  <div className="boards-hub-catalog">
+                    {visibleLocalBoardCatalog.map((option) => (
+                      <button
+                        key={option.value}
+                        className={row.fqbn === option.value ? 'active' : ''}
+                        type="button"
+                        onClick={() => chooseInstalledBoard(option)}
+                      >
+                        <strong>{option.label}</strong>
+                        <span>{option.value}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+
+          {row.profileId && isCloudCapableBoardFqbn(row.fqbn) ? (
+            <section className="boards-inspector-block">
+              <h4 className="boards-inspector-block-title">Cloud</h4>
+              <div className="boards-inspector-action-stack">
+                {!row.cloudBoardId ? (
+                  likelyCloudBoard ? (
+                    <button className="boards-hub-btn" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard)} disabled={linkCloudBusy}>
+                      {linkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
+                      Link cloud board
+                    </button>
+                  ) : (
+                    <button className="boards-hub-btn" type="button" onClick={() => void handleMakeLocalBoardCloud(row)} disabled={makeCloudBusy || !canEnableTantalumCloud}>
+                      {makeCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Cloud size={13} />}
+                      Enable cloud
+                    </button>
+                  )
+                ) : (
+                  <>
+                    <button
+                      className="boards-hub-btn"
+                      type="button"
+                      onClick={() => void handleInstallTantalumCloudForLocalBoard(row, linkedCloudBoard)}
+                      disabled={!canInstallTantalumCloud || installCloudBusy}
+                    >
+                      {installCloudBusy ? <LoaderCircle size={13} className="spin" /> : <HardDriveUpload size={13} />}
+                      {row.lastCloudProvisionedAt ? 'Reinstall runtime' : 'Install runtime'}
+                    </button>
+                    <button
+                      className="boards-hub-btn"
+                      type="button"
+                      onClick={() => void openUsbWifiProvisioning(row)}
+                      disabled={!canResolveUsbPort || !row.lastCloudProvisionedAt || busyAction === 'wifi-usb-provision'}
+                    >
+                      <Wifi size={13} />
+                      WiFi over USB
+                    </button>
+                  </>
+                )}
+              </div>
+            </section>
+          ) : null}
+
+          {row.profileId ? (
+            <section className="boards-inspector-block">
+              <h4 className="boards-inspector-block-title">Code</h4>
+              <div className="boards-inspector-code-row">
                 <button
-                  className="secondary-button compact"
+                  className="boards-hub-btn"
+                  type="button"
+                  onClick={() => openBoardCodeDestination(localBoardCodeTarget(row))}
+                  disabled={busyAction === 'view-code'}
+                >
+                  View code
+                </button>
+                <button
+                  className="boards-hub-btn"
                   type="button"
                   onClick={() => void handleSetLocalBoardCodeVisibility(row, row.sourceCodeVisibility === 'public' ? 'private' : 'public')}
                   disabled={busyAction === `code-visibility:${row.key}`}
-                  title={row.sourceCodeVisibility === 'public' ? 'Only your account can restore future snapshots after switching to private.' : 'Any signed-in Tantalum account can restore snapshots from this board marker after switching to public.'}
                 >
-                  {busyAction === `code-visibility:${row.key}` ? <LoaderCircle size={13} className="spin" /> : null}
-                  Code {row.sourceCodeVisibility === 'public' ? 'public' : 'private'}
+                  {busyAction === `code-visibility:${row.key}` ? 'Updating…' : row.sourceCodeVisibility === 'public' ? 'Make private' : 'Make public'}
                 </button>
-              ) : null}
-              <button className="primary-button compact" type="button" onClick={() => void handleSaveLocalBoard(row)} disabled={saveBusy || !canUseBoard}>
-                {saveBusy ? <LoaderCircle size={13} className="spin" /> : null}
-                {row.profileId ? 'Save' : 'Save board'}
+              </div>
+            </section>
+          ) : null}
+        </div>
+
+        <footer className="boards-inspector-footer">
+          <button className="boards-hub-btn boards-hub-btn-primary boards-inspector-save" type="button" onClick={() => void handleSaveLocalBoard(row)} disabled={saveBusy || !canUseBoard}>
+            {saveBusy ? <LoaderCircle size={13} className="spin" /> : null}
+            {row.profileId ? 'Save changes' : 'Save board'}
+          </button>
+          <div className="boards-inspector-footer-row">
+            {row.profileId && !isActiveBoard ? (
+              <button className="boards-hub-btn boards-inspector-footer-action" type="button" onClick={() => setSelectedLocalBoardId(row.profileId ?? '')}>
+                Set as active
               </button>
-              {row.profileId && isCloudCapableBoardFqbn(row.fqbn) ? (
-                row.cloudBoardId ? (
-                  <button className="secondary-button compact" type="button" disabled>
-                    <Link2 size={13} />
-                    Cloud linked
-                  </button>
-                ) : likelyCloudBoard ? (
-                  <button className="secondary-button compact" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard)} disabled={linkCloudBusy}>
-                    {linkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
-                    Link cloud board
-                  </button>
-                ) : (
-                  <button
-                    className="secondary-button compact"
-                    type="button"
-                    onClick={() => void handleMakeLocalBoardCloud(row)}
-                    disabled={makeCloudBusy || !canEnableTantalumCloud}
-                    title={!canEnableTantalumCloud ? 'Connect and save this ESP32/ESP8266 board over USB before enabling Tantalum Cloud.' : undefined}
-                  >
-                    {makeCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
-                    Enable Tantalum Cloud
-                  </button>
-                )
-              ) : null}
-              {row.profileId && row.cloudBoardId ? (
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  onClick={() => void handleInstallTantalumCloudForLocalBoard(row, linkedCloudBoard)}
-                  disabled={!canInstallTantalumCloud || installCloudBusy}
-                  title={!canInstallTantalumCloud ? 'Connect the linked local board over USB before installing Tantalum Cloud.' : undefined}
-                >
-                  {installCloudBusy ? <LoaderCircle size={13} className="spin" /> : <HardDriveUpload size={13} />}
-                  {row.lastCloudProvisionedAt ? 'Reinstall Tantalum Cloud' : 'Install Tantalum Cloud'}
-                </button>
-              ) : null}
-              {row.profileId && row.cloudBoardId ? (
-                <button
-                  className="secondary-button compact"
-                  type="button"
-                  onClick={() => void openUsbWifiProvisioning(row)}
-                  disabled={!canResolveUsbPort || !row.lastCloudProvisionedAt || busyAction === 'wifi-usb-provision'}
-                  title={!row.lastCloudProvisionedAt ? 'Install Tantalum Cloud before sending WiFi over USB.' : undefined}
-                >
-                  <Wifi size={13} />
-                  WiFi over USB
-                </button>
-              ) : null}
-              <button className="danger-button compact" type="button" onClick={() => void handleDeleteLocalBoard(row)} disabled={deleteBusy}>
-              {deleteBusy ? <LoaderCircle size={13} className="spin" /> : null}
-              Forget
+            ) : null}
+            <button className="boards-hub-btn boards-inspector-footer-action" type="button" onClick={() => handleResetLocalBoardEdit(row.key)}>
+              Reset changes
+            </button>
+            {row.profileId ? (
+              <button className="boards-hub-btn boards-inspector-footer-action boards-inspector-footer-danger" type="button" onClick={() => void handleDeleteLocalBoard(row)} disabled={deleteBusy}>
+                {deleteBusy ? 'Removing…' : 'Forget board'}
               </button>
-            </div>
-          </>
-        ) : null}
-      </article>
+            ) : null}
+          </div>
+        </footer>
+      </section>
     );
   }
 
-  function renderBoardsWorkspace() {
+  function buildLocalBoardPortOptions(): LocalBoardPort[] {
     const portOptionMap = new Map<string, LocalBoardPort>();
     const addPortOption = (port: LocalBoardPort | null) => {
       if (port?.path && !portOptionMap.has(port.path)) {
@@ -11669,167 +11988,623 @@ export function IDEWorkspace({
     localBoardPorts.forEach(addPortOption);
     detectedLocalBoards.forEach((board) => addPortOption(portOptionFromBoard(board)));
     localBoardProfiles.forEach((board) => addPortOption(portOptionFromBoard(board)));
-    const portOptions = Array.from(portOptionMap.values()).sort(compareLocalBoardPorts);
+    return Array.from(portOptionMap.values()).sort(compareLocalBoardPorts);
+  }
+
+  function renderBoardsCloudList() {
+    const cloudQuery = boardsHubCloudQuery.trim().toLowerCase();
+    const visibleCloudBoards = boards.filter((board) => {
+      if (!cloudQuery) {
+        return true;
+      }
+      return `${board.name} ${board.boardType}`.toLowerCase().includes(cloudQuery);
+    });
 
     return (
-      <section className="tool-workspace manager-workspace board-manager-workspace local-board-workspace">
-        <div className="manager-page-header">
-          <div className="manager-title-block">
-            <h2>Local boards</h2>
+      <div className="boards-hub-scroll">
+        <section className="boards-hub-section">
+          <h3 className="boards-hub-section-label">Registered</h3>
+          {boardsLoading ? renderManagerInlineLoading('Loading cloud boards...') : null}
+          {boardsError ? renderManagerInlineError(boardsError) : null}
+          {!boardsLoading && visibleCloudBoards.length === 0 ? (
+            <div className="boards-hub-empty">
+              <Cloud size={22} />
+              <span>{cloudQuery ? 'No cloud boards match your search.' : 'No cloud boards yet.'}</span>
+            </div>
+          ) : (
+            <div className="boards-hub-card-list">
+              {visibleCloudBoards.map((board) => {
+                const status = calculateBoardStatus(board.lastSeen, board.status);
+                const isInspectorSelected = boardsHubInspectorTarget?.kind === 'cloud' && boardsHubInspectorTarget.boardId === board.$id;
+                return (
+                  <article key={board.$id} className={`boards-hub-card ${isInspectorSelected ? 'selected' : ''}`}>
+                    <button
+                      className="boards-hub-card-trigger"
+                      type="button"
+                      aria-pressed={isInspectorSelected}
+                      onClick={() => selectCloudBoardInspector(board.$id)}
+                    >
+                      <span className="boards-hub-card-icon">
+                        <Cloud size={17} />
+                        <span className={`boards-hub-status-dot status-${status}`} aria-hidden="true" />
+                      </span>
+                      <span className="boards-hub-card-text">
+                        <strong>{board.name}</strong>
+                        <span>{board.boardType}</span>
+                      </span>
+                      <ChevronRight size={16} className="boards-hub-card-chevron" aria-hidden="true" />
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {!boardsLoading && boards.length === 0 ? (
+          <p className="boards-hub-note">Enable cloud from a saved ESP32 board to register it here.</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderBoardsHubToolbar() {
+    if (boardsHubCenterTab === 'local') {
+      return (
+        <div className="boards-hub-toolbar">
+          <div className="boards-hub-tabs" role="tablist" aria-label="Local board filters">
+            <button className={boardsHubLocalFilter === 'all' ? 'active' : ''} type="button" onClick={() => setBoardsHubLocalFilter('all')}>
+              All
+            </button>
+            <button className={boardsHubLocalFilter === 'connected' ? 'active' : ''} type="button" onClick={() => setBoardsHubLocalFilter('connected')}>
+              Connected
+            </button>
+            <button className={boardsHubLocalFilter === 'saved' ? 'active' : ''} type="button" onClick={() => setBoardsHubLocalFilter('saved')}>
+              Saved
+            </button>
           </div>
-          <div className="panel-actions">
-            <button className="secondary-button compact" type="button" onClick={handleAddManualLocalBoard}>
-              <Plus size={14} />
-              Add board
-            </button>
-            <button className="primary-button compact" type="button" onClick={() => void handleAutoScanLocalBoard()} disabled={localBoardAutoScanLoading || isLocalUploadBusyAction(busyAction)}>
-              {localBoardAutoScanLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}
-              {localBoardAutoScanLoading ? 'Scanning...' : 'Auto detect'}
-            </button>
+          <div className="boards-hub-toolbar-actions">
+            <label className="boards-hub-search">
+              <Search size={14} />
+              <input value={boardsHubLocalQuery} onChange={(event) => setBoardsHubLocalQuery(event.target.value)} placeholder="Search boards" />
+            </label>
           </div>
         </div>
-        <div className="panel-content manager-panel-content local-board-list">
-          {localBoardsError ? renderManagerInlineError(localBoardsError) : null}
-          {localBoardRows.length > 0 ? (
-            localBoardRows.map((row) => renderLocalBoardCard(row, portOptions))
-          ) : (
-            <div className="empty-panel">
-              <Cpu size={24} />
-              <p>No local boards configured. Add a board manually or run Auto detect.</p>
+      );
+    }
+
+    return (
+      <div className="boards-hub-toolbar boards-hub-cloud-toolbar">
+        <p className="boards-hub-cloud-summary">
+          {boards.length} registered board{boards.length === 1 ? '' : 's'}
+        </p>
+        <div className="boards-hub-toolbar-actions">
+          <label className="boards-hub-search">
+            <Search size={14} />
+            <input value={boardsHubCloudQuery} onChange={(event) => setBoardsHubCloudQuery(event.target.value)} placeholder="Search cloud boards" />
+          </label>
+          <button className="boards-hub-btn" type="button" onClick={() => void refreshBoardsList()} disabled={boardsLoading} title="Refresh cloud boards">
+            {boardsLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}
+            Refresh
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderBoardsWorkspace() {
+    const query = boardsHubLocalQuery.trim().toLowerCase();
+    const matchesQuery = (row: LocalBoardRow) => {
+      if (!query) {
+        return true;
+      }
+      const haystack = [
+        row.name,
+        row.boardLabel,
+        row.fqbn,
+        row.port,
+        localBoardDisplayName(row),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(query);
+    };
+    const matchesFilter = (row: LocalBoardRow) => {
+      if (boardsHubLocalFilter === 'connected') {
+        return row.connected;
+      }
+      if (boardsHubLocalFilter === 'saved') {
+        return Boolean(row.profileId);
+      }
+      return true;
+    };
+    const visibleLocalRows = localBoardRows.filter((row) => matchesFilter(row) && matchesQuery(row));
+    const connectedRows = visibleLocalRows.filter((row) => row.connected);
+    const savedRows = visibleLocalRows.filter((row) => row.profileId && !row.connected);
+    const draftRows = visibleLocalRows.filter((row) => !row.profileId);
+
+    const renderLocalSection = (label: string, rows: LocalBoardRow[], grid = false) => {
+      if (rows.length === 0) {
+        return null;
+      }
+      return (
+        <section className="boards-hub-section">
+          <h3 className="boards-hub-section-label">{label}</h3>
+          <div className={`boards-hub-card-list ${grid ? 'boards-hub-card-list-grid' : ''}`}>
+            {rows.map((row) => renderLocalBoardCard(row))}
+          </div>
+        </section>
+      );
+    };
+
+    return (
+      <section className="tool-workspace boards-hub">
+        <header className="boards-hub-hero">
+          <div>
+            <h1>My Boards</h1>
+            <p>Save USB boards locally and register ESP devices for cloud updates.</p>
+          </div>
+          <div className="boards-hub-hero-actions">
+            {boardsHubCenterTab === 'local' ? (
+              <>
+                <button className="boards-hub-btn" type="button" onClick={handleAddManualLocalBoard}>
+                  <Plus size={14} />
+                  Add board
+                </button>
+                <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void handleAutoScanLocalBoard()} disabled={localBoardAutoScanLoading || isLocalUploadBusyAction(busyAction)}>
+                  {localBoardAutoScanLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}
+                  {localBoardAutoScanLoading ? 'Scanning...' : 'Auto detect'}
+                </button>
+              </>
+            ) : null}
+          </div>
+        </header>
+
+        <div className="boards-hub-center-tabs" role="tablist" aria-label="Board sources">
+          <button className={boardsHubCenterTab === 'local' ? 'active' : ''} type="button" role="tab" aria-selected={boardsHubCenterTab === 'local'} onClick={() => switchBoardsHubCenterTab('local')}>
+            Local
+          </button>
+          <button className={boardsHubCenterTab === 'cloud' ? 'active' : ''} type="button" role="tab" aria-selected={boardsHubCenterTab === 'cloud'} onClick={() => switchBoardsHubCenterTab('cloud')}>
+            Cloud
+          </button>
+        </div>
+
+        {renderBoardsHubToolbar()}
+
+        <div className="boards-hub-list-pane">
+          {boardsHubCenterTab === 'local' ? (
+            <div className="boards-hub-scroll">
+              {localBoardsError ? renderManagerInlineError(localBoardsError) : null}
+              {visibleLocalRows.length > 0 ? (
+                <>
+                  {boardsHubLocalFilter === 'all' ? (
+                    <>
+                      {renderLocalSection('Connected', connectedRows)}
+                      {renderLocalSection('Saved', savedRows)}
+                      {renderLocalSection('Detected', draftRows, true)}
+                    </>
+                  ) : (
+                    renderLocalSection(boardsHubLocalFilter === 'connected' ? 'Connected' : 'Saved', visibleLocalRows, boardsHubLocalFilter === 'saved')
+                  )}
+                </>
+              ) : (
+                <div className="boards-hub-empty">
+                  <Cpu size={24} />
+                  <span>{query ? 'No boards match your search.' : 'No boards yet. Run Auto detect or add one manually.'}</span>
+                </div>
+              )}
             </div>
+          ) : (
+            renderBoardsCloudList()
           )}
         </div>
       </section>
     );
   }
 
-  function renderRemoteBoardsPanel() {
-    return (
-      <div className="remote-board-panel">
-        <div className="remote-board-panel-header">
-          <div>
-            <h2>Remote boards</h2>
-            <span>{boards.length} saved</span>
-          </div>
-          <button
-            className="primary-button compact"
-            type="button"
-            disabled
-            title="Connect and save a local ESP32/ESP8266 board, then choose Enable Tantalum Cloud."
-          >
-            <Plus size={14} />
-            Use local board
-          </button>
-        </div>
-        <div className="remote-board-list">
-          <div className="remote-board-hint">
-            Connect and save a local ESP32/ESP8266 board, then choose Enable Tantalum Cloud.
-          </div>
-          {boardsLoading ? renderManagerInlineLoading('Loading remote boards...') : null}
-          {boardsError ? renderManagerInlineError(boardsError) : null}
-          {!boardsLoading && boards.length === 0 ? (
-            <div className="remote-board-empty">
-              <HardDriveUpload size={22} />
-              <span>No remote boards yet.</span>
+  function renderBoardsInspectorPanel() {
+    if (!boardsHubInspectorTarget) {
+      return (
+        <section className="boards-inspector boards-inspector-empty">
+          <div className="boards-inspector-empty-inner">
+            <div className="boards-inspector-empty-icon" aria-hidden="true">
+              <Cpu size={22} strokeWidth={1.5} />
             </div>
-          ) : null}
-          {boards.map((board) => {
-            const status = calculateBoardStatus(board.lastSeen, board.status);
-            const isSelected = selectedBoardId === board.$id;
-            const selectedLocalCanLink = Boolean(selectedLocalBoard?.profileId && isCloudCapableBoardFqbn(selectedLocalBoard.fqbn));
-            const selectedLocalLinkedToThis = selectedLocalBoard?.cloudBoardId === board.$id;
-            const selectedLocalLinkBusy = selectedLocalBoard
-              ? busyAction === `link-cloud-board:${selectedLocalBoard.key}` || busyAction === `install-cloud-runtime:${selectedLocalBoard.key}`
-              : false;
-            const linkedLocalRow = localBoardRows.find((row) => row.profileId && row.cloudBoardId === board.$id) ?? null;
-            const needsRuntimeInstall = status === 'pending' || !board.lastSeen || !board.runtimeVersion;
-            const canOpenRemoteWifiSetup = status === 'online';
-            const canInstallFromLinkedLocal = Boolean(linkedLocalRow?.profile && (linkedLocalRow.port || linkedLocalRow.fingerprint));
-            const linkedLocalInstallBusy = linkedLocalRow ? busyAction === `install-cloud-runtime:${linkedLocalRow.key}` : false;
-            return (
-              <div key={board.$id} className={`remote-board-row ${isSelected ? 'active' : ''}`}>
-                <button className={`remote-board-item ${isSelected ? 'active' : ''}`} type="button" onClick={() => setSelectedBoardId(board.$id)}>
-                  <div>
-                    <strong>{board.name}</strong>
-                    <span>{board.boardType}</span>
-                  </div>
-                  <span className={`status-pill status-${status}`}>{status}</span>
-                </button>
-                {isSelected ? (
-                  <div className="remote-board-actions">
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      onClick={() => {
-                        const profileId = selectedLocalBoard?.profileId;
-                        if (profileId) {
-                          setPendingSelectedLocalCloudLink({ profileId, boardId: board.$id });
-                        }
-                      }}
-                      disabled={!selectedLocalCanLink || selectedLocalLinkedToThis || selectedLocalLinkBusy}
-                    >
-                      {selectedLocalLinkBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
-                      {selectedLocalLinkedToThis ? 'Local linked' : 'Link selected local'}
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      onClick={() => {
-                        setSelectedBoardId(board.$id);
-                        openBoardCodeDestination(remoteBoardCodeTarget(board, linkedLocalRow));
-                      }}
-                      disabled={busyAction === 'view-code'}
-                    >
-                      <FileCode2 size={13} />
-                      View code
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      onClick={() => {
-                        setSelectedBoardId(board.$id);
-                        if (linkedLocalRow?.profileId) {
-                          setPendingCloudRuntimeInstall({ profileId: linkedLocalRow.profileId, boardId: board.$id });
-                        }
-                      }}
-                      disabled={!hasDeviceGatewayFunction() || !canInstallFromLinkedLocal || linkedLocalInstallBusy}
-                      title={!canInstallFromLinkedLocal ? 'Link the matching local board before installing Tantalum Cloud.' : undefined}
-                    >
-                      {linkedLocalInstallBusy ? 'Installing...' : 'Install Tantalum Cloud'}
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      type="button"
-                      onClick={() => {
-                        setSelectedBoardId(board.$id);
-                        void handleRequestBoardProvisioning(board);
-                      }}
-                      disabled={busyAction === 'start-provisioning' || !hasBoardAdminFunction() || !canOpenRemoteWifiSetup}
-                    >
-                      Open WiFi setup
-                    </button>
-                  </div>
-                ) : null}
-                {isSelected && !hasDeviceGatewayFunction() ? (
-                  <div className="remote-board-hint">Device gateway is missing; Tantalum Cloud install cannot be started.</div>
-                ) : null}
-                {isSelected && !selectedLocalCanLink ? (
-                  <div className="remote-board-hint">Select or save a local ESP32/ESP8266 board to link it here.</div>
-                ) : null}
-                {isSelected && needsRuntimeInstall ? (
-                  <div className="remote-board-hint">Tantalum Cloud install needed. Connect the matching local board, link it, then install Tantalum Cloud over USB.</div>
-                ) : null}
-                {isSelected && linkedLocalRow && !canInstallFromLinkedLocal ? (
-                  <div className="remote-board-hint">Linked local board is not connected over USB. Connect it; the IDE will refresh the live port before installing Tantalum Cloud.</div>
-                ) : null}
-                {isSelected && !canOpenRemoteWifiSetup ? (
-                  <div className="remote-board-hint">Board is not online. Send WiFi directly over USB, or use BLE/SoftAP provisioning from mobile.</div>
-                ) : null}
-                </div>
-            );
-          })}
+            <strong>No board selected</strong>
+            <p>Choose a board from the list to view settings and actions.</p>
+          </div>
+        </section>
+      );
+    }
+
+    if (boardsHubInspectorTarget.kind === 'local') {
+      const row = localBoardRows.find((entry) => entry.key === boardsHubInspectorTarget.rowKey) ?? null;
+      if (!row) {
+        return (
+          <section className="boards-inspector boards-inspector-empty">
+            <div className="boards-inspector-empty-inner">
+              <strong>Board unavailable</strong>
+              <p>This board was removed or changed. Select another one from the list.</p>
+            </div>
+          </section>
+        );
+      }
+
+      return renderLocalBoardDetailsPanel(row, buildLocalBoardPortOptions());
+    }
+
+    if (selectedBoard) {
+      return renderRemoteBoardDetailsPanel();
+    }
+
+    return (
+      <section className="boards-inspector boards-inspector-empty">
+        <div className="boards-inspector-empty-inner">
+          <div className="boards-inspector-empty-icon" aria-hidden="true">
+            <Cloud size={22} strokeWidth={1.5} />
+          </div>
+          <strong>Board unavailable</strong>
+          <p>This cloud board is no longer in your list.</p>
         </div>
+      </section>
+    );
+  }
+
+  function selectProjectInspector(projectId: string) {
+    setSelectedProjectId(projectId);
+    ensureProjectsDetailPanelVisible();
+  }
+
+  function renderProjectHubCard(projectEntry: ProjectFolder) {
+    const isInspectorSelected = selectedProjectId === projectEntry.id;
+    const projectStats = projectEntry.exists
+      ? `${projectEntry.details?.topLevelFolders ?? 0} folders · ${projectEntry.details?.topLevelFiles ?? 0} files`
+      : 'Missing folder';
+    const projectActivity = projectEntry.lastOpenedAt
+      ? `Opened ${formatProjectDate(projectEntry.lastOpenedAt)}`
+      : `Added ${formatProjectDate(projectEntry.addedAt)}`;
+    const statusClass = projectEntry.exists ? 'online' : 'offline';
+    const hubSubtitle = `${projectStats} · ${projectActivity}`;
+
+    return (
+      <article key={projectEntry.id} className={`projects-hub-card ${isInspectorSelected ? 'selected' : ''}`}>
+        <button
+          className="projects-hub-card-trigger"
+          type="button"
+          aria-pressed={isInspectorSelected}
+          aria-label={`${getProjectDisplayName(projectEntry)}, ${projectEntry.exists ? 'ready' : 'missing'}`}
+          title={projectEntry.path}
+          onClick={() => selectProjectInspector(projectEntry.id)}
+          onDoubleClick={() => void openProjectWorkspace(projectEntry)}
+        >
+          <span className="projects-hub-card-icon">
+            <FolderOpen size={18} strokeWidth={1.75} />
+            <span className={`projects-hub-status-dot status-${statusClass}`} aria-hidden="true" />
+          </span>
+          <span className="projects-hub-card-text">
+            <span className="projects-hub-card-title-row">
+              <strong>{getProjectDisplayName(projectEntry)}</strong>
+              {projectEntry.favorite ? <Star size={12} fill="currentColor" className="projects-hub-card-star" aria-hidden="true" /> : null}
+            </span>
+            {projectViewMode === 'list' ? <span className="projects-hub-card-path">{projectEntry.path}</span> : null}
+            <span className="projects-hub-card-subtitle">{hubSubtitle}</span>
+          </span>
+          <ChevronRight size={16} className="projects-hub-card-chevron" aria-hidden="true" />
+        </button>
+      </article>
+    );
+  }
+
+  function renderProjectsHubSection(label: string, projects: ProjectFolder[]) {
+    if (projects.length === 0) {
+      return null;
+    }
+
+    return (
+      <section className="projects-hub-section">
+        <h3 className="projects-hub-section-label">{label}</h3>
+        <div className={`projects-hub-card-list projects-hub-card-list-${projectViewMode}`}>
+          {projects.map((projectEntry) => renderProjectHubCard(projectEntry))}
+        </div>
+      </section>
+    );
+  }
+
+  function renderProjectsHubList() {
+    const query = deferredProjectQuery.trim();
+    const cardListClassName = `projects-hub-card-list projects-hub-card-list-${projectViewMode}`;
+
+    if (visibleProjects.length === 0) {
+      return (
+        <div className="projects-hub-empty">
+          {query ? <Search size={22} /> : <FolderOpen size={22} />}
+          <span>
+            {query
+              ? 'No projects match your search.'
+              : projectSortMode === 'favorites'
+                ? 'No favorite projects yet. Star a project to add it here.'
+                : 'No projects yet. Add a folder or drop one here.'}
+          </span>
+        </div>
+      );
+    }
+
+    if (projectSortMode === 'name' && !query) {
+      const favoriteProjects = visibleProjects.filter((projectEntry) => projectEntry.favorite);
+      const otherProjects = visibleProjects.filter((projectEntry) => !projectEntry.favorite);
+      return (
+        <>
+          {renderProjectsHubSection('Favorites', favoriteProjects)}
+          {renderProjectsHubSection('Projects', otherProjects)}
+        </>
+      );
+    }
+
+    return (
+      <div className={cardListClassName}>
+        {visibleProjects.map((projectEntry) => renderProjectHubCard(projectEntry))}
       </div>
+    );
+  }
+
+  function renderProjectsWorkspace() {
+    return (
+      <section
+        className={`tool-workspace projects-hub ${projectDropActive ? 'projects-hub-drop-active' : ''}`}
+        onDragLeave={handleProjectDragLeave}
+        onDragOver={handleProjectDragOver}
+        onDrop={(event) => void handleProjectDrop(event)}
+      >
+        <header className="projects-hub-hero">
+          <div>
+            <h1>My Projects</h1>
+            <p>Bookmark folders and open them quickly from one place.</p>
+          </div>
+          <div className="projects-hub-hero-actions">
+            <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void pickProjectFolder()}>
+              <FolderPlus size={14} />
+              Add project
+            </button>
+          </div>
+        </header>
+
+        <div className="projects-hub-toolbar">
+          <div className="projects-hub-tabs" role="tablist" aria-label="Project filters">
+            <button
+              className={projectSortMode === 'name' ? 'active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={projectSortMode === 'name'}
+              onClick={() => setProjectSortMode('name')}
+            >
+              All
+            </button>
+            <button
+              className={projectSortMode === 'favorites' ? 'active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={projectSortMode === 'favorites'}
+              onClick={() => setProjectSortMode('favorites')}
+            >
+              Favorites
+            </button>
+            <button
+              className={projectSortMode === 'recent' ? 'active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={projectSortMode === 'recent'}
+              onClick={() => setProjectSortMode('recent')}
+            >
+              Recent
+            </button>
+          </div>
+          <div className="projects-hub-toolbar-actions">
+            <label className="boards-hub-search projects-hub-search" title="Search projects">
+              <Search size={14} />
+              <input value={projectQuery} onChange={(event) => setProjectQuery(event.target.value)} placeholder="Search projects" />
+            </label>
+            <div className="projects-hub-view-toggle" role="group" aria-label="Project view">
+              <button
+                className={projectViewMode === 'grid' ? 'active' : ''}
+                type="button"
+                onClick={() => setProjectViewMode('grid')}
+                title="Grid view"
+                aria-label="Grid view"
+                aria-pressed={projectViewMode === 'grid'}
+              >
+                <LayoutGrid size={14} />
+              </button>
+              <button
+                className={projectViewMode === 'list' ? 'active' : ''}
+                type="button"
+                onClick={() => setProjectViewMode('list')}
+                title="List view"
+                aria-label="List view"
+                aria-pressed={projectViewMode === 'list'}
+              >
+                <LayoutList size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="projects-hub-list-pane">
+          <div className="projects-hub-scroll">{renderProjectsHubList()}</div>
+        </div>
+
+        {projectDropActive ? <div className="projects-hub-drop-overlay">Drop folders to add them</div> : null}
+      </section>
+    );
+  }
+
+  function renderProjectsInspectorPanel() {
+    const project = selectedProject;
+
+    if (!project) {
+      return (
+        <section className="projects-inspector projects-inspector-empty">
+          <div className="projects-inspector-empty-inner">
+            <div className="projects-inspector-empty-icon" aria-hidden="true">
+              <FolderOpen size={22} strokeWidth={1.5} />
+            </div>
+            <strong>No project selected</strong>
+            <p>Choose a project from the list to preview files and actions.</p>
+            <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void pickProjectFolder()}>
+              <FolderPlus size={14} />
+              Add project
+            </button>
+          </div>
+        </section>
+      );
+    }
+
+    const projectStats = project.exists
+      ? `${project.details?.topLevelFolders ?? 0} folders · ${project.details?.topLevelFiles ?? 0} files`
+      : 'Folder missing';
+    const projectActivity = project.lastOpenedAt
+      ? formatProjectDate(project.lastOpenedAt)
+      : formatProjectDate(project.addedAt);
+    const normalizedProjectPath = project.path.replace(/\\/g, '/');
+    const projectPathParts = normalizedProjectPath.split('/').filter(Boolean);
+    const projectFolderName = projectPathParts[projectPathParts.length - 1] ?? project.path;
+    const projectParentFolder = projectPathParts.length > 1 ? projectPathParts[projectPathParts.length - 2] : '';
+    const projectLocationLabel = projectParentFolder ? `${projectParentFolder}/${projectFolderName}` : projectFolderName;
+    const projectStatsLabel = [
+      projectStats,
+      project.details?.gitRepository ? 'Git' : null,
+      projectActivity,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    return (
+      <section className="projects-inspector" aria-label={`${getProjectDisplayName(project)} details`}>
+        <header className="projects-inspector-header" title={project.path}>
+          <div className="projects-inspector-header-row">
+            <h3>{getProjectDisplayName(project)}</h3>
+            <div className="projects-inspector-header-badges">
+              {project.favorite ? (
+                <Star size={12} fill="currentColor" className="projects-inspector-favorite" aria-label="Favorite project" />
+              ) : null}
+              <span className={`projects-inspector-status-pill ${project.exists ? 'ready' : 'missing'}`}>
+                {project.exists ? 'Ready' : 'Missing'}
+              </span>
+            </div>
+          </div>
+          <div className="projects-inspector-header-meta">
+            <span className="projects-inspector-header-location">{projectLocationLabel}</span>
+            <span className="projects-inspector-header-stats">{projectStatsLabel}</span>
+          </div>
+        </header>
+
+        {!project.exists ? (
+          <div className="projects-inspector-alert">
+            Folder not found at the saved path. Locate it on disk or remove this bookmark.
+          </div>
+        ) : null}
+
+        <div className="projects-inspector-toolbar" aria-label="Project actions">
+          {project.exists ? (
+            <button className="projects-inspector-open-btn" type="button" onClick={() => void openProjectWorkspace(project)}>
+              <FolderOpen size={14} />
+              Open
+            </button>
+          ) : (
+            <button className="projects-inspector-open-btn" type="button" onClick={() => void locateProjectFolder(project)}>
+              <FolderOpen size={14} />
+              Locate
+            </button>
+          )}
+          <div className="projects-inspector-icon-actions">
+            <button className="projects-inspector-icon-btn" type="button" onClick={() => void renameProjectFolder(project)} title="Rename project">
+              <PencilLine size={15} />
+            </button>
+            <button
+              className={`projects-inspector-icon-btn ${project.favorite ? 'active' : ''}`}
+              type="button"
+              onClick={() => void toggleProjectFavorite(project)}
+              title={project.favorite ? 'Remove favorite' : 'Add favorite'}
+            >
+              <Star size={15} fill={project.favorite ? 'currentColor' : 'none'} />
+            </button>
+            <button className="projects-inspector-icon-btn" type="button" onClick={() => void copyProjectPath(project)} title="Copy path">
+              <Copy size={15} />
+            </button>
+            <button
+              className="projects-inspector-icon-btn"
+              type="button"
+              onClick={() => void revealProjectFolder(project)}
+              disabled={!project.exists}
+              title="Reveal in explorer"
+            >
+              <ExternalLink size={15} />
+            </button>
+            <button className="projects-inspector-icon-btn" type="button" onClick={() => void inspectProjectFolder(project)} title="Refresh details">
+              <RefreshCcw size={15} />
+            </button>
+            <span className="projects-inspector-icon-divider" aria-hidden="true" />
+            <button
+              className="projects-inspector-icon-btn danger"
+              type="button"
+              onClick={() => void removeProjectFolder(project)}
+              title="Remove from My Projects"
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
+        </div>
+
+        {project.exists ? (
+          <div className="projects-inspector-tree-pane">
+            <FileTree
+              fs={selectedProjectFileTreeFs}
+              workspaceRoot={project.path}
+              className="workspace-tree-panel projects-inspector-file-tree"
+              activeFilePath={projectTreeActiveFilePath}
+              onOpenFolder={() => void pickProjectFolder()}
+              onFileClick={(path) => void openProjectFile(project, path, { preview: true })}
+              onFileOpened={(path, _name, isPreview) => void openProjectFile(project, path, { preview: isPreview ?? true })}
+              onFileDeleted={handleProjectTreeDeleted}
+              onFileRenamed={handleProjectTreeRenamed}
+              onFileCreated={handleProjectTreeFileCreated}
+              onFolderCreated={handleProjectTreeFolderCreated}
+              onFileCopied={handleProjectTreeCopied}
+              onFileMoved={handleProjectTreeMoved}
+              onError={handleTreeError}
+              refreshTrigger={projectTreeRefreshKey}
+              headerTitle="Files"
+              iconTheme="material"
+              renderIcon={renderWorkspaceFileTreeIcon}
+              contextMenu={{ renderMenu: renderFileTreeContextMenu }}
+              portalContainer={typeof document === 'undefined' ? null : document.body}
+              renderHeader={(headerProps) =>
+                renderCompactFileTreeHeader(
+                  headerProps,
+                  renderFileTreeMoreMenu('project', [
+                    {
+                      id: 'refresh-project-tree',
+                      label: 'Refresh tree',
+                      icon: <RefreshCcw aria-hidden="true" size={13} strokeWidth={1.85} />,
+                      onSelect: refreshProjectTree,
+                    },
+                    ...headerProps.actions.filter((action) => action.id !== 'new-file' && action.id !== 'new-folder').map(renderFileTreeHeaderMoreAction),
+                  ]),
+                )
+              }
+              showOpenFolderButton={false}
+              sidebarPosition="left"
+              theme={fileTreeTheme}
+            />
+          </div>
+        ) : (
+          <div className="projects-inspector-missing-pane">
+            <ProjectSystemFolderIcon platform={platform} missing />
+            <strong>Folder missing</strong>
+            <p title={project.path}>{project.path}</p>
+          </div>
+        )}
+      </section>
     );
   }
 
@@ -12715,280 +13490,956 @@ export function IDEWorkspace({
     );
   }
 
-  const project = selectedProject;
-  const projectCountLabel = `${projectFolders.length} ${projectFolders.length === 1 ? 'project' : 'projects'}`;
+  function getTerminalTabDropZone(event: ReactDragEvent<HTMLElement>, element: HTMLElement): TerminalDropZone {
+    const rect = element.getBoundingClientRect();
+    const x = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+    const y = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
 
-  function renderProjectCard(projectEntry: ProjectFolder) {
-    const isActive = project?.id === projectEntry.id;
-    const projectStats = projectEntry.exists
-      ? `${projectEntry.details?.topLevelFolders ?? 0} folders / ${projectEntry.details?.topLevelFiles ?? 0} files`
-      : 'Missing folder';
-    const projectActivity = projectEntry.lastOpenedAt
-      ? `Opened ${formatProjectDate(projectEntry.lastOpenedAt)}`
-      : `Added ${formatProjectDate(projectEntry.addedAt)}`;
+    if (x < 0.22) {
+      return 'left';
+    }
+    if (x > 0.78) {
+      return 'right';
+    }
+    if (y < 0.24) {
+      return 'top';
+    }
+    if (y > 0.76) {
+      return 'bottom';
+    }
 
-    return (
-      <article className={`my-project-card ${isActive ? 'active' : ''} ${projectEntry.exists ? '' : 'missing'}`} key={projectEntry.id}>
-        <button
-          className="my-project-card-main"
-          type="button"
-          onClick={() => setSelectedProjectId(projectEntry.id)}
-          onDoubleClick={() => void openProjectWorkspace(projectEntry)}
-          title={projectEntry.path}
-        >
-          <ProjectSystemFolderIcon platform={platform} missing={!projectEntry.exists} />
-          <span className="my-project-card-copy">
-            <span className="my-project-card-title">
-              <strong>{getProjectDisplayName(projectEntry)}</strong>
-              {projectEntry.favorite ? <Star size={13} fill="currentColor" /> : null}
-            </span>
-            <span className="my-project-card-path">{projectEntry.path}</span>
-            <span className="my-project-card-meta">
-              <span>{projectStats}</span>
-              <span>{projectActivity}</span>
-            </span>
-          </span>
-        </button>
-        <div className="my-project-card-actions">
-          <button className="icon-button" type="button" onClick={() => void renameProjectFolder(projectEntry)} title="Rename project">
-            <PencilLine size={15} />
-          </button>
-          <button
-            className={`icon-button ${projectEntry.favorite ? 'active' : ''}`}
-            type="button"
-            onClick={() => void toggleProjectFavorite(projectEntry)}
-            title={projectEntry.favorite ? 'Remove favorite' : 'Favorite project'}
-          >
-            <Star size={15} fill={projectEntry.favorite ? 'currentColor' : 'none'} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void copyProjectPath(projectEntry)} title="Copy path">
-            <Copy size={15} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void revealProjectFolder(projectEntry)} disabled={!projectEntry.exists} title="Reveal in File Explorer">
-            <ExternalLink size={15} />
-          </button>
-          <button className="icon-button" type="button" onClick={() => void inspectProjectFolder(projectEntry)} title="Refresh project details">
-            <RefreshCcw size={15} />
-          </button>
-          {projectEntry.exists ? (
-            <button className="primary-button compact" type="button" onClick={() => void openProjectWorkspace(projectEntry)}>
-              <FolderOpen size={14} />
-              Open in workspace
-            </button>
-          ) : (
-            <button className="secondary-button compact" type="button" onClick={() => void locateProjectFolder(projectEntry)}>
-              Locate
-            </button>
-          )}
-        </div>
-      </article>
+    return 'center';
+  }
+
+  function eventHasTerminalDrag(event: ReactDragEvent<HTMLElement>) {
+    return Boolean(
+      terminalDragSessionIdRef.current ||
+      Array.from(event.dataTransfer.types).includes(TERMINAL_SESSION_DRAG_MIME),
     );
   }
 
-  const myProjectsDetailPanel = (
-    <section className="my-projects-detail">
-      {!project ? (
-        <div className="my-projects-detail-empty">
-          <FolderOpen size={28} />
-          <h2>My Projects</h2>
-          <button className="primary-button" type="button" onClick={() => void pickProjectFolder()}>
-            <FolderPlus size={16} />
-            Add folder
-          </button>
-        </div>
-      ) : (
-        <>
-          <header className="my-projects-detail-header">
-            <div className="my-projects-detail-title">
-              <span className={`project-status-dot ${project.exists ? 'project-status-ready' : 'project-status-missing'}`} />
-              <div>
-                <h2>{getProjectDisplayName(project)}</h2>
-                <p title={project.path}>{project.path}</p>
-              </div>
-            </div>
-            <div className="my-projects-detail-summary">
-              <span>{project.exists ? 'Folder ready' : 'Folder missing'}</span>
-              <span>{project.details?.gitRepository ? 'Git repository' : 'No Git'}</span>
-              <span>Opened {formatProjectDate(project.lastOpenedAt)}</span>
-            </div>
-            <div className="my-projects-detail-controlbar">
-              <div className="my-projects-detail-actions" aria-label="Project actions">
-                <button className="icon-button" type="button" onClick={() => void renameProjectFolder(project)} title="Rename project">
-                  <PencilLine size={16} />
-                </button>
-                <button
-                  className={`icon-button ${project.favorite ? 'active' : ''}`}
-                  type="button"
-                  onClick={() => void toggleProjectFavorite(project)}
-                  title={project.favorite ? 'Remove favorite' : 'Favorite project'}
-                >
-                  <Star size={16} fill={project.favorite ? 'currentColor' : 'none'} />
-                </button>
-                <button className="icon-button" type="button" onClick={() => void copyProjectPath(project)} title="Copy path">
-                  <Copy size={16} />
-                </button>
-                <button className="icon-button" type="button" onClick={() => void revealProjectFolder(project)} disabled={!project.exists} title="Reveal in File Explorer">
-                  <ExternalLink size={16} />
-                </button>
-                <button className="icon-button" type="button" onClick={() => void inspectProjectFolder(project)} title="Refresh project details">
-                  <RefreshCcw size={16} />
-                </button>
-                <button
-                  className="icon-button danger-icon-button"
-                  type="button"
-                  onClick={() => void removeProjectFolder(project)}
-                  title="Remove from My Projects"
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
-            </div>
-            <button className="primary-button compact my-projects-detail-open" type="button" onClick={() => void openProjectWorkspace(project)} disabled={!project.exists}>
-              <FolderOpen size={15} />
-              Open Project
-            </button>
-          </header>
+  function getTerminalDraggedSessionId(event: ReactDragEvent<HTMLElement>) {
+    return (
+      event.dataTransfer.getData(TERMINAL_SESSION_DRAG_MIME) ||
+      event.dataTransfer.getData('text/plain') ||
+      terminalDragSessionIdRef.current
+    );
+  }
 
-          {!project.exists ? (
-            <div className="my-projects-missing-panel">
-              <FolderOpen size={26} />
-              <h3>Folder missing</h3>
-              <p>{project.path}</p>
-              <div className="action-row">
-                <button className="secondary-button" type="button" onClick={() => void locateProjectFolder(project)}>
-                  Locate
-                </button>
-                <button className="danger-button" type="button" onClick={() => void removeProjectFolder(project)}>
-                  Remove
-                </button>
-              </div>
-            </div>
-          ) : (
-            <FileTree
-              fs={selectedProjectFileTreeFs}
-              workspaceRoot={project.path}
-              className="workspace-tree-panel my-projects-file-tree"
-              activeFilePath={activeProjectExplorerPath}
-              onOpenFolder={() => void pickProjectFolder()}
-              onFileClick={(path) => void openProjectFile(project, path, { preview: true })}
-              onFileOpened={(path, _name, isPreview) => void openProjectFile(project, path, { preview: isPreview ?? true })}
-              onFileDeleted={handleProjectTreeDeleted}
-              onFileRenamed={handleProjectTreeRenamed}
-              onFileCreated={handleProjectTreeFileCreated}
-              onFolderCreated={handleProjectTreeFolderCreated}
-              onFileCopied={handleProjectTreeCopied}
-              onFileMoved={handleProjectTreeMoved}
-              onError={handleTreeError}
-              refreshTrigger={projectTreeRefreshKey}
-              headerTitle="Files"
-              iconTheme="material"
-              renderIcon={renderWorkspaceFileTreeIcon}
-              contextMenu={{ renderMenu: renderFileTreeContextMenu }}
-              portalContainer={typeof document === 'undefined' ? null : document.body}
-              footer={
-                <div className="workspace-tree-footer" title={project.path}>
-                  {project.path}
-                </div>
-              }
-              renderHeader={(headerProps) =>
-                renderCompactFileTreeHeader(
-                  headerProps,
-                  renderFileTreeMoreMenu('project', [
-                    {
-                      id: 'refresh-project-tree',
-                      label: 'Refresh tree',
-                      icon: <RefreshCcw aria-hidden="true" size={13} strokeWidth={1.85} />,
-                      onSelect: refreshProjectTree,
-                    },
-                    ...headerProps.actions.filter((action) => action.id !== 'new-file' && action.id !== 'new-folder').map(renderFileTreeHeaderMoreAction),
-                  ]),
-                )
-              }
-              showOpenFolderButton={false}
-              sidebarPosition="left"
-              theme={fileTreeTheme}
-            />
-          )}
-        </>
-      )}
-    </section>
-  );
+  function getTerminalPanelSessionOrder() {
+    if (terminalWorkspaceState.groups.length > 0) {
+      return terminalWorkspaceState.groups.flatMap((group) => group.sessionIds);
+    }
 
-  const myProjectsWorkspace = (
-      <section
-        className={`tool-workspace my-projects-workspace ${projectDropActive ? 'my-projects-drop-active' : ''}`}
-        onDragLeave={handleProjectDragLeave}
-        onDragOver={handleProjectDragOver}
-        onDrop={(event) => void handleProjectDrop(event)}
+    if (terminalWorkspaceState.panes.length > 0) {
+      return terminalWorkspaceState.panes.flatMap((pane) => pane.sessionIds);
+    }
+
+    return terminalWorkspaceState.sessions.map((session) => session.id);
+  }
+
+  function getTerminalCenterDropTargetIndex(draggedSessionId: string, targetPaneId: string, targetSessionId: string) {
+    const targetPane = terminalWorkspaceState.panes.find((pane) => pane.id === targetPaneId) ?? null;
+    const targetSessionIndex = targetPane?.sessionIds.indexOf(targetSessionId) ?? -1;
+    if (!targetPane || targetSessionIndex < 0) {
+      return null;
+    }
+
+    const panelSessionOrder = getTerminalPanelSessionOrder();
+    const draggedPanelIndex = panelSessionOrder.indexOf(draggedSessionId);
+    const targetPanelIndex = panelSessionOrder.indexOf(targetSessionId);
+    const shouldDropAfterTarget = draggedPanelIndex >= 0 && targetPanelIndex >= 0 && draggedPanelIndex < targetPanelIndex;
+    return targetSessionIndex + (shouldDropAfterTarget ? 1 : 0);
+  }
+
+  function updateTerminalDropTarget(nextDropTarget: TerminalDropTargetState | null) {
+    terminalDropTargetRef.current = nextDropTarget;
+    setTerminalDropTarget(nextDropTarget);
+  }
+
+  function isTerminalPointerDragIgnored(target: EventTarget | null) {
+    return target instanceof Element && Boolean(target.closest('button, input, textarea, select, [data-terminal-drag-ignore="true"]'));
+  }
+
+  function isTerminalSplitZone(zone: TerminalDropZone): zone is TerminalSplitZone {
+    return zone === 'top' || zone === 'right' || zone === 'bottom' || zone === 'left';
+  }
+
+  function getTerminalSplitZoneFromPoint(clientX: number, clientY: number, element: HTMLElement): TerminalDropZone {
+    const rect = element.getBoundingClientRect();
+    const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+    const y = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+
+    if (y <= 0.32) {
+      return 'top';
+    }
+    if (y >= 0.68) {
+      return 'bottom';
+    }
+    if (x <= 0.32) {
+      return 'left';
+    }
+    if (x >= 0.68) {
+      return 'right';
+    }
+
+    return 'center';
+  }
+
+  function findTerminalPointerElement(clientX: number, clientY: number, selector: string, draggedSessionId?: string) {
+    return document.elementsFromPoint(clientX, clientY).find((element) => {
+      if (!(element instanceof Element) || element.closest('.terminal-shell-drag-preview')) {
+        return false;
+      }
+
+      const match = element.closest(selector) as HTMLElement | null;
+      if (!match) {
+        return false;
+      }
+
+      return !draggedSessionId || match.dataset.terminalSessionId !== draggedSessionId;
+    })?.closest(selector) as HTMLElement | null;
+  }
+
+  function getTerminalPointerDropTarget(clientX: number, clientY: number, draggedSessionId: string): TerminalDropTargetState | null {
+    const gapElement = findTerminalPointerElement(clientX, clientY, '[data-terminal-shell-gap-target="true"]');
+    if (gapElement) {
+      const targetIndex = Number(gapElement.dataset.terminalTargetIndex);
+      const gapIndex = Number(gapElement.dataset.terminalGapIndex);
+      return {
+        paneId: gapElement.dataset.terminalPaneId || 'terminal-unsplit-gap',
+        zone: 'center',
+        targetIndex: Number.isFinite(targetIndex) ? targetIndex : undefined,
+        gapIndex: Number.isFinite(gapIndex) ? gapIndex : undefined,
+      };
+    }
+
+    const itemElement = findTerminalPointerElement(clientX, clientY, '[data-terminal-shell-item="true"]', draggedSessionId);
+    const targetSessionId = itemElement?.dataset.terminalSessionId ?? null;
+    const targetPaneId = itemElement?.dataset.terminalPaneId ?? null;
+    if (!itemElement || !targetSessionId || !targetPaneId || targetSessionId === draggedSessionId) {
+      return null;
+    }
+
+    const zone = getTerminalSplitZoneFromPoint(clientX, clientY, itemElement);
+    if (isTerminalSplitZone(zone)) {
+      return {
+        paneId: targetPaneId,
+        sessionId: targetSessionId,
+        zone,
+      };
+    }
+
+    const targetIndex = getTerminalCenterDropTargetIndex(draggedSessionId, targetPaneId, targetSessionId);
+    return {
+      paneId: targetPaneId,
+      sessionId: targetSessionId,
+      zone: 'center',
+      targetIndex: targetIndex ?? undefined,
+    };
+  }
+
+  function commitTerminalPointerDrop(sessionId: string, target: TerminalDropTargetState | null) {
+    if (target?.sessionId && isTerminalSplitZone(target.zone)) {
+      sendTerminalCommand({ type: 'split-session', sessionId, targetPaneId: target.paneId, targetSessionId: target.sessionId, zone: target.zone });
+      return;
+    }
+
+    if (!target || typeof target.targetIndex !== 'number') {
+      return;
+    }
+
+    if (target.paneId === 'terminal-unsplit-gap') {
+      sendTerminalCommand({ type: 'unsplit-session', sessionId, targetIndex: target.targetIndex });
+      return;
+    }
+
+    sendTerminalCommand({ type: 'move-session', sessionId, targetPaneId: target.paneId, targetIndex: target.targetIndex });
+  }
+
+  function updateTerminalDragPreview(drag: TerminalPointerDragState, clientX: number, clientY: number) {
+    setTerminalDragPreview({
+      sessionId: drag.sessionId,
+      title: drag.previewTitle,
+      shellLabel: drag.previewShellLabel,
+      left: clientX + TERMINAL_DRAG_PREVIEW_OFFSET_X,
+      top: clientY + TERMINAL_DRAG_PREVIEW_OFFSET_Y,
+      width: drag.previewWidth,
+      height: drag.previewHeight,
+    });
+  }
+
+  function removeTerminalPointerDragListeners() {
+    window.removeEventListener('pointermove', handleTerminalPointerDragMove, true);
+    window.removeEventListener('pointerup', handleTerminalPointerDragEnd, true);
+    window.removeEventListener('pointercancel', handleTerminalPointerDragEnd, true);
+  }
+
+  function finishTerminalPointerDrag() {
+    const drag = terminalPointerDragRef.current;
+    removeTerminalPointerDragListeners();
+    if (drag?.captureElement?.hasPointerCapture(drag.pointerId)) {
+      try {
+        drag.captureElement.releasePointerCapture(drag.pointerId);
+      } catch {
+        // Pointer capture can be released by the browser during cancellation.
+      }
+    }
+    document.body.classList.remove('terminal-shell-pointer-dragging');
+    terminalPointerDragRef.current = null;
+    setTerminalDragPreview(null);
+    clearTerminalTabDrag();
+  }
+
+  function handleTerminalPointerDragMove(event: PointerEvent) {
+    const drag = terminalPointerDragRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (!drag.dragging) {
+      if (Math.hypot(deltaX, deltaY) < TERMINAL_POINTER_DRAG_THRESHOLD_PX) {
+        return;
+      }
+
+      drag.dragging = true;
+      terminalDragSessionIdRef.current = drag.sessionId;
+      setTerminalDragSessionId(drag.sessionId);
+      document.body.classList.add('terminal-shell-pointer-dragging');
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    updateTerminalDragPreview(drag, event.clientX, event.clientY);
+    updateTerminalDropTarget(getTerminalPointerDropTarget(event.clientX, event.clientY, drag.sessionId));
+  }
+
+  function handleTerminalPointerDragEnd(event: PointerEvent) {
+    const drag = terminalPointerDragRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    if (drag.dragging) {
+      event.preventDefault();
+      event.stopPropagation();
+      const target = terminalDropTargetRef.current ?? getTerminalPointerDropTarget(event.clientX, event.clientY, drag.sessionId);
+      commitTerminalPointerDrop(drag.sessionId, target);
+    }
+
+    finishTerminalPointerDrag();
+  }
+
+  function startTerminalPointerDrag(event: ReactPointerEvent<HTMLElement>, session: TerminalWorkspaceSessionSnapshot, paneId: string | null, renaming: boolean) {
+    if (event.button !== 0 || !paneId || renaming || isTerminalPointerDragIgnored(event.target)) {
+      return;
+    }
+
+    if (event.detail >= 2) {
+      event.preventDefault();
+      event.stopPropagation();
+      removeTerminalPointerDragListeners();
+      terminalPointerDragRef.current = null;
+      setTerminalDragPreview(null);
+      clearTerminalTabDrag();
+      setTerminalContextMenu(null);
+      startTerminalSessionRename(session);
+      return;
+    }
+
+    const itemElement = event.currentTarget.closest('[data-terminal-shell-item="true"]') as HTMLElement | null;
+    const rect = (itemElement ?? event.currentTarget).getBoundingClientRect();
+    removeTerminalPointerDragListeners();
+    terminalPointerDragRef.current = {
+      sessionId: session.id,
+      paneId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+      captureElement: event.currentTarget,
+      previewTitle: session.title,
+      previewShellLabel: session.shellLabel,
+      previewWidth: rect.width,
+      previewHeight: rect.height,
+    };
+    setTerminalDragPreview(null);
+    setTerminalContextMenu(null);
+
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Global listeners still cover the drag if capture is unavailable.
+    }
+
+    window.addEventListener('pointermove', handleTerminalPointerDragMove, true);
+    window.addEventListener('pointerup', handleTerminalPointerDragEnd, true);
+    window.addEventListener('pointercancel', handleTerminalPointerDragEnd, true);
+  }
+
+  function startTerminalTabDrag(event: ReactDragEvent<HTMLElement>, sessionId: string) {
+    terminalDragSessionIdRef.current = sessionId;
+    setTerminalDragSessionId(sessionId);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData(TERMINAL_SESSION_DRAG_MIME, sessionId);
+    event.dataTransfer.setData('text/plain', sessionId);
+  }
+
+  function clearTerminalTabDrag() {
+    terminalDragSessionIdRef.current = null;
+    setTerminalDragSessionId(null);
+    updateTerminalDropTarget(null);
+  }
+
+  function handleTerminalTabDragOver(event: ReactDragEvent<HTMLElement>, paneId: string, sessionId: string) {
+    if (!eventHasTerminalDrag(event) || terminalDragSessionIdRef.current === sessionId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const zone = getTerminalTabDropZone(event, event.currentTarget);
+    const draggedSessionId = terminalDragSessionIdRef.current;
+    const targetIndex = zone === 'center' && draggedSessionId
+      ? getTerminalCenterDropTargetIndex(draggedSessionId, paneId, sessionId) ?? undefined
+      : undefined;
+    updateTerminalDropTarget({ paneId, sessionId, zone, targetIndex });
+  }
+
+  function handleTerminalTabDrop(event: ReactDragEvent<HTMLElement>, paneId: string, sessionId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const draggedSessionId = getTerminalDraggedSessionId(event);
+    if (!draggedSessionId || draggedSessionId === sessionId) {
+      clearTerminalTabDrag();
+      return;
+    }
+
+    const zone = getTerminalTabDropZone(event, event.currentTarget);
+
+    if (zone !== 'center') {
+      sendTerminalCommand({ type: 'split-session', sessionId: draggedSessionId, targetPaneId: paneId, targetSessionId: sessionId, zone: zone as TerminalSplitZone });
+    } else {
+      const targetIndex = getTerminalCenterDropTargetIndex(draggedSessionId, paneId, sessionId);
+      if (typeof targetIndex === 'number') {
+        sendTerminalCommand({ type: 'move-session', sessionId: draggedSessionId, targetPaneId: paneId, targetIndex });
+      }
+    }
+
+    clearTerminalTabDrag();
+  }
+
+  function handleTerminalTabGridDragOver(event: ReactDragEvent<HTMLElement>, paneId: string, sessionId: string, zone: TerminalDropZone, targetIndex?: number) {
+    if (!eventHasTerminalDrag(event) || terminalDragSessionIdRef.current === sessionId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    updateTerminalDropTarget({ paneId, sessionId, zone, targetIndex });
+  }
+
+  function handleTerminalTabGridDrop(event: ReactDragEvent<HTMLElement>, paneId: string, sessionId: string, zone: TerminalDropZone) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const draggedSessionId = getTerminalDraggedSessionId(event);
+    if (!draggedSessionId || draggedSessionId === sessionId) {
+      clearTerminalTabDrag();
+      return;
+    }
+
+    if (zone !== 'center') {
+      sendTerminalCommand({ type: 'split-session', sessionId: draggedSessionId, targetPaneId: paneId, targetSessionId: sessionId, zone });
+    }
+
+    clearTerminalTabDrag();
+  }
+
+  function startTerminalSessionRename(session: TerminalWorkspaceSessionSnapshot) {
+    setTerminalContextMenu(null);
+    terminalRenameCancelRef.current = false;
+    terminalRenameStartedAtRef.current = window.performance.now();
+    setTerminalRenamingSessionId(session.id);
+    setTerminalRenameValue(session.title);
+  }
+
+  function commitTerminalSessionRename(sessionId: string) {
+    terminalRenameCancelRef.current = false;
+    sendTerminalCommand({ type: 'rename', sessionId, title: terminalRenameValue });
+    setTerminalRenamingSessionId(null);
+    setTerminalRenameValue('');
+  }
+
+  function handleTerminalSessionRenameKeyDown(event: ReactKeyboardEvent<HTMLInputElement>, session: TerminalWorkspaceSessionSnapshot) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitTerminalSessionRename(session.id);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      terminalRenameCancelRef.current = true;
+      setTerminalRenamingSessionId(null);
+      setTerminalRenameValue('');
+    }
+  }
+
+  function openTerminalSessionContextMenu(event: ReactMouseEvent<HTMLElement>, session: TerminalWorkspaceSessionSnapshot) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTerminalContextMenu({ sessionId: session.id, x: event.clientX, y: event.clientY });
+  }
+
+  function terminalSessionStatusLabel(status: TerminalWorkspaceSessionSnapshot['status']) {
+    switch (status) {
+      case 'running':
+        return 'Running';
+      case 'exited':
+        return 'Exited';
+      case 'error':
+        return 'Error';
+    }
+  }
+
+  async function confirmCloseTerminalSession(session: TerminalWorkspaceSessionSnapshot) {
+    setTerminalContextMenu(null);
+
+    if (!(await confirm({
+      title: 'Close shell?',
+      message: `Close ${session.title}?`,
+      detail: 'The running process will be stopped.',
+      tone: 'danger',
+      confirmLabel: 'Close',
+      cancelLabel: 'Cancel',
+    }))) {
+      return;
+    }
+
+    sendTerminalCommand({ type: 'close', sessionId: session.id });
+  }
+
+  function renderTerminalDragPreview() {
+    if (!terminalDragPreview || typeof document === 'undefined') {
+      return null;
+    }
+
+    return createPortal(
+      <div
+        className="terminal-shell-drag-preview"
+        style={{
+          left: terminalDragPreview.left,
+          top: terminalDragPreview.top,
+          width: terminalDragPreview.width,
+          minHeight: terminalDragPreview.height,
+        }}
+        aria-hidden="true"
       >
-        <aside className="my-projects-browser">
-          <div className="my-projects-browser-header">
-            <div>
-              <h2>My Projects</h2>
-              <span>{projectCountLabel}</span>
-            </div>
-            <button className="icon-button" type="button" onClick={() => void pickProjectFolder()} title="Add project folder">
-              <FolderPlus size={16} />
-            </button>
-          </div>
+        <div className="terminal-shell-item-trigger">
+          <span className="terminal-shell-item-leading">
+            <GripVertical size={13} className="terminal-shell-drag-handle" aria-hidden="true" />
+            <TerminalSquare size={14} strokeWidth={1.75} />
+          </span>
+          <span className="terminal-shell-item-copy">
+            <span className="terminal-shell-item-title">{terminalDragPreview.title}</span>
+            {terminalDragPreview.shellLabel ? <span className="terminal-shell-type-badge">{terminalDragPreview.shellLabel}</span> : null}
+          </span>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
 
-          <div className="my-projects-filter-row">
-            <label className="my-projects-search" title="Search projects">
-              <Search size={15} />
-              <input value={projectQuery} onChange={(event) => setProjectQuery(event.target.value)} placeholder="Search projects" />
-            </label>
-            <div className="my-projects-filter-actions">
-              <select value={projectSortMode} onChange={(event) => setProjectSortMode(event.target.value as ProjectSortMode)} title="Sort projects">
-                <option value="recent">Recent</option>
-                <option value="name">Name</option>
-                <option value="favorites">Favorites</option>
-              </select>
-              <div className="my-projects-view-toggle" role="group" aria-label="Project view">
+  function renderTerminalSessionsPanel() {
+    const sessions = terminalWorkspaceState.sessions;
+    const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+    const panes = terminalWorkspaceState.panes.length > 0
+      ? terminalWorkspaceState.panes
+      : sessions.length > 0
+        ? [{ id: 'terminal-pane-fallback', sessionIds: sessions.map((session) => session.id), activeSessionId: terminalWorkspaceState.activeSessionId }]
+        : [];
+    const paneById = new Map(panes.map((pane) => [pane.id, pane]));
+    const groups = terminalWorkspaceState.groups.length > 0
+      ? terminalWorkspaceState.groups
+      : panes.flatMap((pane) => pane.sessionIds.map((sessionId) => ({
+          id: `${pane.id}:${sessionId}`,
+          sessionIds: [sessionId],
+          activeSessionId: sessionId,
+          splitDirection: null,
+    })));
+    const groupBySessionId = new Map(groups.flatMap((group) => group.sessionIds.map((sessionId) => [sessionId, group] as const)));
+    const draggedSessionGroup = terminalDragSessionId ? groupBySessionId.get(terminalDragSessionId) ?? null : null;
+    const draggingSplitSession = Boolean(draggedSessionGroup?.splitDirection);
+    const splitDragTargetGroup = terminalDropTarget?.sessionId ? groupBySessionId.get(terminalDropTarget.sessionId) ?? null : null;
+    const showingSplitPairOverlay = Boolean(
+      draggingSplitSession &&
+      terminalDragSessionId &&
+      terminalDropTarget?.sessionId &&
+      terminalDropTarget.sessionId !== terminalDragSessionId &&
+      draggedSessionGroup?.id === splitDragTargetGroup?.id,
+    );
+    const contextSession = terminalContextMenu ? sessions.find((session) => session.id === terminalContextMenu.sessionId) ?? null : null;
+    const contextPaneId = contextSession?.paneId ?? terminalWorkspaceState.activePaneId ?? panes[0]?.id ?? null;
+    const normalPaneId = groups
+      .filter((group) => !group.splitDirection)
+      .map((group) => sessionsById.get(group.sessionIds[0] ?? '')?.paneId ?? null)
+      .find((paneId): paneId is string => Boolean(paneId)) ?? null;
+
+    const getSessionPaneTarget = (session: TerminalWorkspaceSessionSnapshot) => {
+      const paneId = session.paneId ?? terminalWorkspaceState.activePaneId ?? panes[0]?.id ?? null;
+      const pane = paneId ? paneById.get(paneId) ?? null : null;
+      return {
+        paneId,
+        index: Math.max(0, pane?.sessionIds.indexOf(session.id) ?? 0),
+        size: pane?.sessionIds.length ?? 0,
+      };
+    };
+
+    const getTerminalGapTarget = (gapIndex: number) => {
+      const targetIndex = groups
+        .slice(0, gapIndex)
+        .reduce((count, group) => count + (group.splitDirection ? 0 : group.sessionIds.length), 0);
+      if (normalPaneId) {
+        return {
+          key: `${normalPaneId}:${targetIndex}`,
+          paneId: normalPaneId,
+          targetIndex,
+        };
+      }
+
+      return {
+        key: `unsplit:${gapIndex}`,
+        paneId: null,
+        targetIndex: Math.min(gapIndex, 1),
+      };
+    };
+
+    const handleTerminalGapDragOver = (event: ReactDragEvent<HTMLElement>, gapIndex: number) => {
+      if (!eventHasTerminalDrag(event)) {
+        return;
+      }
+
+      const target = getTerminalGapTarget(gapIndex);
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      updateTerminalDropTarget({
+        paneId: target.paneId ?? 'terminal-unsplit-gap',
+        zone: 'center',
+        targetIndex: target.targetIndex,
+        gapIndex,
+      });
+    };
+
+    const handleTerminalGapDrop = (event: ReactDragEvent<HTMLElement>, gapIndex: number) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const draggedSessionId = getTerminalDraggedSessionId(event);
+      if (!draggedSessionId) {
+        clearTerminalTabDrag();
+        return;
+      }
+
+      const target = getTerminalGapTarget(gapIndex);
+      if (target.paneId) {
+        sendTerminalCommand({ type: 'move-session', sessionId: draggedSessionId, targetPaneId: target.paneId, targetIndex: target.targetIndex });
+      } else {
+        sendTerminalCommand({ type: 'unsplit-session', sessionId: draggedSessionId, targetIndex: target.targetIndex });
+      }
+      clearTerminalTabDrag();
+    };
+
+    const renderTerminalGap = (gapIndex: number) => {
+      const target = getTerminalGapTarget(gapIndex);
+      const active = Boolean(
+        terminalDropTarget &&
+        !terminalDropTarget.sessionId &&
+        terminalDropTarget.paneId === (target.paneId ?? 'terminal-unsplit-gap') &&
+        terminalDropTarget.targetIndex === target.targetIndex &&
+        terminalDropTarget.gapIndex === gapIndex,
+      );
+      const edgeStart = gapIndex === 0;
+      const edgeEnd = gapIndex === groups.length;
+
+      return (
+        <div
+          key={`terminal-gap-${gapIndex}`}
+          className={`terminal-shell-gap-target ${edgeStart ? 'terminal-shell-gap-target-edge-start' : ''} ${edgeEnd ? 'terminal-shell-gap-target-edge-end' : ''} ${terminalDragSessionId ? 'dragging' : ''} ${active ? 'active' : ''}`.trim()}
+          data-terminal-shell-gap-target="true"
+          data-terminal-pane-id={target.paneId ?? undefined}
+          data-terminal-target-index={target.targetIndex}
+          data-terminal-gap-index={gapIndex}
+          onDragOver={(event) => handleTerminalGapDragOver(event, gapIndex)}
+          onDrop={(event) => handleTerminalGapDrop(event, gapIndex)}
+        />
+      );
+    };
+
+    const renderTerminalToolbar = () => (
+      <div className="terminal-inspector-toolbar" aria-label="Shell actions">
+        <button
+          className="boards-hub-btn boards-hub-btn-primary"
+          type="button"
+          onClick={() => sendTerminalCommand({ type: 'create-project' })}
+          disabled={!currentTerminalFolderPath}
+          title={currentTerminalFolderPath ?? 'Open a Project Space first'}
+        >
+          <Plus size={14} />
+          Project shell
+        </button>
+        <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => sendTerminalCommand({ type: 'create-home' })}>
+          <Plus size={14} />
+          Home shell
+        </button>
+      </div>
+    );
+
+    const renderTerminalShellItem = (session: TerminalWorkspaceSessionSnapshot, className = '') => {
+      const { paneId } = getSessionPaneTarget(session);
+      const selected = terminalWorkspaceState.activeSessionId === session.id;
+      const renaming = terminalRenamingSessionId === session.id;
+      const dropClass = terminalDropTarget?.sessionId === session.id ? ` terminal-drop-${terminalDropTarget.zone}` : '';
+      const showDropGrid = Boolean(terminalDragSessionId && terminalDragSessionId !== session.id && terminalDropTarget?.sessionId === session.id && paneId);
+      const hideSplitDragSource = showingSplitPairOverlay && terminalDragSessionId === session.id;
+      const pointerDraggable = !renaming && Boolean(paneId);
+      const nativeDragFallback = typeof window !== 'undefined' && !('PointerEvent' in window);
+      const pointerDragging = terminalDragSessionId === session.id;
+      const isSplitItem = className.includes('terminal-shell-item-split');
+      const handleTriggerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+          return;
+        }
+
+        event.preventDefault();
+        sendTerminalCommand({ type: 'select', sessionId: session.id });
+      };
+
+      return (
+        <article
+          key={session.id}
+          className={`terminal-shell-item ${className} ${selected ? 'selected' : ''}${dropClass} ${pointerDraggable ? 'terminal-shell-item-pointer-draggable' : ''} ${pointerDragging ? 'terminal-shell-item-pointer-dragging' : ''} ${showDropGrid ? 'terminal-drop-grid-open' : ''} ${hideSplitDragSource ? 'terminal-shell-item-drag-source-hidden' : ''}`.trim()}
+          data-terminal-shell-item="true"
+          data-terminal-session-id={session.id}
+          data-terminal-pane-id={paneId ?? undefined}
+          onContextMenu={(event) => openTerminalSessionContextMenu(event, session)}
+          onDragEnd={clearTerminalTabDrag}
+          onDragOver={paneId ? (event) => handleTerminalTabDragOver(event, paneId, session.id) : undefined}
+          onDrop={paneId ? (event) => handleTerminalTabDrop(event, paneId, session.id) : undefined}
+        >
+          {renaming ? (
+            <input
+              autoFocus
+              className="terminal-shell-item-rename-input"
+              value={terminalRenameValue}
+              onBlur={(event) => {
+                if (terminalRenameCancelRef.current) {
+                  terminalRenameCancelRef.current = false;
+                  return;
+                }
+
+                if (window.performance.now() - terminalRenameStartedAtRef.current < 350) {
+                  const input = event.currentTarget;
+                  window.setTimeout(() => {
+                    input.focus();
+                    input.select();
+                  }, 0);
+                  return;
+                }
+
+                commitTerminalSessionRename(session.id);
+              }}
+              onChange={(event) => setTerminalRenameValue(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+              onFocus={(event) => event.currentTarget.select()}
+              onMouseDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => handleTerminalSessionRenameKeyDown(event, session)}
+            />
+          ) : (
+            <>
+              <div
+                className="terminal-shell-item-trigger"
+                role="button"
+                tabIndex={0}
+                aria-pressed={selected}
+                aria-label={`${session.title}, ${terminalSessionStatusLabel(session.status)}`}
+                title={session.cwd ? `${session.title} - ${session.cwd}` : session.title}
+                onClick={() => sendTerminalCommand({ type: 'select', sessionId: session.id })}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  startTerminalSessionRename(session);
+                }}
+                onKeyDown={handleTriggerKeyDown}
+              >
+                <span className="terminal-shell-item-leading">
+                  <span
+                    className="terminal-shell-drag-handle"
+                    draggable={pointerDraggable && nativeDragFallback}
+                    onClick={(event) => event.stopPropagation()}
+                    onDragStart={paneId ? (event) => startTerminalTabDrag(event, session.id) : undefined}
+                    onPointerDown={pointerDraggable ? (event) => startTerminalPointerDrag(event, session, paneId, renaming) : undefined}
+                    title={`Move ${session.title}`}
+                    aria-label={`Move ${session.title}`}
+                  >
+                    <GripVertical size={13} aria-hidden="true" />
+                  </span>
+                  <TerminalSquare size={14} strokeWidth={1.75} />
+                </span>
+                <span className="terminal-shell-item-copy">
+                  <span className="terminal-shell-item-title">{session.title}</span>
+                  {session.shellLabel ? <span className="terminal-shell-type-badge">{session.shellLabel}</span> : null}
+                </span>
+              </div>
+              <div className="terminal-shell-item-actions">
                 <button
-                  className={projectViewMode === 'grid' ? 'active' : ''}
+                  className="projects-inspector-icon-btn"
                   type="button"
-                  onClick={() => setProjectViewMode('grid')}
-                  title="Grid view"
-                  aria-label="Grid view"
-                  aria-pressed={projectViewMode === 'grid'}
+                  draggable={false}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    startTerminalSessionRename(session);
+                  }}
+                  onDragStart={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  title={`Rename ${session.title}`}
+                  aria-label={`Rename ${session.title}`}
                 >
-                  <LayoutGrid size={15} />
+                  <SquarePen size={14} />
                 </button>
                 <button
-                  className={projectViewMode === 'list' ? 'active' : ''}
+                  className="projects-inspector-icon-btn danger"
                   type="button"
-                  onClick={() => setProjectViewMode('list')}
-                  title="List view"
-                  aria-label="List view"
-                  aria-pressed={projectViewMode === 'list'}
+                  draggable={false}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void confirmCloseTerminalSession(session);
+                  }}
+                  onDragStart={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  title={`Close ${session.title}`}
+                  aria-label={`Close ${session.title}`}
                 >
-                  <LayoutList size={15} />
+                  <Trash2 size={14} />
                 </button>
               </div>
-            </div>
-          </div>
-
-          <div className={`my-projects-list my-projects-list-${projectViewMode}`}>
-            <button className="editor-empty-action-tile my-project-add-card" type="button" onClick={() => void pickProjectFolder()}>
-              <FolderPlus size={30} />
-              <span>Add project</span>
-            </button>
-            {visibleProjects.map(renderProjectCard)}
-            {projectFolders.length > 0 && visibleProjects.length === 0 ? (
-              <div className="my-projects-empty my-projects-empty-inline">
-                <Search size={22} />
-                <strong>No matches</strong>
+            </>
+          )}
+          {showDropGrid && paneId ? (
+            <div className={`terminal-shell-drop-grid ${isSplitItem ? 'terminal-shell-drop-grid-compact' : ''}`.trim()} aria-hidden="true">
+              <div
+                className={`terminal-shell-drop-cell terminal-shell-drop-cell-top ${terminalDropTarget?.sessionId === session.id && terminalDropTarget.zone === 'top' ? 'active' : ''}`.trim()}
+                data-terminal-shell-grid-zone="top"
+                data-terminal-pane-id={paneId}
+                data-terminal-session-id={session.id}
+                onDragOver={(event) => handleTerminalTabGridDragOver(event, paneId, session.id, 'top')}
+                onDrop={(event) => handleTerminalTabGridDrop(event, paneId, session.id, 'top')}
+              >
+                Top
               </div>
+              <div
+                className={`terminal-shell-drop-cell terminal-shell-drop-cell-right ${terminalDropTarget?.sessionId === session.id && terminalDropTarget.zone === 'right' ? 'active' : ''}`.trim()}
+                data-terminal-shell-grid-zone="right"
+                data-terminal-pane-id={paneId}
+                data-terminal-session-id={session.id}
+                onDragOver={(event) => handleTerminalTabGridDragOver(event, paneId, session.id, 'right')}
+                onDrop={(event) => handleTerminalTabGridDrop(event, paneId, session.id, 'right')}
+              >
+                Right
+              </div>
+              <div
+                className={`terminal-shell-drop-cell terminal-shell-drop-cell-bottom ${terminalDropTarget?.sessionId === session.id && terminalDropTarget.zone === 'bottom' ? 'active' : ''}`.trim()}
+                data-terminal-shell-grid-zone="bottom"
+                data-terminal-pane-id={paneId}
+                data-terminal-session-id={session.id}
+                onDragOver={(event) => handleTerminalTabGridDragOver(event, paneId, session.id, 'bottom')}
+                onDrop={(event) => handleTerminalTabGridDrop(event, paneId, session.id, 'bottom')}
+              >
+                Bottom
+              </div>
+              <div
+                className={`terminal-shell-drop-cell terminal-shell-drop-cell-left ${terminalDropTarget?.sessionId === session.id && terminalDropTarget.zone === 'left' ? 'active' : ''}`.trim()}
+                data-terminal-shell-grid-zone="left"
+                data-terminal-pane-id={paneId}
+                data-terminal-session-id={session.id}
+                onDragOver={(event) => handleTerminalTabGridDragOver(event, paneId, session.id, 'left')}
+                onDrop={(event) => handleTerminalTabGridDrop(event, paneId, session.id, 'left')}
+              >
+                Left
+              </div>
+              <div className="terminal-shell-drop-center-info">
+                <span className="terminal-shell-drop-target-name">{session.title}</span>
+                {session.shellLabel ? <span className="terminal-shell-type-badge">{session.shellLabel}</span> : null}
+              </div>
+            </div>
+          ) : null}
+        </article>
+      );
+    };
+
+    if (sessions.length === 0) {
+      return (
+        <section className="terminal-inspector terminal-inspector-empty">
+          <header className="terminal-inspector-titlebar">
+            <span className="terminal-inspector-titlebar-label">Shells</span>
+            <span className="terminal-inspector-titlebar-count">0</span>
+          </header>
+          {renderTerminalToolbar()}
+          <div className="terminal-inspector-empty-inner">
+            <div className="terminal-inspector-empty-icon" aria-hidden="true">
+              <TerminalSquare size={22} strokeWidth={1.5} />
+            </div>
+            <strong>No shells open</strong>
+            <p>Start a project shell or open one in your home directory.</p>
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section className="terminal-inspector">
+        <header className="terminal-inspector-titlebar">
+          <span className="terminal-inspector-titlebar-label">Shells</span>
+          <span className="terminal-inspector-titlebar-count">{sessions.length}</span>
+        </header>
+
+        {renderTerminalToolbar()}
+
+        <div className="terminal-inspector-list-pane">
+          <div
+            className="terminal-shell-list"
+            aria-label="Open shells"
+          >
+            {groups.flatMap((group, groupIndex) => {
+              const groupSessions = group.sessionIds
+                .map((sessionId) => sessionsById.get(sessionId) ?? null)
+                .filter((session): session is TerminalWorkspaceSessionSnapshot => Boolean(session));
+              if (groupSessions.length === 0) {
+                return [renderTerminalGap(groupIndex)];
+              }
+
+              if (group.splitDirection && groupSessions.length === 2) {
+                const draggingSourceFromGroup = showingSplitPairOverlay && group.id === draggedSessionGroup?.id;
+                return [
+                  renderTerminalGap(groupIndex),
+                  <section
+                    key={group.id}
+                    className={`terminal-shell-split-group terminal-shell-split-group-${group.splitDirection} ${terminalWorkspaceState.activeGroupId === group.id ? 'active' : ''} ${draggingSourceFromGroup ? 'terminal-shell-split-group-dragging-source' : ''}`.trim()}
+                  >
+                    <div className="terminal-shell-pane-label">
+                      <span className="terminal-shell-split-group-heading">
+                        {group.splitDirection === 'horizontal' ? (
+                          <Columns2 size={12} aria-hidden="true" />
+                        ) : (
+                          <Rows2 size={12} aria-hidden="true" />
+                        )}
+                        {group.splitDirection === 'horizontal' ? 'Side by side' : 'Stacked'}
+                      </span>
+                      <span className="terminal-inspector-titlebar-count">{groupSessions.length}</span>
+                    </div>
+                    <div className="terminal-shell-split-group-items">
+                      {groupSessions.map((session) =>
+                        renderTerminalShellItem(session, `terminal-shell-item-split terminal-shell-item-split-${group.splitDirection}`),
+                      )}
+                    </div>
+                  </section>,
+                ];
+              }
+
+              return [
+                renderTerminalGap(groupIndex),
+                ...groupSessions.map((session) => renderTerminalShellItem(session, 'terminal-shell-item-standalone')),
+              ];
+            })}
+            {renderTerminalGap(groups.length)}
+          </div>
+        </div>
+
+        {contextSession && terminalContextMenu ? (
+          <div
+            className="terminal-inspector-context-menu"
+            style={{ left: terminalContextMenu.x, top: terminalContextMenu.y }}
+            role="menu"
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startTerminalSessionRename(contextSession);
+              }}
+              onClick={() => startTerminalSessionRename(contextSession)}
+            >
+              <SquarePen size={13} />
+              Rename
+            </button>
+            {contextPaneId ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    sendTerminalCommand({ type: 'split-session', sessionId: contextSession.id, targetPaneId: contextPaneId, zone: 'right' });
+                    setTerminalContextMenu(null);
+                  }}
+                  onClick={() => {
+                    sendTerminalCommand({ type: 'split-session', sessionId: contextSession.id, targetPaneId: contextPaneId, zone: 'right' });
+                    setTerminalContextMenu(null);
+                  }}
+                >
+                  <PanelRight size={13} />
+                  Split right
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    sendTerminalCommand({ type: 'split-session', sessionId: contextSession.id, targetPaneId: contextPaneId, zone: 'bottom' });
+                    setTerminalContextMenu(null);
+                  }}
+                  onClick={() => {
+                    sendTerminalCommand({ type: 'split-session', sessionId: contextSession.id, targetPaneId: contextPaneId, zone: 'bottom' });
+                    setTerminalContextMenu(null);
+                  }}
+                >
+                  <PanelBottom size={13} />
+                  Split down
+                </button>
+              </>
             ) : null}
+            <button
+              type="button"
+              role="menuitem"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void confirmCloseTerminalSession(contextSession);
+              }}
+              onClick={() => void confirmCloseTerminalSession(contextSession)}
+            >
+              <Trash2 size={13} />
+              Close
+            </button>
           </div>
-        </aside>
-
-        {projectDropActive ? <div className="my-projects-drop-overlay">Drop folders to add them</div> : null}
+        ) : null}
       </section>
-  );
-
-  void renderBoardDetails;
-
+    );
+  }
   return (
     <div className={`ide-shell ${bottomPanelOpen ? '' : 'ide-shell-console-collapsed'}`}>
       {!hasRequiredCloudConfiguration() ? (
@@ -13008,8 +14459,8 @@ export function IDEWorkspace({
         }`}
         style={workspaceShellStyle}
       >
-        <aside className={sidebar === 'explorer' || sidebar === 'my-projects' ? 'left-panel left-panel-tree' : 'left-panel'}>
-          <nav className="left-nav" aria-label="Project navigation">
+        <aside className={sidebar === 'explorer' ? 'left-panel left-panel-tree' : 'left-panel'}>
+          <nav className="left-nav" aria-label="Project Space navigation">
             <div className="left-nav-primary-row">
               <button className="left-nav-new-sketch-button" type="button" onClick={() => void createNewProject()}>
                 <Plus size={16} />
@@ -13030,7 +14481,7 @@ export function IDEWorkspace({
             <div id="workspace-left-nav-pages" className="left-nav-pages" hidden={leftNavCollapsed}>
               <button className={sidebar === 'explorer' ? 'active' : ''} type="button" onClick={() => setSidebar('explorer')}>
                 <FolderOpen size={16} />
-                Project
+                Project Space
               </button>
               <button className={sidebar === 'boards' ? 'active' : ''} type="button" onClick={() => setSidebar('boards')}>
                 <Cpu size={16} />
@@ -13040,7 +14491,7 @@ export function IDEWorkspace({
                 <HardDriveUpload size={16} />
                 My Projects
               </button>
-              <button className={sidebar === 'terminal' ? 'active' : ''} type="button" onClick={() => setSidebar('terminal')}>
+              <button className={sidebar === 'terminal' ? 'active' : ''} type="button" onClick={openTerminalPage}>
                 <TerminalSquare size={16} />
                 Terminal
               </button>
@@ -13066,17 +14517,17 @@ export function IDEWorkspace({
 
           <div className="left-projects">
             {sidebar === 'git' ? (
-              <GitSourceControlPanel controller={gitController} />
+              <GitHistoryPanel controller={gitController} />
             ) : (
               <>
                 <FileTree
                   fs={workspaceFileTreeFs}
                   workspaceRoot={workspacePath}
                   className="workspace-tree-panel"
-                  activeFilePath={activeExplorerPath}
+                  activeFilePath={workspaceTreeActiveFilePath}
                   onOpenFolder={() => void openFolderPicker()}
-                  onFileClick={(path) => void openFile(path, { preview: true })}
-                  onFileOpened={(path, _name, isPreview) => void openFile(path, { preview: isPreview ?? true })}
+                  onFileClick={(path) => void openWorkspaceTreeFile(path, { preview: true })}
+                  onFileOpened={(path, _name, isPreview) => void openWorkspaceTreeFile(path, { preview: isPreview ?? true })}
                   onFileDeleted={handleTreeDeleted}
                   onFileRenamed={handleTreeRenamed}
                   onFileCreated={handleTreeFileCreated}
@@ -13124,7 +14575,7 @@ export function IDEWorkspace({
                       [
                         {
                           id: 'open-workspace',
-                          label: 'Open Project',
+                          label: 'Open Project Space',
                           icon: <FolderOpen aria-hidden="true" size={14} strokeWidth={1.85} />,
                           onSelect: () => void openFolderPicker(),
                         },
@@ -13235,10 +14686,6 @@ export function IDEWorkspace({
           onPointerDown={(event) => beginResize('left', event)}
         />
 
-        <div className="terminal-workspace-host">
-          <TerminalWorkspace active={isTerminalWorkspaceActive} currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
-        </div>
-
         {sidebar === 'boards' ? renderBoardsWorkspace() : null}
 
         {renderLegacyLeftTools && sidebar === 'boards' ? (
@@ -13324,13 +14771,17 @@ export function IDEWorkspace({
           </section>
         ) : null}
 
-        {sidebar === 'terminal' ? (
-          <section className="tool-workspace tool-workspace-terminal">
-            <TerminalWorkspace active currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
-          </section>
-        ) : null}
+        <section className="tool-workspace tool-workspace-terminal" hidden={!isTerminalWorkspaceActive} aria-hidden={!isTerminalWorkspaceActive}>
+          <TerminalWorkspace
+            active={isTerminalWorkspaceActive}
+            currentFolderPath={currentTerminalFolderPath}
+            uiPreferences={uiPreferences}
+            command={terminalCommand}
+            onStateChange={setTerminalWorkspaceState}
+          />
+        </section>
 
-        {sidebar === 'my-projects' ? myProjectsWorkspace : null}
+        {sidebar === 'my-projects' ? renderProjectsWorkspace() : null}
 
         {sidebar === 'explorer' ? (
         <section className="editor-shell">
@@ -13394,7 +14845,7 @@ export function IDEWorkspace({
                 tabs={syncedTabs}
                 activeTabPath={activeTab?.path ?? null}
                 onTabClick={(path) => selectTabByPath(path)}
-                onTabClose={(path) => closeTab(path)}
+                onTabClose={(path) => void closeTab(path)}
                 onTabReorder={handleTabReorder}
               />
             </div>
@@ -13540,7 +14991,7 @@ export function IDEWorkspace({
                     </button>
                     <button className="editor-empty-action-tile" type="button" onClick={() => void openFolderPicker()}>
                       <FolderOpen size={30} />
-                      <span>Open Project</span>
+                      <span>Open Project Space</span>
                     </button>
                   </div>
                 )}
@@ -13584,30 +15035,34 @@ export function IDEWorkspace({
         <aside
           className={`right-panel inspector-panel ${
             sidebar === 'git'
-              ? 'git-graph-panel-host'
+              ? 'git-detail-panel-host'
               : sidebar === 'my-projects'
-                ? 'my-projects-panel-host'
+                ? 'projects-detail-panel-host'
                 : sidebar === 'libraries'
                 ? 'library-detail-panel-host'
                 : sidebar === 'platforms'
                   ? 'platform-detail-panel-host'
                     : sidebar === 'boards'
-                      ? 'remote-board-panel-host'
-                      : 'chat-panel'
+                      ? 'boards-detail-panel-host'
+                      : sidebar === 'terminal'
+                        ? 'terminal-detail-panel-host'
+                        : 'chat-panel'
           }`}
         >
           <div className="inspector-tabs" style={{ display: 'none' }}></div>
           <div className="inspector-body">
             {sidebar === 'git' ? (
-              <GitHistoryPanel controller={gitController} />
+              <GitSourceControlPanel controller={gitController} />
             ) : sidebar === 'my-projects' ? (
-              myProjectsDetailPanel
+              renderProjectsInspectorPanel()
             ) : sidebar === 'libraries' ? (
               renderLibraryDetailsPanel(selectedLibrary)
             ) : sidebar === 'platforms' ? (
               renderPlatformDetailsPanel(selectedPlatform)
             ) : sidebar === 'boards' ? (
-              renderRemoteBoardsPanel()
+              renderBoardsInspectorPanel()
+            ) : sidebar === 'terminal' ? (
+              renderTerminalSessionsPanel()
             ) : (
               <AgentPanel
                 user={user}
@@ -13658,6 +15113,8 @@ export function IDEWorkspace({
         </aside>
       </main>
 
+      {renderTerminalDragPreview()}
+
       <WorkspaceSearchPopup
         open={workspaceSearchOpen}
         workspacePath={workspacePath}
@@ -13689,9 +15146,6 @@ export function IDEWorkspace({
           <div className="console-tabs">
             <button className={consoleView === 'output' ? 'active' : ''} type="button" onClick={() => openConsolePanel('output')}>
               Output
-            </button>
-            <button className={consoleView === 'terminal' ? 'active' : ''} type="button" onClick={() => openConsolePanel('terminal')}>
-              Terminal
             </button>
             <button className={consoleView === 'serial' ? 'active' : ''} type="button" onClick={() => openConsolePanel('serial')}>
               Serial Monitor
@@ -13727,7 +15181,6 @@ export function IDEWorkspace({
             ))}
           </div>
         )}
-        <ConsoleTerminal active={isConsoleVisible && consoleView === 'terminal'} currentFolderPath={currentTerminalFolderPath} uiPreferences={uiPreferences} />
         <SerialMonitor
           active={isConsoleVisible && consoleView === 'serial'}
           selectedPort={selectedLocalBoard?.port || null}
@@ -13737,7 +15190,7 @@ export function IDEWorkspace({
       </section>
 
       <footer className="statusbar">
-        <span>{workspacePath ? workspacePath : 'No workspace open'}</span>
+        <span>{workspacePath ? workspacePath : 'No Project Space open'}</span>
         <div className="statusbar-actions">
           {!isConsoleVisible && !isTerminalWorkspaceActive ? (
             <button className="ghost-button compact statusbar-console-toggle" type="button" onClick={() => openConsolePanel(consoleView)} title={`Restore ${consoleViewLabel} panel`}>
@@ -13900,7 +15353,7 @@ export function IDEWorkspace({
         </div>
       </Modal>
 
-      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current Project and upload it to Appwrite storage." onClose={() => setReleaseModalOpen(false)}>
+      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current Project Space and upload it to Appwrite storage." onClose={() => setReleaseModalOpen(false)}>
         <div className="modal-form">
           <label>
             Target board
@@ -14015,10 +15468,10 @@ export function IDEWorkspace({
                 Cancel
               </button>
               <button className="secondary-button" type="button" onClick={() => void handleRestoreBoardCodeSnapshotDestination('current')} disabled={!workspacePath || busyAction === 'view-code'}>
-                Current workspace
+                Current Project Space
               </button>
               <button className="primary-button" type="button" onClick={() => void handleRestoreBoardCodeSnapshotDestination('new')} disabled={busyAction === 'view-code'}>
-                New workspace
+                New Project
               </button>
             </div>
           </div>
@@ -14066,40 +15519,18 @@ export function IDEWorkspace({
         ) : null}
       </Modal>
 
-      <Modal
+      <ConfirmDialog
         open={Boolean(projectRemovalPrompt)}
         title="Remove from My Projects"
-        subtitle="The project folder and files stay untouched on disk."
-        onClose={() => setProjectRemovalPrompt(null)}
-        size="sm"
-      >
-        {projectRemovalPrompt ? (
-          <div className="modal-form confirmation-dialog">
-            <div className="confirmation-dialog-body">
-              <span className="confirmation-dialog-icon confirmation-dialog-icon-danger">
-                <Trash2 aria-hidden="true" size={18} strokeWidth={1.9} />
-              </span>
-              <div>
-                <strong>Remove {getProjectDisplayName(projectRemovalPrompt)}?</strong>
-                <p title={projectRemovalPrompt.path}>{projectRemovalPrompt.path}</p>
-              </div>
-            </div>
-            <div className="form-actions">
-              <button className="secondary-button" type="button" onClick={() => setProjectRemovalPrompt(null)} disabled={busyAction === `remove-project:${projectRemovalPrompt.id}`}>
-                Cancel
-              </button>
-              <button
-                className="danger-button"
-                type="button"
-                onClick={() => void confirmProjectFolderRemoval()}
-                disabled={busyAction === `remove-project:${projectRemovalPrompt.id}`}
-              >
-                {busyAction === `remove-project:${projectRemovalPrompt.id}` ? 'Removing...' : 'Remove'}
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </Modal>
+        message={projectRemovalPrompt ? `Remove ${getProjectDisplayName(projectRemovalPrompt)}?` : ''}
+        detail={projectRemovalPrompt ? `${projectRemovalPrompt.path}\n\nThe project folder and files stay untouched on disk.` : undefined}
+        tone="danger"
+        confirmLabel={projectRemovalPrompt && busyAction === `remove-project:${projectRemovalPrompt.id}` ? 'Removing...' : 'Remove'}
+        mode="confirm"
+        busy={Boolean(projectRemovalPrompt && busyAction === `remove-project:${projectRemovalPrompt.id}`)}
+        onConfirm={() => void confirmProjectFolderRemoval()}
+        onCancel={() => setProjectRemovalPrompt(null)}
+      />
 
       <SerialPortBlockerDialog
         key={serialPreflightDialog?.requestId || 'serial-preflight'}

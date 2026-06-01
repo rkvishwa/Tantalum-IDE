@@ -130,6 +130,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     checkoutBranch: (payload) => ipcRenderer.invoke("git:checkout-branch", payload),
     createBranch: (payload) => ipcRenderer.invoke("git:create-branch", payload),
     getLog: (payload) => ipcRenderer.invoke("git:get-log", payload),
+    getAvatarDataUrl: (payload) => ipcRenderer.invoke("git:get-avatar-data-url", payload),
     getRemotes: () => ipcRenderer.invoke("git:get-remotes"),
     repairSafeDirectory: () => ipcRenderer.invoke("git:repair-safe-directory"),
     initRepository: (payload) => ipcRenderer.invoke("git:init-repository", payload),
@@ -188,6 +189,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     onLibraryMigrationProgress: (callback) => subscribe("toolchain:library-migration-progress", callback)
   },
   terminal: {
+    listShells: () => ipcRenderer.invoke("terminal:list-shells"),
     create: (options) => ipcRenderer.invoke("terminal:create", options),
     close: (sessionId) => ipcRenderer.invoke("terminal:close", sessionId),
     navigate: (payload) => ipcRenderer.invoke("terminal:navigate", payload),

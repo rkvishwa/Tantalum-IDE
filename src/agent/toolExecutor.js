@@ -185,7 +185,7 @@ class AgentToolExecutor {
   async #readSketchCode(request, options = {}) {
     const workspaceRoot = this.context.getWorkspaceRoot?.();
     if (!workspaceRoot) {
-      throw new Error("Open a workspace before using Arduino agent tools.");
+      throw new Error("Open a Project Space before using Arduino agent tools.");
     }
 
     const relativePath = normalizeRelativePath(request.arguments.filePath);
@@ -196,7 +196,7 @@ class AgentToolExecutor {
     const absoluteRoot = path.resolve(workspaceRoot);
     const absolutePath = path.resolve(absoluteRoot, relativePath);
     if (!isPathInsideRoot(absolutePath, absoluteRoot)) {
-      throw new Error("Blocked Arduino tool access outside the active workspace.");
+      throw new Error("Blocked Arduino tool access outside the active Project Space.");
     }
 
     const activeTab = options.activeTab || null;

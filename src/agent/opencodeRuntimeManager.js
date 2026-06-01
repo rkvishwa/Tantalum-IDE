@@ -115,7 +115,7 @@ const SOURCE_HELPER_TARGET_EXTENSIONS = ["c", "cc", "cpp", "cxx", ...HEADER_TARG
 const AGENT_STOPPED_ERROR_CODE = "AGENT_RUN_STOPPED";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const RESUMABLE_PENDING_STATUSES = new Set(["pending", "blocked"]);
-const PROJECT_STRUCTURE_HINT = /\b(?:project|folder|repo|repository|workspace|directory)\s+stru(?:cture|cure|ture)\b/i;
+const PROJECT_STRUCTURE_HINT = /\b(?:project\s+space|project|folder|repo|repository|workspace|directory)\s+stru(?:cture|cure|ture)\b/i;
 const CONFIRMATION_ONLY_OUTPUT = [
   /\bplease confirm\b/i,
   /\bconfirm if\b/i,
@@ -290,7 +290,7 @@ function buildCasualGreetingResponse(value) {
     return "Ready when you are. Tell me what you want to inspect, explain, or change.";
   }
 
-  return "Hello! What would you like to work on in this workspace?";
+  return "Hello! What would you like to work on in this project space?";
 }
 
 function stripAnsi(value) {
@@ -408,7 +408,7 @@ function normalizeTaskList(value) {
     .filter((item) => item && typeof item === "object")
     .map((item, index) => ({
       id: String(item.id || `task-${index + 1}`),
-      title: String(item.title || "Run workspace task").slice(0, 120),
+      title: String(item.title || "Run project space task").slice(0, 120),
       status: normalizeTaskStatus(item.status),
       kind: String(item.kind || "opencode_edit"),
       targetPath: item.targetPath ? normalizeRelativePath(item.targetPath) : undefined,
@@ -1376,7 +1376,7 @@ function inferBulkDeleteFileTask(segment) {
     return null;
   }
 
-  const rootOnly = /\b(?:root|workspace root|project root)\b/i.test(text);
+  const rootOnly = /\b(?:root|workspace root|project space root|project root)\b/i.test(text);
   if (!rootOnly) {
     return null;
   }
@@ -2323,7 +2323,7 @@ function buildOpenCodeRemainingWorkPrompt(originalPrompt, taskList) {
 
   const sanitizedContext = sanitizePromptForRemainingOpenCodeWork(originalPrompt);
   const lines = [
-    "Complete only the remaining Tantalum workspace edit tasks below.",
+    "Complete only the remaining Tantalum project space edit tasks below.",
     "Tantalum already completed deterministic file operations before this opencode session. Do not delete, rename, move, or convert file extensions. Use file edit/write tools only.",
     "",
     "Remaining tasks:",
@@ -2365,7 +2365,7 @@ function buildNoDiffRetryPrompt(remainingPrompt, taskList, previousOutput) {
   return [
     remainingPrompt,
     "",
-    "The previous response did not modify any workspace files. Apply the requested edit now using file edit/write tools only.",
+    "The previous response did not modify any project space files. Apply the requested edit now using file edit/write tools only.",
     targetLine,
     previous ? `Do not just show code in the chat. Incorporate the relevant code into the target file. Previous response summary: ${clampForPrompt(previous, 1200)}` : "Do not just show code in the chat. Incorporate the requested code into the target file.",
   ]
@@ -2914,7 +2914,7 @@ function normalizeCompletedTaskReferences(value) {
           const newPath = item.newPath ? normalizeRelativePath(item.newPath) : "";
           return {
             kind: normalizePlannerString(item.kind || "opencode_edit", 80),
-            title: normalizePlannerString(item.title || "Completed workspace task", 160),
+            title: normalizePlannerString(item.title || "Completed project space task", 160),
             targetPath:
               targetPath && !path.isAbsolute(targetPath) && !targetPath.startsWith("..") && !isSensitiveRelativePath(targetPath) && !isIgnoredAgentArtifact(targetPath)
                 ? targetPath
@@ -3506,23 +3506,23 @@ class AgentRuntimeManager {
         role: "system",
         content: [
           "You classify unclear Tantalum IDE user messages. Return strict JSON only.",
-          "This is a fast intent router before direct model inference. Decide whether the user wants a workspace task, a workspace question, ordinary chat, or a clarification.",
+          "This is a fast intent router before direct model inference. Decide whether the user wants a Project Space task, a Project Space question, ordinary chat, or a clarification.",
           "Schema:",
           '{"intent":"workspace_edit|workspace_question|general_chat|clarify","operation":"create_file|delete_file|move_file|rename_file|edit_file|none","targetPhrase":"short user target phrase","destinationPhrase":"short destination phrase or empty","candidatePath":"workspace-relative path from workspaceFiles/context/threadMemory/activeEditor or empty","candidateSource":"prompt|workspace|active_editor|context|thread_memory|none","confidence":0.0,"clarification":"question to ask or empty","instruction":"optional concise edit instruction"}',
           "Rules:",
           "- This is classification only. Never give commands, shell, terminal, PowerShell, Command Prompt, del, or rm instructions.",
-          "- If the user likely wants to change workspace files, use intent workspace_edit, even when the command verb or target wording has obvious typos or repeated letters.",
-          "- If the user is asking about files, project structure, code, or concepts without asking to change the workspace, use intent workspace_question or general_chat.",
+          "- If the user likely wants to change project space files, use intent workspace_edit, even when the command verb or target wording has obvious typos or repeated letters.",
+          "- If the user is asking about files, project structure, code, or concepts without asking to change the Project Space, use intent workspace_question or general_chat.",
           "- If referentialFollowup is true, resolve short phrases like 'do all those' against recentThreadMessages. Use prior assistant recommendations only as advice to apply, not as proof that work was already done.",
           "- For referential follow-up edit_file tasks, set instruction to the exact code change to apply from the prior assistant recommendation.",
           "- If referentialFollowup is true and prior assistant advice has no exact target file, use intent clarify and ask for the file.",
           "- If referentialFollowup is true and prior assistant advice mentions multiple possible target files without a clear choice, use intent clarify and list the candidates.",
-          "- Use workspaceFiles to repair vague or typo file targets. If exactly one workspace file clearly matches the user phrase, put it in candidatePath and set candidateSource workspace.",
+          "- Use workspaceFiles to repair vague or typo file targets. If exactly one project space file clearly matches the user phrase, put it in candidatePath and set candidateSource workspace.",
           "- candidatePath must be workspace-relative and must come from workspaceFiles, explicit context, threadMemory, or activeEditor. Do not invent existing file paths.",
           "- Use activeEditor only as candidateSource active_editor. If the prompt does not explicitly say current file, open file, active file, or this file, you may still suggest activeEditor only when it is the best available guess; Tantalum will require approval.",
           "- If multiple files plausibly match, use intent clarify and mention the candidate paths in clarification.",
           "- Preserve user wording in targetPhrase and destinationPhrase when no candidatePath is chosen.",
-          "- If blockedTask is present, treat userPrompt as a possible answer to that prior clarification. For example, 'tof one' can select a workspace file containing tof from the blockedTask candidates.",
+          "- If blockedTask is present, treat userPrompt as a possible answer to that prior clarification. For example, 'tof one' can select a project space file containing tof from the blockedTask candidates.",
           "- If the user asks to delete/remove/erase/discard/get rid of a file, use operation delete_file.",
           "- If the user asks to create/make/write/add a file or sketch, use operation create_file.",
           "- If the user asks to move/put/place/transfer a file or all .ino files into a folder, use operation move_file and fill destinationPhrase.",
@@ -3573,12 +3573,12 @@ class AgentRuntimeManager {
       {
         role: "system",
         content: [
-          "You are Tantalum's fast planner for Agent-mode workspace edit requests.",
+          "You are Tantalum's fast planner for Agent-mode Project Space edit requests.",
           "Return strict JSON only. No markdown, no prose, no comments.",
           "Your output schema:",
           '{"instruction":"clear instruction for the editor model or deterministic runtime","clarification":null,"riskLevel":"low|medium|high","tasks":[{"kind":"opencode_edit|delete_file|rename_file|move_file|create_file|create_project_structure_doc","title":"short todo title","targetPath":"workspace/relative/path","newPath":"optional workspace/relative/path","sourceExtension":"optional source extension","targetExtension":"optional target extension","lineStart":1,"lineEnd":2,"contextItemId":"optional context item id","instruction":"task-specific instruction"}]}',
           "Rules:",
-          "- For create_file tasks, use exact workspace-relative paths when the user gives one. If the user gives a descriptive sketch/program name instead, derive a safe snake_case filename in the workspace root.",
+          "- For create_file tasks, use exact paths relative to the Project Space when the user gives one. If the user gives a descriptive sketch/program name instead, derive a safe snake_case filename in the Project Space root.",
           "- Example: create the file esp32 blink led -> targetPath esp32_blink_led.ino.",
           "- If preferredImplicitEditTarget is present and the user is creating, writing, or generating firmware code without naming a different file path, return one opencode_edit task targeting preferredImplicitEditTarget.path. Do not return create_file for that request.",
           "- For move_file tasks, use targetPath plus newPath for a named source file. If the user asks to move all .ino files to a folder, return one move_file task with targetExtension ino and newPath set to the destination folder; the runtime will expand it.",
@@ -3692,7 +3692,7 @@ class AgentRuntimeManager {
       explicitPaths.length === 0 &&
       !canUseCompletedReferenceTarget(prompt, completedTaskReferences)
     ) {
-      return "I can use the previous completed task as a pattern, but I need the new target file or selected line range before changing the workspace.";
+      return "I can use the previous completed task as a pattern, but I need the new target file or selected line range before changing the Project Space.";
     }
 
     if (vagueSelectionReference) {
@@ -3812,7 +3812,7 @@ class AgentRuntimeManager {
     }
 
     if (allowedTargets.size === 0) {
-      return "I can use the previous completed task as a pattern, but I need the new target file or selected line range before changing the workspace.";
+      return "I can use the previous completed task as a pattern, but I need the new target file or selected line range before changing the Project Space.";
     }
 
     const copiedReferenceTarget = taskList.items.find((item) => item.targetPath && referenceTargets.has(normalizeRelativePath(item.targetPath)) && !allowedTargets.has(normalizeRelativePath(item.targetPath)));
@@ -3965,7 +3965,7 @@ class AgentRuntimeManager {
     if (targetPath) {
       return `Edit ${targetPath}`;
     }
-    return "Apply requested workspace changes";
+    return "Apply requested Project Space changes";
   }
 
   #isActiveEditorActionRepairSuggestion(classifier, workspaceRoot, payload) {
@@ -3990,10 +3990,10 @@ class AgentRuntimeManager {
       const candidatePath = normalizeRelativePath(classifier.candidatePath);
       const targetPhrase = classifier.targetPhrase || "the requested file";
       const action = classifier.operation === "delete_file" ? "delete" : classifier.operation === "move_file" ? "move" : classifier.operation === "rename_file" ? "rename" : "change";
-      return `I could not safely resolve "${targetPhrase}" to an exact workspace file. Direct inference suggested the open file ${candidatePath}. Approve to ${action} it, or skip.`;
+      return `I could not safely resolve "${targetPhrase}" to an exact Project Space file. Direct inference suggested the open file ${candidatePath}. Approve to ${action} it, or skip.`;
     }
 
-    return `This looks like a ${pendingAction.riskLevel}-risk workspace change. Approve to run it, or skip it.`;
+    return `This looks like a ${pendingAction.riskLevel}-risk Project Space change. Approve to run it, or skip it.`;
   }
 
   #taskListFromBlockedTaskSelection(prompt, blockedTask, fallbackTaskList) {
@@ -4084,7 +4084,7 @@ class AgentRuntimeManager {
           reason: `${reason || "action_repair"}_ask_mode_blocks_edit`,
           confidence: 0.88,
           persistThread: true,
-          userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply workspace changes.",
+          userMessage: "Ask mode is read-only. Switch to Agent mode when you want me to apply project space changes.",
           requiresUserDecision: false,
           decisionKind: "none",
         };
@@ -4129,7 +4129,7 @@ class AgentRuntimeManager {
         engine: LOCAL_ENGINE,
         reason: `${reason || "action_repair"}_failed`,
         confidence: 0.72,
-        userMessage: plannerClarification || blockedTask?.error || "I could not confidently understand that workspace action. Please name the operation and file path.",
+        userMessage: plannerClarification || blockedTask?.error || "I could not confidently understand that Project Space action. Please name the operation and file path.",
         requiresUserDecision: true,
         decisionKind: "clarify",
         taskList: normalizedFallbackTaskList || undefined,
@@ -4143,7 +4143,7 @@ class AgentRuntimeManager {
             engine: LOCAL_ENGINE,
             reason: `${reason || "action_repair"}_non_edit`,
             confidence: Math.max(0.72, classifier.confidence || 0),
-            userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer prior workspace change before changing files.",
+            userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer prior project space change before changing files.",
             requiresUserDecision: true,
             decisionKind: "clarify",
             taskList: normalizedFallbackTaskList || undefined,
@@ -4157,7 +4157,7 @@ class AgentRuntimeManager {
         engine: LOCAL_ENGINE,
         reason: `${reason || "action_repair"}_clarification`,
         confidence: Math.max(0.72, classifier.confidence || 0),
-        userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer workspace action before changing files.",
+        userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer Project Space action before changing files.",
         requiresUserDecision: true,
         decisionKind: "clarify",
         taskList: normalizedFallbackTaskList || undefined,
@@ -4175,7 +4175,7 @@ class AgentRuntimeManager {
         engine: LOCAL_ENGINE,
         reason: `${reason || "action_repair"}_missing_target`,
         confidence: classifier.confidence,
-        userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer file target before changing the workspace.",
+        userMessage: classifier.clarification || plannerClarification || blockedTask?.error || "I need a clearer file target before changing the Project Space.",
         requiresUserDecision: true,
         decisionKind: "clarify",
         taskList: normalizedFallbackTaskList || undefined,
@@ -4190,7 +4190,7 @@ class AgentRuntimeManager {
         engine: LOCAL_ENGINE,
         reason: `${reason || "action_repair"}_target_clarification`,
         confidence: classifier.confidence,
-        userMessage: resolvedBlockedTask.error || classifier.clarification || "I need a clearer file target before changing the workspace.",
+        userMessage: resolvedBlockedTask.error || classifier.clarification || "I need a clearer file target before changing the Project Space.",
         requiresUserDecision: true,
         decisionKind: "clarify",
         taskList: checkedTaskList,
@@ -4407,7 +4407,7 @@ class AgentRuntimeManager {
         confidence: 0.95,
         persistThread: false,
         titleSuggestion: "Try again",
-        userMessage: "I need the previous workspace request before I can try again. Please repeat the file action you want.",
+        userMessage: "I need the previous project space request before I can try again. Please repeat the file action you want.",
         requiresUserDecision: false,
         decisionKind: "none",
       };
@@ -4554,7 +4554,7 @@ class AgentRuntimeManager {
         engine: LOCAL_ENGINE,
         reason: route.requiresUserDecision ? "clarify_destructive_target" : "clarify_task_target",
         confidence: 0.94,
-        userMessage: blockedTask.error || "I need a clearer file target before changing the workspace.",
+        userMessage: blockedTask.error || "I need a clearer file target before changing the Project Space.",
         requiresUserDecision: true,
         decisionKind: "clarify",
         taskList: checkedTaskList,
@@ -4618,7 +4618,7 @@ class AgentRuntimeManager {
 
     if (route.requiresUserDecision) {
       return {
-        output: route.userMessage || "Approve this workspace action before I run it.",
+        output: route.userMessage || "Approve this Project Space action before I run it.",
         changedFiles: [],
         requiresApproval: true,
         route,
@@ -4632,11 +4632,11 @@ class AgentRuntimeManager {
     }
 
     if (!workspaceRoot && route.engine !== DIRECT_LLM_ENGINE) {
-      throw new Error("Open a workspace before starting the agent.");
+      throw new Error("Open a Project Space before starting the agent.");
     }
 
     if (workspaceRoot && [...this.activeRuns.values()].some((run) => run.workspaceRoot === workspaceRoot)) {
-      throw new Error("An agent run is already active for this workspace.");
+      throw new Error("An agent run is already active for this Project Space.");
     }
 
     const threadId = String(payload.threadId || "").trim() || null;
@@ -4676,12 +4676,12 @@ class AgentRuntimeManager {
         });
       }
 
-      emitActivity("running", "Preparing sandbox", "Copying the workspace into an isolated temporary directory.");
+      emitActivity("running", "Preparing sandbox", "Copying the Project Space into an isolated temporary directory.");
       sandboxParent = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tantalum-opencode-"));
       const sandboxRoot = path.join(sandboxParent, "workspace");
       throwIfAgentStopped(signal);
       const copyResult = await this.#copyWorkspace(workspaceRoot, sandboxRoot, signal);
-      emitActivity("completed", "Workspace copied", `${copyResult.skippedFiles.length} non-reviewable file${copyResult.skippedFiles.length === 1 ? "" : "s"} skipped.`);
+      emitActivity("completed", "Project Space copied", `${copyResult.skippedFiles.length} non-reviewable file${copyResult.skippedFiles.length === 1 ? "" : "s"} skipped.`);
       const skippedPaths = new Set(copyResult.skippedFiles.map((file) => normalizeRelativePath(file.path)));
       throwIfAgentStopped(signal);
       emitActivity("running", "Applying editor snapshot", "Copying active unsaved editor content into the sandbox.");
@@ -4689,7 +4689,7 @@ class AgentRuntimeManager {
       throwIfAgentStopped(signal);
       emitActivity("running", "Preparing sandbox baseline", "Creating an internal baseline for safe diff collection.");
       await this.#prepareSandboxGit(sandboxRoot, signal);
-      emitActivity("completed", "Sandbox ready", "Workspace preparation finished.");
+      emitActivity("completed", "Sandbox ready", "Project Space preparation finished.");
       throwIfAgentStopped(signal);
 
       const intent = route.engine === OPENCODE_ASK_ENGINE ? "ask" : "agent";
@@ -4820,7 +4820,7 @@ class AgentRuntimeManager {
             );
             const retryOutput = await runOpenCodeOnce(
               confirmationOnly
-                ? `${remainingPrompt}\n\nApproval was already granted in Tantalum IDE. Do not ask for confirmation. Modify the workspace files now and finish only the remaining pending/running tasks.`
+                ? `${remainingPrompt}\n\nApproval was already granted in Tantalum IDE. Do not ask for confirmation. Modify the Project Space files now and finish only the remaining pending/running tasks.`
                 : buildNoDiffRetryPrompt(remainingPrompt, activeTaskList, output),
               { approvalGranted: true },
             );
@@ -4853,9 +4853,9 @@ class AgentRuntimeManager {
           if (intent !== "ask") {
             activeTaskList =
               changes.length > 0 && !validationBlocked
-                ? this.#markRunnableTasks(activeTaskList, "completed", { result: "Workspace changes prepared." })
+                ? this.#markRunnableTasks(activeTaskList, "completed", { result: "Project Space changes prepared." })
                 : this.#markRunnableTasks(activeTaskList, "blocked", {
-                    error: validationBlocked?.message || "No workspace files changed.",
+                    error: validationBlocked?.message || "No Project Space files changed.",
                   });
             this.#emitAgentProgress(threadId, actionId, activeTaskList, changes.length > 0 && !validationBlocked ? "completed" : "blocked");
           }
@@ -4870,7 +4870,7 @@ class AgentRuntimeManager {
       const blockedTasks = activeTaskList.items.filter((item) => item.status === "blocked");
       if (intent !== "ask" && blockedTasks.length > 0) {
         return {
-          output: validationBlocked?.output || output || `Blocked ${blockedTasks.length} workspace task${blockedTasks.length === 1 ? "" : "s"}.`,
+          output: validationBlocked?.output || output || `Blocked ${blockedTasks.length} project space task${blockedTasks.length === 1 ? "" : "s"}.`,
           changedFiles: [],
           requiresApproval: false,
           route,
@@ -4891,7 +4891,7 @@ class AgentRuntimeManager {
       if (changes.length === 0) {
         const actionStatus = intent === "ask" ? "executed" : "blocked";
         return {
-          output: intent === "ask" ? output : output || "The agent did not change any workspace files, so the action is still blocked.",
+          output: intent === "ask" ? output : output || "The agent did not change any Project Space files, so the action is still blocked.",
           changedFiles: [],
           requiresApproval: false,
           route,
@@ -4909,7 +4909,7 @@ class AgentRuntimeManager {
         };
       }
 
-      emitActivity("running", "Applying changes", "Live-applying validated sandbox diffs to the workspace.");
+      emitActivity("running", "Applying changes", "Live-applying validated sandbox diffs to the Project Space.");
       const applied = await this.#applyChanges(workspaceRoot, changes);
       emitActivity("completed", "Changes applied", `${applied.length} file${applied.length === 1 ? "" : "s"} live-applied for review.`);
       throwIfAgentStopped(signal);
@@ -5021,7 +5021,7 @@ class AgentRuntimeManager {
         {
           origin: "agent",
           risk: "medium",
-          approvalReason: `Generated code includes ${recommendation.includeName}, but that header was not found in installed Arduino libraries or this workspace.`,
+          approvalReason: `Generated code includes ${recommendation.includeName}, but that header was not found in installed Arduino libraries or this project space.`,
         },
       );
       return createToolPendingAction(toolRequest, prompt);
@@ -5140,7 +5140,7 @@ class AgentRuntimeManager {
         role: "system",
         content: [
           "You are Tantalum AI inside Tantalum IDE. Answer directly and concisely. Do not claim to have scanned the full repository unless repository context is explicitly included. Do not propose file edits as already done.",
-          "Never give terminal, shell, Command Prompt, PowerShell, del, rm, or file-explorer instructions for workspace file changes. In Agent mode, workspace edits must go through Tantalum's reviewed deterministic pipeline; ask for the exact file/action instead of giving manual deletion commands.",
+          "Never give terminal, shell, Command Prompt, PowerShell, del, rm, or file-explorer instructions for Project Space file changes. In Agent mode, Project Space edits must go through Tantalum's reviewed deterministic pipeline; ask for the exact file/action instead of giving manual deletion commands.",
           COMPACT_OUTPUT_STYLE_FALLBACK,
         ].join("\n"),
       },
@@ -5367,7 +5367,7 @@ class AgentRuntimeManager {
         .sort();
 
       if (candidates.length === 0) {
-        const scope = item.rootOnly ? " in the workspace root" : " in this Project";
+        const scope = item.rootOnly ? " in the Project Space root" : " in this project space";
         expandedItems.push({
           ...item,
           status: "blocked",
@@ -5447,7 +5447,7 @@ class AgentRuntimeManager {
 
       if (item.kind === "opencode_edit" && !item.targetPath && !item.targetExtension) {
         item.targetExtension = DEFAULT_SKETCH_EXTENSION;
-        if (!item.title || item.title === "Apply requested workspace changes") {
+        if (!item.title || item.title === "Apply requested Project Space changes") {
           item.title = "Create or update .ino sketch";
         }
       }
@@ -5459,7 +5459,7 @@ class AgentRuntimeManager {
           item.error =
             resolved.status === "ambiguous"
               ? `I found multiple .${item.targetExtension} files: ${resolved.candidates.slice(0, 8).join(", ")}. Please name the exact file to edit.`
-              : `I could not find a .${item.targetExtension} file in this Project. Please name the exact file to edit.`;
+              : `I could not find a .${item.targetExtension} file in this project space. Please name the exact file to edit.`;
           continue;
         }
 
@@ -5474,7 +5474,7 @@ class AgentRuntimeManager {
           item.error =
             resolved.status === "ambiguous"
               ? `I found multiple .${item.sourceExtension} files: ${resolved.candidates.slice(0, 5).join(", ")}. Please open or name the exact file to rename.`
-              : `I could not find a .${item.sourceExtension} file in this workspace. Please open or name the file to rename.`;
+              : `I could not find a .${item.sourceExtension} file in this project space. Please open or name the file to rename.`;
           continue;
         }
 
@@ -5522,8 +5522,8 @@ class AgentRuntimeManager {
             resolved.status === "ambiguous"
               ? `I found multiple files named ${requestedTarget}: ${resolved.candidates.slice(0, 5).join(", ")}. Please name the exact path.`
               : rememberedTarget
-                ? `The remembered file ${requestedTarget} is missing from this workspace. It may have been deleted or moved.`
-              : `I could not find ${requestedTarget} in this workspace. Please name the exact file to edit.`;
+                ? `The remembered file ${requestedTarget} is missing from this project space. It may have been deleted or moved.`
+              : `I could not find ${requestedTarget} in this project space. Please name the exact file to edit.`;
           continue;
         }
 
@@ -5558,8 +5558,8 @@ class AgentRuntimeManager {
             resolved.status === "ambiguous"
               ? `I found multiple files named ${requestedTarget}: ${resolved.candidates.slice(0, 5).join(", ")}. Please name the exact path.`
               : rememberedTarget
-                ? `The remembered file ${requestedTarget} is missing from this workspace. It may have been deleted or moved.`
-              : `I could not find ${requestedTarget} in this workspace. Please name the exact file to ${item.kind === "move_file" ? "move" : "rename"}.`;
+                ? `The remembered file ${requestedTarget} is missing from this project space. It may have been deleted or moved.`
+              : `I could not find ${requestedTarget} in this project space. Please name the exact file to ${item.kind === "move_file" ? "move" : "rename"}.`;
           continue;
         }
 
@@ -5627,8 +5627,8 @@ class AgentRuntimeManager {
         resolved.status === "ambiguous"
           ? `I found multiple files named ${item.targetPath}: ${resolved.candidates.slice(0, 5).join(", ")}. Please name the exact path.`
           : rememberedTarget
-            ? `The remembered file ${item.targetPath} is missing from this workspace. It may have been deleted or moved.`
-          : `I could not find ${item.targetPath} in this workspace. Please name the exact file to delete.`;
+            ? `The remembered file ${item.targetPath} is missing from this project space. It may have been deleted or moved.`
+          : `I could not find ${item.targetPath} in this project space. Please name the exact file to delete.`;
     }
 
     next.updatedAt = new Date().toISOString();
@@ -5831,7 +5831,7 @@ class AgentRuntimeManager {
     const output =
       blocked.length > 0
         ? `Blocked ${blocked.length} task${blocked.length === 1 ? "" : "s"}: ${blocked.map((item) => item.error || item.title).join("; ")}`
-        : `Completed ${completed.length} workspace file task${completed.length === 1 ? "" : "s"}.`;
+        : `Completed ${completed.length} project space file task${completed.length === 1 ? "" : "s"}.`;
     this.#emitAgentProgress(threadId, actionId, nextTaskList, blocked.length > 0 ? "blocked" : pendingDeterministic || pendingNonDeterministic ? "running" : "completed");
 
     return {
@@ -5866,7 +5866,7 @@ class AgentRuntimeManager {
 
     await walk(sandboxRoot, 0);
     if (entries.length === 0) {
-      lines.push("The workspace is currently empty.");
+      lines.push("The Project Space is currently empty.");
       return `${lines.join("\n")}\n`;
     }
 
@@ -5986,7 +5986,7 @@ class AgentRuntimeManager {
           maxSteps: mode === "power" ? 80 : 50,
           prompt: [
             sharedPrompt,
-            "Agent mode is active. Modify workspace files only to satisfy the user request. Prefer small, reviewable edits. Tantalum IDE will review all changes before the user keeps them. Shell commands are disabled; use file edit/write tools only. Tantalum handles delete, rename, move, and extension-conversion operations.",
+            "Agent mode is active. Modify Project Space files only to satisfy the user request. Prefer small, reviewable edits. Tantalum IDE will review all changes before the user keeps them. Shell commands are disabled; use file edit/write tools only. Tantalum handles delete, rename, move, and extension-conversion operations.",
           ].join("\n"),
           permission: {
             edit: "allow",
@@ -6002,7 +6002,7 @@ class AgentRuntimeManager {
           maxSteps: 20,
           prompt: [
             sharedPrompt,
-            "Ask mode is active. Answer questions, inspect code, and suggest next steps, but do not modify, create, delete, or rewrite workspace files.",
+            "Ask mode is active. Answer questions, inspect code, and suggest next steps, but do not modify, create, delete, or rewrite Project Space files.",
           ].join("\n"),
           permission: {
             edit: "deny",
@@ -6558,7 +6558,7 @@ class AgentRuntimeManager {
     if (part.type === "tool") {
       const state = part.state || {};
       const status = state.status === "completed" ? "completed" : state.status === "error" ? "error" : "running";
-      const title = state.title || `Tool: ${part.tool || "workspace action"}`;
+      const title = state.title || `Tool: ${part.tool || "Project Space action"}`;
       const detail =
         state.error ||
         state.output ||
@@ -6650,12 +6650,12 @@ class AgentRuntimeManager {
   #buildOpenCodePrompt(prompt, activeTab, threadMessages, intent = "agent", options = {}) {
     const parts = [
       intent === "ask"
-        ? "Ask mode is active. Inspect and explain the workspace without editing files."
+        ? "Ask mode is active. Inspect and explain the Project Space without editing files."
         : options.approvalGranted
-          ? "Agent mode is active and the user already approved this workspace action in Tantalum IDE. Do not ask for confirmation; modify files now and finish the task. Shell commands are disabled; use file edit/write tools only."
+          ? "Agent mode is active and the user already approved this Project Space action in Tantalum IDE. Do not ask for confirmation; modify files now and finish the task. Shell commands are disabled; use file edit/write tools only."
           : options.bypassApprovals
             ? "Agent mode is active with Bypass Approval enabled. Do not ask for intermediate confirmation; modify files now and finish the task. Tantalum IDE will review the resulting diff with the user. Shell commands are disabled; use file edit/write tools only."
-          : "Agent mode is active. Make the requested workspace edits directly. Tantalum IDE will review the resulting diff with the user. Shell commands are disabled; use file edit/write tools only.",
+          : "Agent mode is active. Make the requested Project Space edits directly. Tantalum IDE will review the resulting diff with the user. Shell commands are disabled; use file edit/write tools only.",
       "",
       prompt,
     ];

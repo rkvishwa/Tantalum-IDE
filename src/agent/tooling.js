@@ -6,11 +6,11 @@ const { spawn } = require("node:child_process");
 
 function resolveWorkspacePath(workspaceRoot, targetPath) {
   if (!workspaceRoot) {
-    throw new Error("Open a workspace folder before using the AI agent.");
+    throw new Error("Open a Project Space folder before using the AI agent.");
   }
 
   if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
-    throw new Error("A non-empty workspace-relative path is required.");
+    throw new Error("A non-empty path inside the Project Space is required.");
   }
 
   const absoluteRoot = path.resolve(workspaceRoot);
@@ -18,7 +18,7 @@ function resolveWorkspacePath(workspaceRoot, targetPath) {
   const relativePath = path.relative(absoluteRoot, absoluteTarget);
 
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    throw new Error("The requested path is outside the active workspace.");
+    throw new Error("The requested path is outside the active Project Space.");
   }
 
   return absoluteTarget;
