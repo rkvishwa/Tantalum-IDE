@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld("tantalum", {
       getCurrentUser: () => ipcRenderer.invoke("cloud:auth:get-current-user"),
       signIn: (payload) => ipcRenderer.invoke("cloud:auth:sign-in", payload),
       register: (payload) => ipcRenderer.invoke("cloud:auth:register", payload),
+      startWebLogin: () => ipcRenderer.invoke("cloud:auth:start-web-login"),
+      onWebLoginResult: (callback) => subscribe("cloud:auth:web-login-result", callback),
       signOut: () => ipcRenderer.invoke("cloud:auth:sign-out")
     },
     databases: {
@@ -115,6 +117,17 @@ contextBridge.exposeInMainWorld("tantalum", {
     remove: (projectId) => ipcRenderer.invoke("projects:remove", projectId),
     update: (projectId, patch) => ipcRenderer.invoke("projects:update", projectId, patch),
     inspect: (projectId) => ipcRenderer.invoke("projects:inspect", projectId)
+  },
+  cloudSync: {
+    listProjects: () => ipcRenderer.invoke("cloud-sync:list-projects"),
+    inspect: (payload) => ipcRenderer.invoke("cloud-sync:inspect", payload),
+    snapshot: (payload) => ipcRenderer.invoke("cloud-sync:snapshot", payload),
+    createProject: (payload) => ipcRenderer.invoke("cloud-sync:create-project", payload),
+    linkProject: (payload) => ipcRenderer.invoke("cloud-sync:link-project", payload),
+    syncNow: (payload) => ipcRenderer.invoke("cloud-sync:sync-now", payload),
+    pause: (projectId) => ipcRenderer.invoke("cloud-sync:pause", projectId),
+    resume: (projectId) => ipcRenderer.invoke("cloud-sync:resume", projectId),
+    getStatus: (projectId) => ipcRenderer.invoke("cloud-sync:get-status", projectId)
   },
   git: {
     getStatus: () => ipcRenderer.invoke("git:get-status"),

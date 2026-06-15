@@ -6,7 +6,12 @@ renderer-react/.env
 renderer-react/.env.local
 infra/selfhost/*.env
 infra/selfhost/*.env.local
+infra/azure/.gitea-*.json
+infra/azure/.gitea-*.txt
 resources/arduino-cli/linux
 resources/arduino-cli/windows
 resources/arduino-cli/macos
-sites
+sites/**/.next
+sites/**/node_modules
+sites/**/.env
+sites/**/.env.local

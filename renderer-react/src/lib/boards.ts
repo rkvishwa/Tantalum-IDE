@@ -3,7 +3,7 @@ import type { Models } from 'appwrite';
 import { ID, Permission, Query, Role, databases } from './appwrite';
 import { appwriteConfig, hasBoardAdminFunction } from './config';
 import { executeFunction } from './functions';
-import type { BoardDocument, BoardInput } from './models';
+import type { BoardDocument, BoardInput, OtaUpdateMode } from './models';
 import { generateToken, sha256Hex } from './utils';
 
 function boardPermissions(userId: string) {
@@ -21,6 +21,16 @@ type BoardFunctionPayload = {
   mqttTopic?: string;
   provisioningPop?: string;
 };
+
+export const OTA_UPDATE_MODES: OtaUpdateMode[] = ['polling', 'mqtt', 'both'];
+
+export function isOtaUpdateMode(value: unknown): value is OtaUpdateMode {
+  return OTA_UPDATE_MODES.includes(value as OtaUpdateMode);
+}
+
+export function normalizeOtaUpdateMode(value: unknown, fallback: OtaUpdateMode = 'polling'): OtaUpdateMode {
+  return isOtaUpdateMode(value) ? value : fallback;
+}
 
 const BOARD_LIST_CACHE_TTL_MS = 2 * 60 * 1000;
 const BOARD_LIST_LIMIT = 100;
@@ -43,6 +53,8 @@ const BOARD_SELECT_FIELDS = [
   'provisioningMode',
   'provisioningPop',
   'mqttTopicSuffix',
+  'commandSecretEnvelope',
+  'otaUpdateMode',
   'lastOtaError',
   'sourceCodeVisibility',
   'firmwareVersion',
@@ -103,6 +115,7 @@ export async function createBoard(input: BoardInput, user: Models.User<Models.Pr
       provisioningStatus: 'pending',
       provisioningRequestedAt: null,
       provisioningMode: '',
+      otaUpdateMode: normalizeOtaUpdateMode(input.otaUpdateMode),
       lastOtaError: '',
       sourceCodeVisibility: input.sourceCodeVisibility || 'private',
       status: 'pending',
@@ -138,6 +151,7 @@ export async function updateBoard(boardId: string, updates: Partial<BoardDocumen
           'provisioningStatus',
           'provisioningRequestedAt',
           'provisioningMode',
+          'otaUpdateMode',
           'lastOtaError',
           'sourceCodeVisibility',
           'updatedAt',
@@ -145,6 +159,9 @@ export async function updateBoard(boardId: string, updates: Partial<BoardDocumen
       );
     }),
   ) as Record<string, unknown>;
+  if (safeUpdates.otaUpdateMode !== undefined && !isOtaUpdateMode(safeUpdates.otaUpdateMode)) {
+    throw new Error('otaUpdateMode must be polling, mqtt, or both.');
+  }
 
   return databases.updateDocument<BoardDocument>(
     appwriteConfig.databaseId,

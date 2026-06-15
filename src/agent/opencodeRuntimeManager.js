@@ -2565,7 +2565,7 @@ class LocalOpenAiBridge {
           request: gatewayRequest,
         });
       } catch (error) {
-        this.emitActivity("error", "Model request failed", error instanceof Error ? error.message : "The Appwrite gateway request failed.");
+        this.emitActivity("error", "Model request failed", error instanceof Error ? error.message : "The cloud gateway request failed.");
         throw error;
       }
 

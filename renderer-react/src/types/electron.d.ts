@@ -339,6 +339,80 @@ export type ProjectFolder = {
   };
 };
 
+export type CloudSyncScanStats = {
+  includedFiles: number;
+  excludedFiles: number;
+  excludedDirectories: number;
+  emptyDirectories: number;
+  bytes: number;
+};
+
+export type CloudSyncExcludedPath = {
+  path: string;
+  isDirectory: boolean;
+  rule: string;
+  category: string;
+  core: boolean;
+};
+
+export type CloudSyncProject = {
+  projectId: string;
+  workspacePath: string;
+  shadowRepoPath: string;
+  branch: string;
+  hasExistingGit: boolean;
+  usedReadOnlyGitScan: boolean;
+  cloudProjectId?: string;
+  cloudProjectName?: string;
+  remoteUrl?: string;
+  repoOwner?: string;
+  repoName?: string;
+  webUrl?: string;
+  deviceId?: string;
+  deviceName?: string;
+  sshPrivateKeyPath?: string;
+  sshPublicKeyPath?: string;
+  syncStatus?: 'idle' | 'syncing' | 'paused' | 'conflict' | 'error' | string;
+  syncMessage?: string;
+  paused?: boolean;
+  lastSyncAt?: string;
+  syncedFiles?: string[];
+  conflictPaths?: string[];
+  lastSnapshotAt?: string;
+  lastCommit?: string;
+  stats?: CloudSyncScanStats;
+  updatedAt?: string;
+};
+
+export type CloudSyncInspectResult = {
+  workspacePath: string;
+  hasExistingGit: boolean;
+  usedReadOnlyGitScan: boolean;
+  gitScanError?: string;
+  userIgnoreRules: string[];
+  files: Array<{ path: string; size: number; mtimeMs: number }>;
+  emptyDirectories: string[];
+  excluded: CloudSyncExcludedPath[];
+  stats: CloudSyncScanStats;
+};
+
+export type CloudSyncSnapshotResult = {
+  project: CloudSyncProject;
+  projectId: string;
+  shadowRepoPath: string;
+  manifestPath: string;
+  commit: { committed: boolean; commit?: string; output?: string };
+  scan: Omit<CloudSyncInspectResult, 'workspacePath' | 'files'>;
+};
+
+export type CloudSyncRemoteResult = {
+  project: CloudSyncProject;
+  remote?: unknown;
+  conflict?: boolean;
+  skipped?: boolean;
+  reason?: string;
+};
+
 export type MenuAction =
   | { type: 'new-file' }
   | { type: 'open-file' }
@@ -454,6 +528,7 @@ export type LocalBoardProfile = {
   cloudLinkedAt?: string;
   lastCloudProvisionedAt?: string;
   lastCloudUsbUploadAt?: string;
+  otaUpdateMode?: 'polling' | 'mqtt' | 'both' | string;
   sourceCodeVisibility?: 'private' | 'public' | string;
   createdAt: string;
   updatedAt: string;
@@ -514,6 +589,10 @@ export type CloudConfig = {
   sketchesCollectionId: string;
   sourceSnapshotsCollectionId?: string;
   agentAsyncReadResultsCollectionId?: string;
+  supportTicketsCollectionId?: string;
+  cloudProjectsCollectionId?: string;
+  cloudProjectDevicesCollectionId?: string;
+  cloudProjectSyncEventsCollectionId?: string;
   firmwareBucketId: string;
   firmwareSourceBucketId?: string;
   boardAdminFunctionId: string;
@@ -521,6 +600,11 @@ export type CloudConfig = {
   agentSettingsFunctionId: string;
   agentGatewayFunctionId: string;
   boardDetectionFunctionId?: string;
+  desktopAuthFunctionId?: string;
+  webAdminFunctionId?: string;
+  projectSyncFunctionId?: string;
+  webAppUrl?: string;
+  desktopCallbackScheme?: string;
   mqttHost?: string;
   mqttPort?: string | number;
   mqttUsername?: string;
@@ -1043,6 +1127,8 @@ export type DesktopApi = {
       getCurrentUser: () => Promise<Result<{ user: Models.User<Models.Preferences> | null }>>;
       signIn: (payload: { email: string; password: string }) => Promise<Result<{ session: Record<string, unknown> }>>;
       register: (payload: { userId: string; email: string; password: string; name: string }) => Promise<Result<{ user: Models.User<Models.Preferences> }>>;
+      startWebLogin: () => Promise<Result<{ loginUrl: string; expiresAt: string }>>;
+      onWebLoginResult: (callback: (result: Result<{ user: Models.User<Models.Preferences> }>) => void) => () => void;
       signOut: () => Promise<Result>;
     };
     databases: {
@@ -1111,6 +1197,23 @@ export type DesktopApi = {
     remove: (projectId: string) => Promise<Result<{ projects: ProjectFolder[] }>>;
     update: (projectId: string, patch: Partial<Pick<ProjectFolder, 'path' | 'displayName' | 'favorite' | 'lastOpenedAt'>>) => Promise<Result<{ project: ProjectFolder }>>;
     inspect: (projectId: string) => Promise<Result<{ project: ProjectFolder }>>;
+  };
+  cloudSync: {
+    listProjects: () => Promise<Result<{ projects: CloudSyncProject[] }>>;
+    inspect: (payload: { workspacePath: string; maxFileBytes?: number }) => Promise<Result<CloudSyncInspectResult>>;
+    snapshot: (payload: {
+      workspacePath: string;
+      projectId?: string;
+      branch?: string;
+      message?: string;
+      maxFileBytes?: number;
+    }) => Promise<Result<CloudSyncSnapshotResult>>;
+    createProject: (payload: { workspacePath: string; name?: string; maxFileBytes?: number }) => Promise<Result<CloudSyncRemoteResult>>;
+    linkProject: (payload: { projectId: string; workspacePath: string; maxFileBytes?: number }) => Promise<Result<CloudSyncRemoteResult>>;
+    syncNow: (payload: { projectId: string; reason?: string }) => Promise<Result<CloudSyncRemoteResult>>;
+    pause: (projectId: string) => Promise<Result<{ project: CloudSyncProject }>>;
+    resume: (projectId: string) => Promise<Result<{ project: CloudSyncProject }>>;
+    getStatus: (projectId: string) => Promise<Result<{ project: CloudSyncProject }>>;
   };
   git: {
     getStatus: () => Promise<Result<{ status: GitStatus }>>;

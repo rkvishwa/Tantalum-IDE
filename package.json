@@ -2,7 +2,7 @@
   "name": "tantalum-ide",
   "version": "1.0.0",
   "private": true,
-  "description": "Tantalum IDE desktop app with Arduino tooling, Appwrite-backed auth, OTA workflows, and a React + TypeScript UI.",
+  "description": "Tantalum IDE desktop app with Arduino tooling, cloud-backed auth, OTA workflows, and a React + TypeScript UI.",
   "main": "main.js",
   "workspaces": [
     "renderer-react"
@@ -27,11 +27,14 @@
     "smoke:device-gateway-ota-url": "node scripts/smoke-device-gateway-ota-url.mjs",
     "smoke:device-gateway-telemetry": "node scripts/smoke-device-gateway-telemetry.mjs",
     "smoke:firmware-checksum": "node scripts/smoke-firmware-checksum.mjs",
+    "smoke:ota-update-modes": "node scripts/smoke-ota-update-modes.mjs",
     "smoke:runtime-ota": "node scripts/smoke-tantalum-runtime-ota.mjs",
     "smoke:secret-envelope": "node scripts/smoke-secret-envelope.mjs",
     "smoke:agent-restore": "node scripts/smoke-agent-restore-points.js",
     "smoke:workspace-sketch": "node scripts/smoke-workspace-sketch-source.js",
+    "smoke:cloud-sync": "node scripts/smoke-cloud-sync.js",
     "smoke:opencode": "node scripts/smoke-opencode-runtime.js",
+    "icons:generate": "node scripts/generate-tantalum-icons.mjs",
     "dist": "npm run build:renderer && electron-builder",
     "build:mac": "npm run build:renderer && electron-builder --mac"
   },
@@ -65,6 +68,15 @@
     "directories": {
       "output": "dist"
     },
+    "icon": "resources/icons/tantalum-icon",
+    "protocols": [
+      {
+        "name": "Tantalum IDE Desktop Login",
+        "schemes": [
+          "tantalum"
+        ]
+      }
+    ],
     "files": [
       "**/*",
       "!resources/arduino-cli/**/*"
@@ -96,6 +108,7 @@
   "author": "vishva",
   "license": "ISC",
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
     "electron": "^39.1.2",

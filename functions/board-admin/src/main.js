@@ -161,6 +161,17 @@ function commandTopic(boardId, topicSuffix) {
   return `tantalum/boards/${boardId}/${topicSuffix}/cmd`;
 }
 
+const OTA_UPDATE_MODES = new Set(['polling', 'mqtt', 'both']);
+
+function isValidOtaUpdateMode(value) {
+  return OTA_UPDATE_MODES.has(String(value || '').trim().toLowerCase());
+}
+
+function normalizeOtaUpdateMode(value, fallback = 'polling') {
+  const mode = String(value || '').trim().toLowerCase();
+  return OTA_UPDATE_MODES.has(mode) ? mode : fallback;
+}
+
 function normalizePem(value) {
   return String(value || '').replace(/\\n/g, '\n').trim();
 }
@@ -182,27 +193,43 @@ function mqttConnectionUrl() {
 
 function validateMqttPublisherConfig(url) {
   if (!url) {
-    return 'MQTT broker is not configured; heartbeat fallback remains active.';
+    return 'MQTT broker is not configured.';
   }
 
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'mqtts:') {
-      return 'MQTT must use mqtts:// with a TLS CA certificate; heartbeat fallback remains active.';
+      return 'MQTT must use mqtts:// with a TLS CA certificate.';
     }
   } catch {
-    return 'MQTT broker URL is invalid; heartbeat fallback remains active.';
+    return 'MQTT broker URL is invalid.';
   }
 
   if (!normalizePem(TANTALUM_MQTT_CA_CERT)) {
-    return 'MQTT TLS CA certificate is missing; heartbeat fallback remains active.';
+    return 'MQTT TLS CA certificate is missing.';
   }
 
   if (!TANTALUM_MQTT_PUBLISHER_USERNAME || !TANTALUM_MQTT_PUBLISHER_PASSWORD) {
-    return 'MQTT publisher credentials are missing; heartbeat fallback remains active.';
+    return 'MQTT publisher credentials are missing.';
   }
 
   return '';
+}
+
+function defaultOtaUpdateMode() {
+  const configError = validateMqttPublisherConfig(mqttConnectionUrl());
+  return configError ? 'polling' : 'both';
+}
+
+function boardUsesMqttOta(board) {
+  const mode = normalizeOtaUpdateMode(board?.otaUpdateMode);
+  return mode === 'mqtt' || mode === 'both';
+}
+
+function mqttStatusForFailure(board) {
+  return normalizeOtaUpdateMode(board?.otaUpdateMode) === 'both'
+    ? 'mqtt-failed-with-polling-fallback'
+    : 'mqtt-failed-no-fallback';
 }
 
 function signCommand(secret, action, deploymentId, nonce, issuedAt) {
@@ -216,8 +243,16 @@ async function publishBoardCommand(board, action, deploymentId = '') {
   const url = mqttConnectionUrl();
   const commandSecret = decryptSecret(board.commandSecretEnvelope);
 
-  if (!url || !board.mqttTopicSuffix || !commandSecret) {
-    return { published: false, reason: 'MQTT is not fully configured; heartbeat fallback remains active.' };
+  if (!url) {
+    return { published: false, reason: 'MQTT broker is not configured.' };
+  }
+
+  if (!board.mqttTopicSuffix) {
+    return { published: false, reason: 'Board MQTT topic is missing. Reinstall the cloud runtime.' };
+  }
+
+  if (!commandSecret) {
+    return { published: false, reason: 'Board MQTT command secret is missing. Reinstall the cloud runtime.' };
   }
 
   const mqttConfigError = validateMqttPublisherConfig(url);
@@ -284,6 +319,9 @@ async function createBoard(req, res) {
   if (!payload.name || !payload.boardType) {
     return fail(res, 400, 'Board name and type are required.');
   }
+  if (payload.otaUpdateMode && !isValidOtaUpdateMode(payload.otaUpdateMode)) {
+    return fail(res, 400, 'otaUpdateMode must be polling, mqtt, or both.');
+  }
 
   const apiToken = generateToken();
   const commandSecret = generateSecret();
@@ -314,6 +352,7 @@ async function createBoard(req, res) {
       runtimeVersion: '',
       lastUpdateCheckAt: null,
       otaStatus: 'idle',
+      otaUpdateMode: normalizeOtaUpdateMode(payload.otaUpdateMode, defaultOtaUpdateMode()),
       provisioningStatus: 'pending',
       provisioningRequestedAt: null,
       provisioningMode: '',
@@ -419,11 +458,25 @@ async function deployFirmware(req, res) {
     },
   );
 
-  let mqttResult;
-  try {
-    mqttResult = await publishBoardCommand(board, 'check-update', payload.deploymentId);
-  } catch (error) {
-    mqttResult = { published: false, reason: error instanceof Error ? error.message : 'MQTT publish failed.' };
+  let mqttResult = {
+    published: false,
+    status: 'skipped-polling-only',
+    reason: 'Board OTA update mode is polling-only.',
+  };
+  if (boardUsesMqttOta(board)) {
+    try {
+      mqttResult = await publishBoardCommand(board, 'check-update', payload.deploymentId);
+      mqttResult = {
+        ...mqttResult,
+        status: mqttResult.published ? 'published' : mqttStatusForFailure(board),
+      };
+    } catch (error) {
+      mqttResult = {
+        published: false,
+        status: mqttStatusForFailure(board),
+        reason: error instanceof Error ? error.message : 'MQTT publish failed.',
+      };
+    }
   }
 
   return ok(res, { board, firmware, mqtt: mqttResult });
@@ -450,11 +503,25 @@ async function startProvisioning(req, res) {
     },
   );
 
-  let mqttResult;
-  try {
-    mqttResult = await publishBoardCommand(board, 'start-provisioning');
-  } catch (error) {
-    mqttResult = { published: false, reason: error instanceof Error ? error.message : 'MQTT publish failed.' };
+  let mqttResult = {
+    published: false,
+    status: 'skipped-polling-only',
+    reason: 'Board runtime update mode does not include MQTT.',
+  };
+  if (boardUsesMqttOta(board)) {
+    try {
+      mqttResult = await publishBoardCommand(board, 'start-provisioning');
+      mqttResult = {
+        ...mqttResult,
+        status: mqttResult.published ? 'published' : mqttStatusForFailure(board),
+      };
+    } catch (error) {
+      mqttResult = {
+        published: false,
+        status: mqttStatusForFailure(board),
+        reason: error instanceof Error ? error.message : 'MQTT publish failed.',
+      };
+    }
   }
 
   return ok(res, {

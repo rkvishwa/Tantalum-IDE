@@ -22,7 +22,7 @@ export async function signIn(email: string, password: string) {
 
   const user = await account.get();
   if (!user) {
-    throw new Error('Appwrite session was created, but the current user could not be loaded.');
+    throw new Error('Cloud session was created, but the current user could not be loaded.');
   }
 
   return user;
@@ -41,6 +41,23 @@ export async function register(email: string, password: string, name: string) {
 
 export async function signOut() {
   await account.deleteSession('current');
+}
+
+export async function startWebLogin() {
+  const desktopApi = window.tantalum?.cloud?.auth;
+  if (!desktopApi?.startWebLogin) {
+    throw new Error('The desktop web login bridge is unavailable. Restart Tantalum IDE and try again.');
+  }
+
+  const result = await desktopApi.startWebLogin();
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+
+  return {
+    loginUrl: result.loginUrl,
+    expiresAt: result.expiresAt,
+  };
 }
 
 type AccountWithCompat = {

@@ -71,6 +71,7 @@ const { AgentToolExecutor } = require("./src/agent/toolExecutor");
 const { deriveFunctionId, getRendererCloudConfig } = require("./src/config/runtimeCloudConfig");
 const { WorkspaceScanner } = require("./src/agent/workspaceScanner");
 const boardCodeService = require("./src/services/boardCodeService");
+const { CloudSyncService } = require("./src/services/cloudSyncService");
 const { detectLocalBoardsDeterministic } = require("./src/services/localBoardService");
 const provisioningService = require("./src/services/provisioningService");
 const appwriteManifest = require("./appwrite.config.json");
@@ -78,6 +79,8 @@ const appwriteManifest = require("./appwrite.config.json");
 const APP_NAME = "Tantalum IDE";
 const APPWRITE_ENDPOINT = String(appwriteManifest.endpoint || "").replace(/\/$/, "");
 const APPWRITE_PROJECT_ID = String(appwriteManifest.projectId || "");
+const TANTALUM_WEB_APP_URL = String(process.env.TANTALUM_WEB_APP_URL || appwriteManifest.webAppUrl || "https://tantalum.knurdz.org").replace(/\/+$/, "");
+const TANTALUM_DESKTOP_CALLBACK_SCHEME = String(process.env.TANTALUM_DESKTOP_CALLBACK_SCHEME || "tantalum").trim().toLowerCase() || "tantalum";
 const REACT_DIST_ENTRY = path.join(__dirname, "renderer-react", "dist", "index.html");
 const DEFAULT_WORKSPACE_SKETCH_FILE = "main.ino";
 const DEFAULT_EDITOR_CONTENT = `// Welcome to ${APP_NAME}
@@ -94,6 +97,8 @@ const LOCAL_BOARD_PROFILES_KEY = "localBoardProfiles";
 const ARDUINO_STORAGE_ROOT_KEY = "arduinoStorageRoot";
 const AGENT_TOOL_SETTINGS_KEY = "agentToolSettings";
 const BOARD_DETECTION_FUNCTION_ID = deriveFunctionId(appwriteManifest, "board-detection");
+const DESKTOP_AUTH_FUNCTION_ID = deriveFunctionId(appwriteManifest, "desktop-auth");
+const PROJECT_SYNC_FUNCTION_ID = deriveFunctionId(appwriteManifest, "project-sync");
 const TOOLCHAIN_NOTIFICATIONS_KEY = "toolchainNotifications";
 const TOOLCHAIN_NOTIFICATIONS_LIMIT = 100;
 const BOARD_CODE_EXTRACTION_MODES = new Set(["restore-first", "force-hardware-reconstruct", "force-hardware-artifacts"]);
@@ -104,6 +109,10 @@ const SOURCE_MARKER_ALLOWED_RESTORE_STATUSES = new Set([SOURCE_MARKER_STATUS_CUR
 const SOURCE_CODE_VISIBILITY_PRIVATE = "private";
 const SOURCE_CODE_VISIBILITY_PUBLIC = "public";
 const SOURCE_CODE_VISIBILITIES = new Set([SOURCE_CODE_VISIBILITY_PRIVATE, SOURCE_CODE_VISIBILITY_PUBLIC]);
+const OTA_UPDATE_MODE_POLLING = "polling";
+const OTA_UPDATE_MODE_MQTT = "mqtt";
+const OTA_UPDATE_MODE_BOTH = "both";
+const OTA_UPDATE_MODES = new Set([OTA_UPDATE_MODE_POLLING, OTA_UPDATE_MODE_MQTT, OTA_UPDATE_MODE_BOTH]);
 const SOURCE_MARKER_FLASH_VIA_USB = "usb";
 const SOURCE_MARKER_FLASH_VIA_OTA = "ota";
 
@@ -124,6 +133,11 @@ const activeLibraryInstallOperations = new Map();
 const activeLocalUploadPorts = new Set();
 const activeBoardCodePorts = new Set();
 const workspaceScanner = new WorkspaceScanner();
+const cloudSyncService = new CloudSyncService({
+  app,
+  getPreferenceStore: () => preferenceStore,
+  executeProjectSync: executeProjectSyncFunction,
+});
 const securityManager = new SecurityManager();
 const agentToolRegistry = new AgentToolRegistry();
 const agentToolExecutor = new AgentToolExecutor({
@@ -449,6 +463,11 @@ function normalizeBoardText(value, maxLength = 255) {
   return String(value || "").trim().slice(0, maxLength);
 }
 
+function normalizeOtaUpdateMode(value, fallback = OTA_UPDATE_MODE_POLLING) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return OTA_UPDATE_MODES.has(normalized) ? normalized : fallback;
+}
+
 function createLocalBoardProfileId(profile) {
   const key = [
     profile?.fingerprint,
@@ -503,6 +522,27 @@ function localBoardProfilePortKey(profile) {
   return normalizeBoardText(profile?.port).toLowerCase();
 }
 
+function localBoardProfileFqbnMatches(left, right) {
+  const leftFqbn = normalizeBoardText(left?.fqbn || left?.board || left?.boardType);
+  const rightFqbn = normalizeBoardText(right?.fqbn || right?.board || right?.boardType);
+  return Boolean(leftFqbn && rightFqbn && leftFqbn === rightFqbn);
+}
+
+function localBoardProfileIdentityValueMatches(left, right) {
+  const leftValue = normalizeBoardText(left).toLowerCase();
+  const rightValue = normalizeBoardText(right).toLowerCase();
+  return Boolean(leftValue && rightValue && leftValue === rightValue);
+}
+
+function localBoardProfileTrustedIdentityMatches(left, right) {
+  return Boolean(
+    localBoardProfileIdentityValueMatches(left?.fingerprint, right?.fingerprint) ||
+      localBoardProfileIdentityValueMatches(left?.serialNumber, right?.serialNumber) ||
+      localBoardProfileIdentityValueMatches(left?.pnpId, right?.pnpId) ||
+      localBoardProfileIdentityValueMatches(left?.locationId, right?.locationId)
+  );
+}
+
 function normalizeLocalBoardProfile(entry) {
   const source = entry && typeof entry === "object" ? entry : null;
   if (!source) {
@@ -537,6 +577,7 @@ function normalizeLocalBoardProfile(entry) {
     cloudLinkedAt: normalizeBoardText(source.cloudLinkedAt, 64),
     lastCloudProvisionedAt: normalizeBoardText(source.lastCloudProvisionedAt, 64),
     lastCloudUsbUploadAt: normalizeBoardText(source.lastCloudUsbUploadAt, 64),
+    otaUpdateMode: normalizeOtaUpdateMode(source.otaUpdateMode),
     sourceCodeVisibility: normalizeSourceCodeVisibility(source.sourceCodeVisibility),
     createdAt: normalizeBoardText(source.createdAt, 64) || now,
     updatedAt: now
@@ -569,32 +610,48 @@ function getLocalBoardProfiles() {
 
 function findLocalBoardProfileMatch(profile, profiles, usedIds = new Set(), allowVidPidFallback = false) {
   const availableProfiles = profiles.filter((entry) => !usedIds.has(entry.id));
-  const strongMatch = availableProfiles.find((entry) => {
+  const idMatch = availableProfiles.find((entry) => entry.id === profile.id);
+  if (idMatch) {
+    return idMatch;
+  }
+
+  const identityMatch = availableProfiles.find((entry) => {
     return (
-      entry.id === profile.id ||
-      (profile.fingerprint && entry.fingerprint === profile.fingerprint) ||
-      (profile.serialNumber && entry.serialNumber === profile.serialNumber) ||
-      (profile.pnpId && entry.pnpId === profile.pnpId) ||
-      (profile.locationId && entry.locationId === profile.locationId) ||
-      (profile.port && entry.port === profile.port)
+      localBoardProfileIdentityValueMatches(profile.fingerprint, entry.fingerprint) ||
+      localBoardProfileIdentityValueMatches(profile.serialNumber, entry.serialNumber) ||
+      localBoardProfileIdentityValueMatches(profile.pnpId, entry.pnpId) ||
+      localBoardProfileIdentityValueMatches(profile.locationId, entry.locationId)
     );
   });
 
-  if (strongMatch || !allowVidPidFallback) {
-    return strongMatch || null;
+  if (identityMatch) {
+    return identityMatch;
+  }
+
+  const portMatch = availableProfiles.find((entry) => {
+    if (!profile.port || normalizeBoardText(entry.port).toLowerCase() !== normalizeBoardText(profile.port).toLowerCase()) {
+      return false;
+    }
+
+    if (entry.cloudBoardId) {
+      return localBoardProfileFqbnMatches(entry, profile) && localBoardProfileTrustedIdentityMatches(entry, profile);
+    }
+
+    return true;
+  });
+
+  if (portMatch || !allowVidPidFallback) {
+    return portMatch || null;
   }
 
   if (profile.vendorId && profile.productId) {
-    const vidPidMatches = availableProfiles.filter((entry) => entry.vendorId === profile.vendorId && entry.productId === profile.productId);
+    const vidPidMatches = availableProfiles.filter((entry) => !entry.cloudBoardId && entry.vendorId === profile.vendorId && entry.productId === profile.productId);
     if (vidPidMatches.length === 1) {
       return vidPidMatches[0];
     }
   }
 
-  const cloudLinkedTypeMatches = availableProfiles.filter((entry) => {
-    return Boolean(entry.cloudBoardId && profile.fqbn && entry.fqbn === profile.fqbn);
-  });
-  return cloudLinkedTypeMatches.length === 1 ? cloudLinkedTypeMatches[0] : null;
+  return null;
 }
 
 function saveLocalBoardProfile(profile) {
@@ -635,9 +692,35 @@ function preserveLocalBoardCloudLink(nextProfile, existingProfile, sourceProfile
     return nextProfile;
   }
 
-  for (const key of ["cloudBoardId", "cloudLinkedAt", "lastCloudProvisionedAt", "lastCloudUsbUploadAt"]) {
+  const sourceHasCloudBoardId = Object.prototype.hasOwnProperty.call(sourceProfile, "cloudBoardId");
+  const sourceExplicitlyLinksCloud = sourceHasCloudBoardId && normalizeBoardText(sourceProfile.cloudBoardId);
+  const sourceExplicitlyClearsCloud = sourceHasCloudBoardId && !normalizeBoardText(sourceProfile.cloudBoardId);
+  const sameExplicitProfile = Boolean(sourceProfile.id && sourceProfile.id === existingProfile.id);
+  const trustedSameHardware = localBoardProfileTrustedIdentityMatches(existingProfile, sourceProfile);
+  const sameFqbn = localBoardProfileFqbnMatches(existingProfile, nextProfile);
+  const canPreserveExistingCloudLink = Boolean(
+    existingProfile.cloudBoardId &&
+      !sourceExplicitlyClearsCloud &&
+      (sourceExplicitlyLinksCloud || (sameFqbn && (sameExplicitProfile || trustedSameHardware)))
+  );
+
+  if (!canPreserveExistingCloudLink) {
+    for (const key of ["cloudBoardId", "cloudLinkedAt", "lastCloudProvisionedAt", "lastCloudUsbUploadAt"]) {
+      if (!Object.prototype.hasOwnProperty.call(sourceProfile, key)) {
+        nextProfile[key] = "";
+      }
+    }
+    if (!Object.prototype.hasOwnProperty.call(sourceProfile, "otaUpdateMode")) {
+      nextProfile.otaUpdateMode = normalizeOtaUpdateMode("");
+    }
+    return nextProfile;
+  }
+
+  for (const key of ["cloudBoardId", "cloudLinkedAt", "lastCloudProvisionedAt", "lastCloudUsbUploadAt", "otaUpdateMode"]) {
     if (!Object.prototype.hasOwnProperty.call(sourceProfile, key)) {
-      nextProfile[key] = existingProfile[key] || "";
+      nextProfile[key] = key === "otaUpdateMode"
+        ? normalizeOtaUpdateMode(existingProfile[key])
+        : existingProfile[key] || "";
     }
   }
 
@@ -3428,7 +3511,7 @@ function parseAppwriteNodePayload(headers, buffer) {
 
 async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [], rawBody, headers: requestHeaders = {}, useSession = true }, onUploadProgress) {
   if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
-    throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
+    throw new Error("Cloud endpoint or project ID is missing from the local manifest.");
   }
 
   const normalizedPath = String(pathName || "").replace(/^\/+/, "");
@@ -3464,7 +3547,7 @@ async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [
         const payload = parseAppwriteNodePayload(response.headers, Buffer.concat(chunks));
 
         if (Number(response.statusCode || 0) < 200 || Number(response.statusCode || 0) >= 300) {
-          const error = new Error(payload?.message || `Appwrite request failed with status ${response.statusCode}.`);
+          const error = new Error(payload?.message || `Cloud request failed with status ${response.statusCode}.`);
           error.status = response.statusCode;
           error.type = payload?.type || "appwrite_error";
           reject(error);
@@ -3525,6 +3608,7 @@ const appwriteReadCache = new Map();
 const appwriteInflightReadCache = new Map();
 let appwriteReadCacheEpoch = 0;
 let appwriteJwtCache = { sessionKey: "", jwt: "", expiresAt: 0 };
+let pendingDesktopWebLogin = null;
 let agentSettingsWarmTimer = null;
 let agentSettingsWarmInFlight = null;
 let lastAgentSettingsWarmAt = 0;
@@ -3713,7 +3797,7 @@ function functionExecutionCacheTtlMs(payload) {
 
 async function appwriteRequest({ method = "GET", pathName, queries = [], body, formData, rawBody, headers: requestHeaders = {}, useSession = true, invalidateCache = true }) {
   if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
-    throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
+    throw new Error("Cloud endpoint or project ID is missing from the local manifest.");
   }
 
   const normalizedPath = String(pathName || "").replace(/^\/+/, "");
@@ -3753,7 +3837,7 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   const payload = await readAppwritePayload(response);
 
   if (!response.ok) {
-    const error = new Error(payload?.message || `Appwrite request failed with status ${response.status}.`);
+    const error = new Error(payload?.message || `Cloud request failed with status ${response.status}.`);
     error.status = response.status;
     error.type = payload?.type || "appwrite_error";
     throw error;
@@ -3764,6 +3848,167 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   }
 
   return payload;
+}
+
+function base64Url(buffer) {
+  return Buffer.from(buffer)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function desktopAuthChallenge(verifier) {
+  return base64Url(crypto.createHash("sha256").update(verifier, "utf8").digest());
+}
+
+function createDesktopAuthValue(byteLength = 32) {
+  return base64Url(crypto.randomBytes(byteLength));
+}
+
+function desktopAuthLoginUrl({ state, challenge }) {
+  const url = new URL("/auth/desktop", TANTALUM_WEB_APP_URL || "https://tantalum.knurdz.org");
+  url.searchParams.set("state", state);
+  url.searchParams.set("challenge", challenge);
+  url.searchParams.set("scheme", TANTALUM_DESKTOP_CALLBACK_SCHEME);
+  url.searchParams.set("app", APP_NAME);
+  return url.toString();
+}
+
+function executionResponseBody(execution = {}) {
+  if (typeof execution.responseBody === "string" && execution.responseBody.length > 0) {
+    return execution.responseBody;
+  }
+
+  if (typeof execution.response === "string") {
+    return execution.response;
+  }
+
+  return typeof execution.responseBody === "string" ? execution.responseBody : "";
+}
+
+async function executeDesktopAuthFunction(pathName, payload) {
+  if (!DESKTOP_AUTH_FUNCTION_ID) {
+    throw new Error("Desktop auth function is not configured.");
+  }
+
+  const execution = await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(DESKTOP_AUTH_FUNCTION_ID)}/executions`,
+    useSession: false,
+    body: {
+      body: JSON.stringify(payload),
+      async: false,
+      path: pathName,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+    },
+  });
+  const parsed = JSON.parse(executionResponseBody(execution) || "{\"ok\":false,\"error\":\"Desktop auth function returned an empty response.\"}");
+  const statusCode = Number(execution.responseStatusCode || execution.statusCode || 0);
+  if (statusCode >= 400 || !parsed.ok || !parsed.data) {
+    throw new Error(parsed.error || "Desktop auth function failed.");
+  }
+  return parsed.data;
+}
+
+async function executeProjectSyncFunction(pathName, payload) {
+  if (!PROJECT_SYNC_FUNCTION_ID) {
+    throw new Error("Project sync function is not configured.");
+  }
+
+  const headers = {
+    "content-type": "application/json",
+  };
+  const jwt = await getCurrentAppwriteJwt().catch(() => "");
+  if (jwt) {
+    headers["X-Appwrite-JWT"] = jwt;
+  }
+
+  const execution = await appwriteRequest({
+    method: "POST",
+    pathName: `functions/${encodeURIComponent(PROJECT_SYNC_FUNCTION_ID)}/executions`,
+    body: {
+      body: JSON.stringify(payload || {}),
+      async: false,
+      path: pathName,
+      method: "POST",
+      headers,
+    },
+  });
+  const parsed = JSON.parse(executionResponseBody(execution) || "{\"ok\":false,\"error\":\"Project sync function returned an empty response.\"}");
+  const statusCode = Number(execution.responseStatusCode || execution.statusCode || 0);
+  if (statusCode >= 400 || !parsed.ok || parsed.data === undefined || parsed.data === null) {
+    throw new Error(parsed.error || "Project sync function failed.");
+  }
+  return parsed.data;
+}
+
+function registerDesktopAuthProtocol() {
+  try {
+    if (process.defaultApp && process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(TANTALUM_DESKTOP_CALLBACK_SCHEME, process.execPath, [path.resolve(process.argv[1])]);
+      return;
+    }
+    app.setAsDefaultProtocolClient(TANTALUM_DESKTOP_CALLBACK_SCHEME);
+  } catch (error) {
+    console.warn("Failed to register desktop auth protocol:", error.message);
+  }
+}
+
+function desktopAuthUrlFromArgs(argv = []) {
+  return argv.find((value) => typeof value === "string" && value.startsWith(`${TANTALUM_DESKTOP_CALLBACK_SCHEME}://`)) || "";
+}
+
+async function handleDesktopAuthCallback(rawUrl) {
+  try {
+    const parsedUrl = new URL(rawUrl);
+    if (parsedUrl.protocol !== `${TANTALUM_DESKTOP_CALLBACK_SCHEME}:` || parsedUrl.hostname !== "auth" || parsedUrl.pathname !== "/callback") {
+      throw new Error("Unsupported desktop auth callback.");
+    }
+
+    const grantId = parsedUrl.searchParams.get("grant") || "";
+    const state = parsedUrl.searchParams.get("state") || "";
+    if (!pendingDesktopWebLogin || pendingDesktopWebLogin.state !== state) {
+      throw new Error("Desktop login state did not match. Start login again from the IDE.");
+    }
+
+    if (pendingDesktopWebLogin.expiresAt <= Date.now()) {
+      pendingDesktopWebLogin = null;
+      throw new Error("Desktop login request expired. Start login again from the IDE.");
+    }
+
+    const exchange = await executeDesktopAuthFunction("/exchange", {
+      grantId,
+      state,
+      codeVerifier: pendingDesktopWebLogin.verifier,
+    });
+
+    await appwriteRequest({
+      method: "POST",
+      pathName: "account/sessions/token",
+      useSession: false,
+      body: {
+        userId: exchange.userId,
+        secret: exchange.secret,
+      },
+    });
+    clearAppwriteReadCache();
+    prewarmCurrentAppwriteJwt();
+    const user = await appwriteRequest({ pathName: "account" });
+    pendingDesktopWebLogin = null;
+    sendRendererEvent("cloud:auth:web-login-result", { success: true, user });
+    mainWindow?.show();
+    mainWindow?.focus();
+  } catch (error) {
+    pendingDesktopWebLogin = null;
+    sendRendererEvent("cloud:auth:web-login-result", {
+      success: false,
+      error: error instanceof Error ? error.message : "Desktop web login failed.",
+    });
+  }
 }
 
 async function warmAgentSettingsFunction(reason = "background") {
@@ -3961,7 +4206,7 @@ async function createAgentAsyncResultExecutionAndWait(
 
   const executionId = initial?.$id || initial?.id;
   if (!executionId) {
-    throw new Error("Appwrite did not return an execution ID for the async function request.");
+    throw new Error("Cloud service did not return an execution ID for the async function request.");
   }
 
   return waitForAgentAsyncResult(functionId, initial, ids, { timeoutMs, pollMs });
@@ -4159,6 +4404,39 @@ function sourceMarkerDocumentSummary(document = null) {
     flashedVia: document.flashedVia || "",
     visibilityUpdatedAt: document.visibilityUpdatedAt || "",
   };
+}
+
+function sourceMarkerDocumentValidationManifest(document = null) {
+  const manifest = parseSourceSnapshotManifest(document?.sourceSnapshotManifest) || {};
+  const manifestMetadata = manifest && typeof manifest === "object" && manifest.metadata && typeof manifest.metadata === "object"
+    ? manifest.metadata
+    : {};
+  const markerId = manifestMetadata.sourceMarkerId || manifestMetadata.sourceRestoreMarkerId || manifestMetadata.sourceMarker?.markerId || manifestMetadata.sourceRestoreMarker?.markerId || document?.markerId || document?.$id || "";
+  const boardId = manifestMetadata.cloudBoardId || manifestMetadata.boardId || document?.boardId || "";
+  const boardType = manifestMetadata.boardType || manifestMetadata.fqbn || manifestMetadata.board || document?.boardType || "";
+  return {
+    ...manifest,
+    metadata: {
+      ...(manifestMetadata || {}),
+      sourceMarkerId: markerId,
+      retentionGroup: manifestMetadata.retentionGroup || document?.retentionGroup || "",
+      boardId,
+      cloudBoardId: boardId,
+      boardName: manifestMetadata.boardName || document?.boardName || "",
+      boardType,
+      fqbn: boardType,
+      profileId: manifestMetadata.profileId || document?.profileId || "",
+      fingerprint: manifestMetadata.fingerprint || document?.fingerprint || "",
+      port: manifestMetadata.port || document?.port || "",
+    },
+  };
+}
+
+function validateSourceMarkerDocumentForIdentity(document = null, identity = {}, options = {}) {
+  const manifest = sourceMarkerDocumentValidationManifest(document);
+  return boardCodeService.validateSourceSnapshotManifestForIdentity(manifest, identity, {
+    source: options.source || "source-marker",
+  });
 }
 
 async function createPendingSourceRestoreMarker(payload = {}) {
@@ -4512,7 +4790,7 @@ async function createAndUploadSourceSnapshot(payload = {}) {
 
 async function downloadAppwriteFileBuffer(bucketId, fileId) {
   if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
-    throw new Error("Appwrite endpoint or project ID is missing from the local manifest.");
+    throw new Error("Cloud endpoint or project ID is missing from the local manifest.");
   }
 
   const url = new URL(`${APPWRITE_ENDPOINT}/storage/buckets/${encodeURIComponent(bucketId)}/files/${encodeURIComponent(fileId)}/download`);
@@ -4682,18 +4960,23 @@ async function restoreSourceMarkerSnapshotDocument(document = null, boardPayload
     throw new Error("Saved source snapshot manifest does not match the firmware source marker.");
   }
 
+  const allowDocumentIdentityFallback = Boolean(options.verifiedFromFirmware);
   const identity = normalizeBoardCodeIdentity({
     ...boardPayload,
-    cloudBoardId: boardPayload.cloudBoardId || boardPayload.id || document.boardId,
-    id: boardPayload.id || document.boardId,
-    fqbn: boardPayload.fqbn || boardPayload.boardType || document.boardType,
-    boardType: boardPayload.boardType || document.boardType,
-    profileId: boardPayload.profileId || document.profileId,
-    fingerprint: boardPayload.fingerprint || document.fingerprint,
-    port: boardPayload.port || document.port,
-    name: boardPayload.name || document.boardName,
+    cloudBoardId: boardPayload.cloudBoardId || boardPayload.id || (allowDocumentIdentityFallback ? document.boardId : ""),
+    id: boardPayload.id || (allowDocumentIdentityFallback ? document.boardId : ""),
+    fqbn: boardPayload.fqbn || boardPayload.boardType || (allowDocumentIdentityFallback ? document.boardType : ""),
+    boardType: boardPayload.boardType || (allowDocumentIdentityFallback ? document.boardType : ""),
+    profileId: boardPayload.profileId || (allowDocumentIdentityFallback ? document.profileId : ""),
+    fingerprint: boardPayload.fingerprint || (allowDocumentIdentityFallback ? document.fingerprint : ""),
+    port: boardPayload.port || (allowDocumentIdentityFallback ? document.port : ""),
+    name: boardPayload.name || (allowDocumentIdentityFallback ? document.boardName : ""),
   });
-  const validation = boardCodeService.validateSourceSnapshotManifestForIdentity(manifest, identity, { source: "source-marker" });
+  const validationManifest = sourceMarkerDocumentValidationManifest({
+    ...document,
+    sourceSnapshotManifest: manifest,
+  });
+  const validation = boardCodeService.validateSourceSnapshotManifestForIdentity(validationManifest, identity, { source: "source-marker" });
   if (validation.unsafeScope) {
     throw new Error(validation.reason || "Cloud source marker snapshot was rejected because it contains a broad Project snapshot.");
   }
@@ -4813,6 +5096,7 @@ function sortSourceMarkerSnapshots(left, right) {
 }
 
 async function listReadableSourceMarkerSnapshots(retentionGroup, options = {}) {
+  const identity = options.identity ? normalizeBoardCodeIdentity(options.identity) : null;
   const documents = await listSourceMarkerDocuments(retentionGroup, [
     Query.equal("status", [SOURCE_MARKER_STATUS_CURRENT, SOURCE_MARKER_STATUS_PREVIOUS]),
     Query.orderDesc("createdAt"),
@@ -4821,6 +5105,12 @@ async function listReadableSourceMarkerSnapshots(retentionGroup, options = {}) {
   return documents
     .filter((document) => SOURCE_MARKER_ALLOWED_RESTORE_STATUSES.has(String(document.status || "")))
     .filter((document) => !options.ownerUserId || document.userId === options.ownerUserId)
+    .map((document) => ({
+      document,
+      validation: identity ? validateSourceMarkerDocumentForIdentity(document, identity, { source: "source-marker-list" }) : null,
+    }))
+    .filter((entry) => !identity || entry.validation?.accepted)
+    .map((entry) => entry.document)
     .sort(sortSourceMarkerSnapshots)
     .slice(0, 2)
     .map((document) => sourceMarkerSnapshotSummary(document, options));
@@ -4942,6 +5232,7 @@ async function listBoardCodeSnapshots(payload = {}, eventSender = null) {
         const snapshots = await listReadableSourceMarkerSnapshots(document.retentionGroup, {
           markerVerifiedFromFirmware: true,
           firmwareMarkerMatched: true,
+          identity,
         });
         if (snapshots.length === 0) {
           const message = "This board was flashed through Tantalum, but no readable source snapshots are available.";
@@ -4974,6 +5265,7 @@ async function listBoardCodeSnapshots(payload = {}, eventSender = null) {
             markerVerifiedFromFirmware: false,
             firmwareMarkerMatched: false,
             ownerUserId: account.$id,
+            identity,
           });
           if (snapshots.length > 0) {
             const message = "Tantalum could not verify a source marker in board flash. Showing unverified source snapshots saved for this board.";
@@ -5001,6 +5293,7 @@ async function listBoardCodeSnapshots(payload = {}, eventSender = null) {
       const snapshots = await listReadableSourceMarkerSnapshots(retentionGroup, {
         markerVerifiedFromFirmware: false,
         firmwareMarkerMatched: false,
+        identity,
       });
       if (snapshots.length === 0) {
         const message = "No source snapshots are available for this cloud board.";
@@ -5957,24 +6250,27 @@ function requireCloudConfigForFirmware() {
 }
 
 function buildCloudRuntimeConfigForAgent(board, secrets, cloudConfig, overrides = {}) {
+  const otaUpdateMode = normalizeOtaUpdateMode(overrides.otaUpdateMode || board.otaUpdateMode);
+  const includeMqtt = otaUpdateMode === OTA_UPDATE_MODE_MQTT || otaUpdateMode === OTA_UPDATE_MODE_BOTH;
   return {
     boardId: board.$id,
     boardName: board.name,
     wifiHostname: buildTantalumWifiHostname(board.name, board.$id),
     apiToken: secrets.apiToken,
     commandSecret: secrets.commandSecret,
-    mqttTopic: secrets.mqttTopic,
+    mqttTopic: includeMqtt ? secrets.mqttTopic : "",
     provisioningPop: secrets.provisioningPop,
     appwriteEndpoint: cloudConfig.endpoint,
     appwriteProjectId: cloudConfig.projectId,
     deviceGatewayFunctionId: cloudConfig.deviceGatewayFunctionId,
     firmwareVersion: overrides.firmwareVersion || board.firmwareVersion || "0.0.0",
     firmwareId: overrides.firmwareId || board.desiredFirmwareId || "",
-    mqttHost: cloudConfig.mqttHost,
-    mqttPort: cloudConfig.mqttPort,
-    mqttUsername: cloudConfig.mqttUsername,
-    mqttPassword: cloudConfig.mqttPassword,
-    mqttCaCert: cloudConfig.mqttCaCert,
+    otaUpdateMode,
+    mqttHost: includeMqtt ? cloudConfig.mqttHost : "",
+    mqttPort: includeMqtt ? cloudConfig.mqttPort : "",
+    mqttUsername: includeMqtt ? cloudConfig.mqttUsername : "",
+    mqttPassword: includeMqtt ? cloudConfig.mqttPassword : "",
+    mqttCaCert: includeMqtt ? cloudConfig.mqttCaCert : "",
     tlsCaCert: cloudConfig.tlsCaCert,
   };
 }
@@ -6132,7 +6428,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
   const checksum = sha256HexBuffer(fileBuffer);
   updateFirmwareNotification({
     title: `Uploading ${boardName} ${version}`,
-    detail: "Uploading firmware to Appwrite storage...",
+    detail: "Uploading firmware to cloud storage...",
     phase: "upload",
     progress: 72,
     filename: compileResult.filename,
@@ -6162,7 +6458,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     const uploadProgress = 72 + (Math.max(0, Math.min(100, Number(progressEvent.progress) || 0)) * 18) / 100;
     updateFirmwareNotification({
       title: `Uploading ${boardName} ${version}`,
-      detail: progressEvent.progress >= 100 ? "Queuing OTA deployment..." : "Uploading firmware to Appwrite storage...",
+      detail: progressEvent.progress >= 100 ? "Queuing OTA deployment..." : "Uploading firmware to cloud storage...",
       phase: progressEvent.progress >= 100 ? "queue" : "upload",
       progress: progressEvent.progress >= 100 ? 90 : uploadProgress,
       filename: compileResult.filename,
@@ -6283,7 +6579,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
     firmware,
     output: [
       compileResult.output || compileResult.message || "Compilation successful.",
-      `Firmware ${version} uploaded to Appwrite storage and queued for OTA deployment.`,
+      `Firmware ${version} uploaded to cloud storage and queued for OTA deployment.`,
       sourceSnapshotWarning ? `Source snapshot warning: ${sourceSnapshotWarning}` : "",
     ].filter(Boolean).join("\n\n"),
   };
@@ -6444,7 +6740,7 @@ async function createFunctionExecutionAndWait(functionId, body, { timeoutMs = 12
 
   const executionId = initial?.$id || initial?.id;
   if (!executionId) {
-    throw new Error("Appwrite did not return an execution ID for the async function request.");
+    throw new Error("Cloud service did not return an execution ID for the async function request.");
   }
 
   return waitForFunctionExecution(functionId, executionId, { timeoutMs, pollMs });
@@ -7700,6 +7996,12 @@ function createMainWindow() {
     hasShadow: false,
     transparent: true,
     show: false,
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset",
+          trafficLightPosition: { x: 16, y: 14 },
+        }
+      : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -7992,6 +8294,31 @@ ipcMain.handle("cloud:auth:sign-in", async (_event, payload) => {
     clearAppwriteReadCache();
     prewarmCurrentAppwriteJwt();
     return { success: true, session };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud:auth:start-web-login", async () => {
+  try {
+    if (!DESKTOP_AUTH_FUNCTION_ID) {
+      throw new Error("Desktop auth function is not configured in the local cloud settings.");
+    }
+
+    const verifier = createDesktopAuthValue(32);
+    const state = createDesktopAuthValue(24);
+    const challenge = desktopAuthChallenge(verifier);
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    const loginUrl = desktopAuthLoginUrl({ state, challenge });
+    pendingDesktopWebLogin = {
+      state,
+      verifier,
+      challenge,
+      expiresAt,
+    };
+
+    await shell.openExternal(loginUrl);
+    return { success: true, loginUrl, expiresAt: new Date(expiresAt).toISOString() };
   } catch (error) {
     return toErrorResult(error);
   }
@@ -8532,6 +8859,116 @@ ipcMain.handle("projects:inspect", async (_event, projectId) => {
       throw new Error("Project folder was not found.");
     }
 
+    return { success: true, project };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:list-projects", async () => {
+  try {
+    return { success: true, projects: cloudSyncService.listProjects() };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:inspect", async (_event, payload = {}) => {
+  try {
+    const workspacePath = assertTrustedPath(payload.workspacePath);
+    const result = await cloudSyncService.scanWorkspace(workspacePath, payload);
+    return {
+      success: true,
+      workspacePath: result.workspacePath,
+      hasExistingGit: result.hasExistingGit,
+      usedReadOnlyGitScan: result.usedReadOnlyGitScan,
+      gitScanError: result.gitScanError,
+      userIgnoreRules: result.userIgnoreRules,
+      files: result.files.map((file) => ({
+        path: file.relativePath,
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+      })),
+      emptyDirectories: result.emptyDirectories,
+      excluded: result.excluded,
+      stats: result.stats,
+    };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:snapshot", async (_event, payload = {}) => {
+  try {
+    const workspacePath = assertTrustedPath(payload.workspacePath);
+    const result = await cloudSyncService.snapshotWorkspace({
+      ...payload,
+      workspacePath,
+    });
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:create-project", async (_event, payload = {}) => {
+  try {
+    const workspacePath = assertTrustedPath(payload.workspacePath);
+    const result = await cloudSyncService.createProject({
+      ...payload,
+      workspacePath,
+    });
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:link-project", async (_event, payload = {}) => {
+  try {
+    const workspacePath = assertTrustedPath(payload.workspacePath);
+    const result = await cloudSyncService.linkProject({
+      ...payload,
+      workspacePath,
+    });
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:sync-now", async (_event, payload = {}) => {
+  try {
+    const result = await cloudSyncService.syncNow(payload.projectId, {
+      reason: payload.reason || "manual",
+    });
+    return { success: true, ...result };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:pause", async (_event, projectId) => {
+  try {
+    const project = cloudSyncService.pause(projectId);
+    return { success: true, project };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:resume", async (_event, projectId) => {
+  try {
+    const project = cloudSyncService.resume(projectId);
+    return { success: true, project };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud-sync:get-status", async (_event, projectId) => {
+  try {
+    const project = cloudSyncService.getStatus(projectId);
     return { success: true, project };
   } catch (error) {
     return toErrorResult(error);
@@ -9552,7 +9989,7 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
     const appwriteConfig = payload?.appwriteConfig;
     const port = String(payload?.port || "").trim();
     const uploadId = String(payload?.uploadId || `cloud-runtime-install:${board?.$id || Date.now()}`);
-    assertSerialMonitorPortAvailable(port, "installing Tantalum Cloud");
+    assertSerialMonitorPortAvailable(port, "installing runtime firmware");
 
     if (!board?.$id || !board?.boardType) {
       throw new Error("A valid board payload is required for provisioning.");
@@ -9563,7 +10000,7 @@ ipcMain.handle("toolchain:provision-board", async (_event, payload) => {
     }
 
     if (!appwriteConfig?.endpoint || !appwriteConfig?.projectId || !appwriteConfig?.deviceGatewayFunctionId) {
-      throw new Error("Appwrite function configuration is incomplete.");
+      throw new Error("Cloud function configuration is incomplete.");
     }
 
     return await provisioningService.provisionBoard(
@@ -9867,15 +10304,15 @@ ipcMain.on("serial-monitor:write", (_event, payload) => {
   });
 });
 
-app.whenReady().then(async () => {
-  await initializeStores();
-  createMainWindow();
-  startAgentSettingsWarmLoop();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
-      return;
+registerDesktopAuthProtocol();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const callbackUrl = desktopAuthUrlFromArgs(argv);
+    if (callbackUrl) {
+      void handleDesktopAuthCallback(callbackUrl);
     }
 
     if (mainWindow) {
@@ -9883,7 +10320,37 @@ app.whenReady().then(async () => {
       mainWindow.focus();
     }
   });
-});
+
+  app.on("open-url", (event, callbackUrl) => {
+    event.preventDefault();
+    if (callbackUrl) {
+      void handleDesktopAuthCallback(callbackUrl);
+    }
+  });
+
+  app.whenReady().then(async () => {
+    await initializeStores();
+    createMainWindow();
+    startAgentSettingsWarmLoop();
+
+    const startupCallbackUrl = desktopAuthUrlFromArgs(process.argv);
+    if (startupCallbackUrl) {
+      void handleDesktopAuthCallback(startupCallbackUrl);
+    }
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createMainWindow();
+        return;
+      }
+
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+  });
+}
 
 app.on("before-quit", () => {
   disposeAllTerminalSessions();

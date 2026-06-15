@@ -54,6 +54,9 @@
             "events": [],
             "schedule": "",
             "timeout": 15,
+            "deploymentRetention": 0,
+            "buildSpecification": "s-8vcpu-8gb",
+            "runtimeSpecification": "s-8vcpu-8gb",
             "commands": "npm install",
             "scopes": [
                 "databases.read",
@@ -90,6 +93,9 @@
             "events": [],
             "schedule": "",
             "timeout": 15,
+            "deploymentRetention": 0,
+            "buildSpecification": "s-8vcpu-8gb",
+            "runtimeSpecification": "s-8vcpu-8gb",
             "commands": "npm install",
             "scopes": [
                 "databases.read",
@@ -296,24 +302,178 @@
                     "value": "board_detection_usage"
                 }
             ]
-        }
-    ],
-    "sites": [
+        },
         {
-            "$id": "69c40c1e001f39d53e15",
-            "name": "home",
-            "path": "sites/home",
-            "framework": "nextjs",
+            "$id": "desktop-auth",
+            "name": "desktop-auth",
+            "runtime": "node-22",
+            "path": "functions/desktop-auth",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "any",
+                "users"
+            ],
+            "enabled": true,
             "logging": true,
+            "events": [],
+            "schedule": "",
+            "timeout": 15,
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write",
+                "documents.read",
+                "documents.write",
+                "users.read",
+                "users.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_DESKTOP_AUTH_GRANTS_COLLECTION_ID",
+                    "value": "desktop_auth_grants"
+                },
+                {
+                    "key": "TANTALUM_DESKTOP_AUTH_GRANT_TTL_SECONDS",
+                    "value": "180"
+                },
+                {
+                    "key": "TANTALUM_DESKTOP_AUTH_TOKEN_TTL_SECONDS",
+                    "value": "120"
+                },
+                {
+                    "key": "TANTALUM_DESKTOP_CALLBACK_SCHEME",
+                    "value": "tantalum"
+                }
+            ]
+        },
+        {
+            "$id": "web-admin",
+            "name": "web-admin",
+            "runtime": "node-22",
+            "path": "functions/web-admin",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "users"
+            ],
+            "enabled": true,
+            "logging": true,
+            "events": [],
+            "schedule": "",
             "timeout": 30,
-            "buildRuntime": "node-22",
-            "adapter": "ssr",
-            "installCommand": "npm install",
-            "buildCommand": "npm run build",
-            "outputDirectory": "./.next",
-            "fallbackFile": ""
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write",
+                "documents.read",
+                "documents.write",
+                "users.read",
+                "users.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_BOARDS_COLLECTION_ID",
+                    "value": "boards"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_COLLECTION_ID",
+                    "value": "firmwares"
+                },
+                {
+                    "key": "APPWRITE_APP_SETTINGS_COLLECTION_ID",
+                    "value": "app_settings"
+                },
+                {
+                    "key": "APPWRITE_AGENT_MANAGED_KEY_POOL_COLLECTION_ID",
+                    "value": "agent_managed_key_pool"
+                },
+                {
+                    "key": "APPWRITE_AGENT_CREDIT_ACCOUNTS_COLLECTION_ID",
+                    "value": "agent_credit_accounts"
+                },
+                {
+                    "key": "APPWRITE_AGENT_USAGE_LEDGER_COLLECTION_ID",
+                    "value": "agent_usage_ledger"
+                },
+                {
+                    "key": "APPWRITE_USER_ENTITLEMENTS_COLLECTION_ID",
+                    "value": "user_entitlements"
+                },
+                {
+                    "key": "ADMIN_LABEL",
+                    "value": "admin"
+                }
+            ]
+        },
+        {
+            "$id": "project-sync",
+            "name": "project-sync",
+            "runtime": "node-22",
+            "path": "functions/project-sync",
+            "entrypoint": "src/main.js",
+            "execute": [
+                "users"
+            ],
+            "enabled": true,
+            "logging": true,
+            "events": [],
+            "schedule": "",
+            "timeout": 30,
+            "commands": "npm install",
+            "scopes": [
+                "databases.read",
+                "databases.write",
+                "documents.read",
+                "documents.write"
+            ],
+            "variables": [
+                {
+                    "key": "APPWRITE_DATABASE_ID",
+                    "value": "697b8f660033fffde4be"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECTS_COLLECTION_ID",
+                    "value": "cloud_projects"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECT_DEVICES_COLLECTION_ID",
+                    "value": "cloud_project_devices"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECT_SYNC_EVENTS_COLLECTION_ID",
+                    "value": "cloud_project_sync_events"
+                },
+                {
+                    "key": "GITEA_BASE_URL",
+                    "value": "https://git.metl.run"
+                },
+                {
+                    "key": "GITEA_ORG",
+                    "value": "tantalum-users"
+                },
+                {
+                    "key": "GITEA_SSH_HOST",
+                    "value": "git.metl.run"
+                },
+                {
+                    "key": "GITEA_SSH_PORT",
+                    "value": "2222"
+                },
+                {
+                    "key": "PROJECT_SYNC_DEFAULT_QUOTA_MB",
+                    "value": "1024"
+                }
+            ]
         }
     ],
+    "sites": [],
     "tablesDB": [
         {
             "$id": "697b8f660033fffde4be",
@@ -525,6 +685,15 @@
                     "array": false,
                     "size": 64,
                     "default": "idle",
+                    "encrypt": false
+                },
+                {
+                    "key": "otaUpdateMode",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 16,
+                    "default": "polling",
                     "encrypt": false
                 },
                 {
@@ -763,6 +932,15 @@
                         "ASC",
                         "DESC"
                     ]
+                },
+                {
+                    "key": "firmwares_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
                 }
             ]
         },
@@ -2595,6 +2773,710 @@
                     "orders": [
                         "DESC"
                     ]
+                }
+            ]
+        },
+        {
+            "$id": "desktop_auth_grants",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Desktop Auth Grants",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "stateHash",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "codeChallenge",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "callbackScheme",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "expiresAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "consumedAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "desktop_auth_grants_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "desktop_auth_grants_expires",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "expiresAt"
+                    ],
+                    "orders": [
+                        "ASC"
+                    ]
+                },
+                {
+                    "key": "desktop_auth_grants_state",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "stateHash"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "user_entitlements",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "User Entitlements",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "tier",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "monthlyCredits",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 500
+                },
+                {
+                    "key": "notes",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "user_entitlements_user",
+                    "type": "unique",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "user_entitlements_tier",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "tier"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "cloud_projects",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Cloud Projects",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "name",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "repoOwner",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "repoName",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sshCloneUrl",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 1024,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "defaultBranch",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "main",
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "active",
+                    "encrypt": false
+                },
+                {
+                    "key": "quotaMb",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "default": 1024
+                },
+                {
+                    "key": "lastSyncedAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "cloud_projects_user_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "status"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "cloud_projects_user_updated",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "updatedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "cloud_projects_repo",
+                    "type": "unique",
+                    "status": "available",
+                    "columns": [
+                        "repoOwner",
+                        "repoName"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "cloud_project_devices",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Cloud Project Devices",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "projectId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "deviceId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "deviceName",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sshPublicKey",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 4096,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "sshPublicKeyFingerprint",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "giteaKeyId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "revokedAt",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "",
+                    "encrypt": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "cloud_devices_project",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "projectId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "cloud_devices_user_project_device",
+                    "type": "unique",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "projectId",
+                        "deviceId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "cloud_devices_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "cloud_project_sync_events",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Cloud Project Sync Events",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "projectId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "deviceId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 128,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "operation",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "commitHash",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "branch",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": "main",
+                    "encrypt": false
+                },
+                {
+                    "key": "message",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1024,
+                    "default": "",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "cloud_events_project_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "projectId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "cloud_events_user_project_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "projectId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "cloud_events_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status"
+                    ],
+                    "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "support_tickets",
+            "$permissions": [
+                "create(\"users\")"
+            ],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Support Tickets",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "userId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "subject",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "message",
+                    "type": "text",
+                    "required": true,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "priority",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 32,
+                    "default": "normal",
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "support_tickets_user",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "support_tickets_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status"
+                    ],
+                    "orders": []
+                },
+                {
+                    "key": "support_tickets_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "support_tickets_user_status",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "userId",
+                        "status"
+                    ],
+                    "orders": []
                 }
             ]
         }

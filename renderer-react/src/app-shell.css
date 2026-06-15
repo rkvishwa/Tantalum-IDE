@@ -13,6 +13,19 @@
   box-shadow: none;
 }
 
+:root {
+  --titlebar-traffic-light-inset: 0px;
+}
+
+html.platform-mac {
+  --titlebar-traffic-light-inset: 78px;
+}
+
+.titlebar-traffic-light-spacer {
+  flex: 0 0 var(--titlebar-traffic-light-inset);
+  height: 100%;
+}
+
 .app-titlebar {
   flex: 0 0 40px;
   width: 100%;
@@ -43,6 +56,15 @@
   gap: 4px;
   padding-left: 4px;
   -webkit-app-region: no-drag;
+}
+
+.titlebar-app-icon {
+  width: 22px;
+  height: 22px;
+  margin: 0 3px;
+  border-radius: 6px;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .titlebar-right {
@@ -124,6 +146,10 @@
   margin-left: 10px;
   white-space: nowrap;
   -webkit-app-region: no-drag;
+}
+
+html.platform-mac .titlebar-menu {
+  margin-left: 6px;
 }
 
 .titlebar-menu-group {
@@ -571,6 +597,10 @@
   height: 100%;
 }
 
+html.platform-mac .window-controls {
+  display: none;
+}
+
 .window-control-button {
   width: 46px;
   height: 40px;
@@ -578,12 +608,8 @@
 }
 
 .window-control-button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--hover-overlay);
   color: var(--text);
-}
-
-:root[data-theme='light'] .window-control-button:hover {
-  background: rgba(0, 0, 0, 0.08);
 }
 
 .window-control-close:hover {
@@ -617,7 +643,7 @@
 .top-right-actions .icon-button:hover {
   background: var(--bg-hover);
   color: var(--text);
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: var(--line-strong);
 }
 
 .app-shell-main {
@@ -697,12 +723,12 @@
 }
 
 .settings-nav button:hover {
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: color-mix(in srgb, var(--text) 6%, transparent);
   color: var(--color-text-primary);
 }
 
 .settings-nav button.active {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: color-mix(in srgb, var(--text) 10%, transparent);
   color: var(--color-text-primary);
   font-weight: 500;
 }
@@ -710,21 +736,52 @@
 .settings-content {
   flex: 1;
   min-width: 0;
-  padding: 48px max(28px, 6vw);
+  padding: 28px 28px 48px;
   overflow-y: auto;
+  background: var(--bg-editor);
+  display: flex;
+  flex-direction: column;
 }
 
+.settings-top-bar {
+  margin-bottom: 2.5rem;
+}
+
+.settings-top-bar,
 .settings-pane {
-  max-width: 760px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: 960px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .settings-pane-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 1rem;
   margin-bottom: 24px;
+}
+
+.settings-pane-hero {
+  margin-bottom: 1.25rem;
+}
+
+.settings-pane-hero h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--color-text-primary);
+}
+
+.settings-pane-subtitle {
+  margin: 0.45rem 0 0;
+  max-width: 42ch;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-pane-header h2 {
@@ -738,41 +795,55 @@
   font-size: 0.9rem;
 }
 
-.boards-split-view {
-  display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: 16px;
-  align-items: start;
-}
-
 .appearance-grid {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .settings-card {
   display: grid;
   gap: 14px;
-  padding: 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg-panel-alt);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-editor) 88%, var(--bg-panel-alt) 12%);
+}
+
+.settings-card-heading svg {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-soft));
 }
 
 .settings-card-heading {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  margin-bottom: 2px;
+}
+
+.settings-card-heading > div {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
 }
 
 .settings-card-heading h3 {
-  margin: 0 0 3px;
+  margin: 0;
   font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .settings-card-heading p {
   margin: 0;
   color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-list-card .settings-card-heading {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
 }
 
 .settings-form-grid {
@@ -784,7 +855,7 @@
 .settings-form-grid label,
 .custom-color-field {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   color: var(--text-soft);
 }
 
@@ -825,10 +896,248 @@
   margin-bottom: 14px;
   padding: 0 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 8px;
   background: var(--bg-alt);
   color: var(--text-muted);
   font-size: 0.9rem;
+}
+
+.settings-page .inline-banner {
+  margin-left: 0;
+  margin-right: 0;
+  border-radius: 10px;
+}
+
+.settings-boards-callout {
+  margin: 0 0 1.25rem;
+}
+
+.settings-boards-pane .inline-banner {
+  margin: 0 0 1rem;
+  padding: 0.9rem 1.1rem;
+  line-height: 1.55;
+  font-size: 12px;
+}
+
+.settings-boards-pane .inline-banner-error {
+  margin-bottom: 1rem;
+}
+
+.settings-boards-pane .boards-hub-card.selected {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.settings-boards-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+  margin-top: 0.25rem;
+}
+
+.settings-boards-list-panel,
+.settings-boards-detail-panel {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-editor) 88%, var(--bg-panel-alt) 12%);
+  min-height: 240px;
+}
+
+.settings-boards-list-panel {
+  padding: 12px;
+  min-width: 0;
+}
+
+.settings-boards-detail-panel {
+  padding: 16px 18px;
+  min-width: 0;
+}
+
+.settings-boards-pane .boards-hub-card-trigger {
+  padding: 0.85rem 1rem;
+}
+
+.settings-boards-pane .boards-hub-card-text {
+  gap: 0.3rem;
+}
+
+.settings-boards-detail-header .status-pill {
+  flex-shrink: 0;
+}
+
+.settings-boards-list {
+  display: grid;
+  gap: 12px;
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+}
+
+.settings-boards-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 120px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.settings-boards-empty-panel {
+  display: grid;
+  place-items: center;
+  gap: 0.55rem;
+  min-height: 200px;
+  padding: 2rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-editor) 88%, var(--bg-panel-alt) 12%);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.settings-boards-detail {
+  min-height: 0;
+  height: 100%;
+}
+
+.settings-boards-detail .boards-hub-empty {
+  min-height: 200px;
+}
+
+.settings-boards-detail-card {
+  display: grid;
+  gap: 14px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.settings-boards-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-boards-detail-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settings-boards-detail-header p {
+  margin: 0.35rem 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-boards-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 2px;
+}
+
+.settings-boards-field-grid > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.settings-boards-field-grid dt {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-boards-field-grid dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.settings-boards-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-boards-detail-card .inline-banner {
+  margin: 0;
+}
+
+@media (max-width: 800px) {
+  .settings-boards-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-boards-empty {
+  min-height: 200px;
+}
+
+.settings-page .boards-hub-toggle-copy {
+  gap: 0.25rem;
+}
+
+.settings-page .boards-hub-toggle-copy span {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.settings-toggle-row {
+  padding: 0.5rem 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-toggle-row .boards-hub-toggle-row {
+  width: 100%;
+  align-items: center;
+  gap: 1rem;
+  min-height: 52px;
+  padding: 0.4rem 0;
+  background: transparent;
+}
+
+.settings-toggle-row:first-child {
+  border-top: 0;
+}
+
+.settings-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.settings-toast-stack {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 40;
+}
+
+.agent-settings-pane .agent-panel-settings-only {
+  min-height: 0;
+}
+
+.agent-panel-settings-only .settings-card-icon {
+  color: var(--text-soft);
+}
+
+.agent-tool-row .boards-hub-toggle {
+  flex-shrink: 0;
 }
 
 .settings-list-card {
@@ -839,47 +1148,6 @@
 .settings-row-list {
   display: grid;
   margin: 0 -14px;
-}
-
-.settings-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 1rem;
-  min-height: 56px;
-  padding: 0.65rem 14px;
-  border-top: 1px solid var(--line);
-  color: var(--text);
-}
-
-.settings-row span {
-  display: grid;
-  gap: 0.18rem;
-  min-width: 0;
-}
-
-.settings-row strong {
-  font-size: 0.9rem;
-  font-weight: 500;
-}
-
-.settings-row small {
-  color: var(--text-muted);
-  line-height: 1.35;
-}
-
-.settings-row input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--accent);
-}
-
-.settings-action-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
 }
 
 .arduino-library-path-card,
@@ -1001,44 +1269,6 @@
   width: 42px;
   height: 28px;
   padding: 2px;
-}
-
-.board-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.board-card {
-  text-align: left;
-  padding: 1rem;
-  border-radius: 4px;
-  border: 1px solid var(--color-border);
-  background-color: var(--color-bg-elevated);
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.board-card:hover {
-  border-color: rgba(255, 255, 255, 0.15);
-}
-
-.board-card.active {
-  border-color: var(--color-accent);
-  background-color: rgba(108, 166, 255, 0.04);
-}
-
-.board-card-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 0.25rem;
-}
-
-.board-card p {
-  margin: 0;
-  color: var(--color-text-secondary);
-  font-size: 0.85rem;
 }
 
 /* Adjust agent panel for right panel specifically */
@@ -1233,7 +1463,7 @@
 }
 
 .chat-panel-header button:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover-overlay);
   color: var(--text);
 }
 

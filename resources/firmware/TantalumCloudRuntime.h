@@ -4,11 +4,19 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
+#ifndef TANTALUM_MQTT_REQUIRED
+#define TANTALUM_MQTT_REQUIRED 0
+#endif
+
 #if __has_include(<PubSubClient.h>)
 #include <PubSubClient.h>
 #define TANTALUM_HAS_PUBSUBCLIENT 1
 #else
 #define TANTALUM_HAS_PUBSUBCLIENT 0
+#endif
+
+#if TANTALUM_MQTT_REQUIRED && !TANTALUM_HAS_PUBSUBCLIENT
+#error "Tantalum MQTT OTA requires the PubSubClient library."
 #endif
 
 #if defined(ESP32)
@@ -71,8 +79,12 @@
 #define TANTALUM_FIRMWARE_ID ""
 #endif
 
+#ifndef TANTALUM_OTA_UPDATE_MODE
+#define TANTALUM_OTA_UPDATE_MODE "polling"
+#endif
+
 #ifndef TANTALUM_RUNTIME_VERSION
-#define TANTALUM_RUNTIME_VERSION "1.1.5"
+#define TANTALUM_RUNTIME_VERSION "1.1.9"
 #endif
 
 #ifndef TANTALUM_BUILD_EPOCH
@@ -123,10 +135,18 @@
 #define TANTALUM_WIFI_HOSTNAME "tantalum-board"
 #endif
 
+#ifndef TANTALUM_ONBOARD_LED_CONTROL
+#define TANTALUM_ONBOARD_LED_CONTROL 0
+#endif
+
 static const unsigned long TANTALUM_DEFAULT_UPDATE_CHECK_MS = 5UL * 60UL * 1000UL;
 static const unsigned long TANTALUM_HEARTBEAT_MS = 60UL * 1000UL;
 static const unsigned long TANTALUM_WIFI_CONNECT_TIMEOUT_MS = 20000UL;
 static const unsigned long TANTALUM_MQTT_RETRY_MS = 15000UL;
+static const unsigned long TANTALUM_MQTT_COMMAND_MAX_AGE_SECONDS = 5UL * 60UL;
+static const uint16_t TANTALUM_MQTT_KEEPALIVE_SECONDS = 60;
+static const uint16_t TANTALUM_MQTT_SOCKET_TIMEOUT_SECONDS = 45;
+static const uint16_t TANTALUM_MQTT_BUFFER_BYTES = 1024;
 static const unsigned long TANTALUM_PROVISIONING_WINDOW_MS = 10UL * 60UL * 1000UL;
 static const unsigned long TANTALUM_HTTP_TIMEOUT_MS = 20000UL;
 static const unsigned long TANTALUM_GATEWAY_DIAGNOSTIC_MS = 5UL * 60UL * 1000UL;
@@ -134,6 +154,7 @@ static const unsigned long TANTALUM_TLS_MIN_EPOCH = (TANTALUM_BUILD_EPOCH > 1700
 static const unsigned long TANTALUM_OTA_RESULT_RETRY_MS = 60UL * 1000UL;
 static const unsigned long TANTALUM_FAILED_DEPLOYMENT_RETRY_MS = 30UL * 60UL * 1000UL;
 static const uint8_t TANTALUM_GATEWAY_ATTEMPTS = 3;
+static const uint8_t TANTALUM_MQTT_NONCE_CACHE_SIZE = 8;
 static const size_t TANTALUM_HTTP_BODY_MAX_BYTES = 16384;
 static const size_t TANTALUM_OTA_CHUNK_BYTES = 1024;
 #if defined(ESP32)
@@ -141,7 +162,7 @@ static const unsigned long TANTALUM_BACKGROUND_TASK_INTERVAL_MS = 500UL;
 static const uint32_t TANTALUM_BACKGROUND_TASK_STACK = 12288;
 #endif
 
-// Appwrite Cloud currently chains through Starfield G2 and may also use Certainly R1.
+// The managed cloud endpoint currently chains through Starfield G2 and may also use Certainly R1.
 static const char TANTALUM_APPWRITE_CLOUD_ROOT_CA_CERT[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIID3TCCAsWgAwIBAgIBADANBgkqhkiG9w0BAQsFADCBjzELMAkGA1UEBhMCVVMx
@@ -199,7 +220,7 @@ OV+KmalBWQewLK8=
 -----END CERTIFICATE-----
 )EOF";
 
-// Common public root for Let's Encrypt-backed self-hosted Appwrite endpoints.
+// Common public root for Let's Encrypt-backed self-hosted cloud endpoints.
 static const char TANTALUM_PUBLIC_ISRG_ROOT_X1_CA_CERT[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -259,7 +280,19 @@ public:
     Serial.println(TANTALUM_RUNTIME_VERSION);
     Serial.print("Runtime build epoch: ");
     Serial.println(TANTALUM_BUILD_EPOCH);
-    Serial.print("Appwrite endpoint: ");
+    Serial.print("OTA update mode: ");
+    Serial.println(TANTALUM_OTA_UPDATE_MODE);
+    Serial.print("MQTT support: ");
+#if TANTALUM_HAS_PUBSUBCLIENT
+    Serial.println("compiled");
+#else
+    Serial.println("missing PubSubClient");
+#endif
+    Serial.print("MQTT host: ");
+    Serial.println(strlen(TANTALUM_MQTT_HOST) > 0 ? TANTALUM_MQTT_HOST : "(not configured)");
+    Serial.print("MQTT topic: ");
+    Serial.println(strlen(TANTALUM_MQTT_TOPIC) > 0 ? TANTALUM_MQTT_TOPIC : "(not configured)");
+    Serial.print("Cloud endpoint: ");
     Serial.println(TANTALUM_APPWRITE_ENDPOINT);
     Serial.print("Device gateway: ");
     Serial.println(TANTALUM_DEVICE_GATEWAY_FUNCTION_ID);
@@ -277,7 +310,9 @@ public:
     printRuntimeStatus("boot");
     reportPendingOtaResult(true);
     sendHeartbeat();
-    checkForUpdates();
+    if (pollingOtaEnabled()) {
+      checkForUpdates();
+    }
 
 #if defined(ESP32)
     startBackgroundTask();
@@ -305,8 +340,20 @@ public:
   }
 
 private:
+  bool otaModeIs(const char* expected) {
+    return strcmp(TANTALUM_OTA_UPDATE_MODE, expected) == 0;
+  }
+
+  bool mqttOtaEnabled() {
+    return otaModeIs("mqtt") || otaModeIs("both");
+  }
+
+  bool pollingOtaEnabled() {
+    return otaModeIs("polling") || otaModeIs("both") || (!otaModeIs("mqtt") && !otaModeIs("both"));
+  }
+
   void setOnboardRgbPower(bool enabled) {
-#if defined(ESP32) && defined(NEOPIXEL_POWER)
+#if defined(ESP32) && TANTALUM_ONBOARD_LED_CONTROL && defined(NEOPIXEL_POWER)
     pinMode(NEOPIXEL_POWER, OUTPUT);
     if (enabled) {
 #if defined(NEOPIXEL_POWER_ON)
@@ -329,7 +376,7 @@ private:
   }
 
   void writeOnboardRgbLed(uint8_t red, uint8_t green, uint8_t blue) {
-#if defined(ESP32)
+#if defined(ESP32) && TANTALUM_ONBOARD_LED_CONTROL
     setOnboardRgbPower(true);
 #if TANTALUM_HAS_ESP32_RGB_LED && defined(PIN_NEOPIXEL)
     neopixelWrite(PIN_NEOPIXEL, red, green, blue);
@@ -350,18 +397,13 @@ private:
   }
 
   void clearOnboardRgbLed() {
-#if defined(ESP32)
+#if defined(ESP32) && TANTALUM_ONBOARD_LED_CONTROL
     writeOnboardRgbLed(0, 0, 0);
-
-#if defined(LED_BUILTIN) && (!defined(RGB_BUILTIN) || LED_BUILTIN != RGB_BUILTIN)
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW);
-#endif
 #endif
   }
 
   void showBootstrapInstallMarker() {
-#if defined(ESP32) && defined(TANTALUM_BOOTSTRAP_BUILD) && TANTALUM_BOOTSTRAP_BUILD
+#if defined(ESP32) && TANTALUM_ONBOARD_LED_CONTROL && defined(TANTALUM_BOOTSTRAP_BUILD) && TANTALUM_BOOTSTRAP_BUILD
     Serial.println("Tantalum bootstrap marker active.");
     for (uint8_t index = 0; index < 3; index++) {
       writeOnboardRgbLed(0, 32, 0);
@@ -413,6 +455,16 @@ private:
     }
 #endif
 
+    if (WiFi.status() == WL_CONNECTED && pendingMqttStartProvisioning) {
+      pendingMqttStartProvisioning = false;
+      startProvisioning("mqtt");
+    }
+
+    if (WiFi.status() == WL_CONNECTED && pendingMqttCheckUpdate && !otaInProgress) {
+      pendingMqttCheckUpdate = false;
+      checkForUpdates();
+    }
+
     unsigned long now = millis();
 
     if (provisioningActive && now - provisioningStartedAt > TANTALUM_PROVISIONING_WINDOW_MS) {
@@ -430,7 +482,7 @@ private:
       sendHeartbeat();
     }
 
-    if (WiFi.status() == WL_CONNECTED && now - lastUpdateCheckAt >= updateCheckIntervalMs) {
+    if (pollingOtaEnabled() && WiFi.status() == WL_CONNECTED && now - lastUpdateCheckAt >= updateCheckIntervalMs) {
       lastUpdateCheckAt = now;
       checkForUpdates();
     }
@@ -463,6 +515,8 @@ private:
   bool provisioningActive = false;
   bool otaInProgress = false;
   bool mqttConfigWarningLogged = false;
+  bool pendingMqttCheckUpdate = false;
+  bool pendingMqttStartProvisioning = false;
   bool tlsClockAttempted = false;
   bool tlsClockReady = false;
   bool tlsClockWarningLogged = false;
@@ -474,6 +528,8 @@ private:
   String pendingOtaStatusRam;
   String pendingOtaErrorRam;
   String failedOtaDeploymentRam;
+  String recentMqttNonces[TANTALUM_MQTT_NONCE_CACHE_SIZE];
+  uint8_t recentMqttNonceIndex = 0;
 
 #if defined(ESP32)
   static void backgroundTaskEntry(void* parameter) {
@@ -554,7 +610,7 @@ private:
 
   const char* appwriteCaSource() {
     if (isAppwriteCloudEndpoint()) {
-      return "Appwrite Cloud built-in CA bundle";
+      return "Cloud built-in CA bundle";
     }
 
     if (strlen(TANTALUM_TLS_CA_CERT) > 0) {
@@ -583,7 +639,7 @@ private:
     unsigned long currentEpoch = static_cast<unsigned long>(time(nullptr));
     tlsClockReady = currentEpoch >= TANTALUM_TLS_MIN_EPOCH;
     if (!tlsClockReady && !tlsClockWarningLogged) {
-      Serial.println("TLS clock sync did not complete; refusing Appwrite HTTPS because certificate verification would be unsafe.");
+      Serial.println("TLS clock sync did not complete; refusing cloud HTTPS because certificate verification would be unsafe.");
       Serial.print("  Current TLS epoch: ");
       Serial.println(currentEpoch);
       Serial.print("  Required minimum epoch: ");
@@ -600,7 +656,7 @@ private:
     }
 
     if (!appwriteCaWarningLogged) {
-      Serial.println("Appwrite TLS CA is not configured; refusing HTTPS request.");
+      Serial.println("Cloud TLS CA is not configured; refusing HTTPS request.");
       appwriteCaWarningLogged = true;
     }
     return false;
@@ -636,7 +692,7 @@ private:
     Serial.println("]");
     Serial.print("  Runtime version: ");
     Serial.println(TANTALUM_RUNTIME_VERSION);
-    Serial.print("  Appwrite endpoint: ");
+    Serial.print("  Cloud endpoint: ");
     Serial.println(normalizedAppwriteEndpoint());
     Serial.print("  CA source: ");
     Serial.println(appwriteCaSource());
@@ -650,6 +706,18 @@ private:
     Serial.println(ESP.getFreeHeap());
     Serial.print("  Current firmware version: ");
     Serial.println(TANTALUM_FIRMWARE_VERSION);
+    Serial.print("  OTA update mode: ");
+    Serial.println(TANTALUM_OTA_UPDATE_MODE);
+    Serial.print("  MQTT support: ");
+#if TANTALUM_HAS_PUBSUBCLIENT
+    Serial.println("compiled");
+#else
+    Serial.println("missing PubSubClient");
+#endif
+    Serial.print("  MQTT host: ");
+    Serial.println(strlen(TANTALUM_MQTT_HOST) > 0 ? TANTALUM_MQTT_HOST : "(not configured)");
+    Serial.print("  MQTT topic: ");
+    Serial.println(strlen(TANTALUM_MQTT_TOPIC) > 0 ? TANTALUM_MQTT_TOPIC : "(not configured)");
     if (targetVersion != nullptr && strlen(targetVersion) > 0) {
       Serial.print("  Target OTA version: ");
       Serial.println(targetVersion);
@@ -661,13 +729,18 @@ private:
     if (strlen(TANTALUM_MQTT_CA_CERT) > 0) {
       mqttSecureClient.setCACert(TANTALUM_MQTT_CA_CERT);
     }
+    mqttSecureClient.setTimeout(static_cast<uint32_t>(TANTALUM_MQTT_SOCKET_TIMEOUT_SECONDS) * 1000UL);
 #elif defined(ESP8266)
     if (strlen(TANTALUM_MQTT_CA_CERT) > 0) {
       mqttSecureClient.setTrustAnchors(&mqttTrustAnchor);
     }
+    mqttSecureClient.setTimeout(TANTALUM_MQTT_SOCKET_TIMEOUT_SECONDS * 1000UL);
 #endif
 #if TANTALUM_HAS_PUBSUBCLIENT
     mqttClient.setServer(TANTALUM_MQTT_HOST, TANTALUM_MQTT_PORT);
+    mqttClient.setKeepAlive(TANTALUM_MQTT_KEEPALIVE_SECONDS);
+    mqttClient.setSocketTimeout(TANTALUM_MQTT_SOCKET_TIMEOUT_SECONDS);
+    mqttClient.setBufferSize(TANTALUM_MQTT_BUFFER_BYTES);
     mqttClient.setCallback([this](char* topic, byte* payload, unsigned int length) {
       handleMqttMessage(topic, payload, length);
     });
@@ -1057,7 +1130,15 @@ private:
 
   void maintainMqtt() {
 #if TANTALUM_HAS_PUBSUBCLIENT
+    if (!mqttOtaEnabled()) {
+      return;
+    }
+
     if (strlen(TANTALUM_MQTT_HOST) == 0 || strlen(TANTALUM_MQTT_TOPIC) == 0) {
+      if (!mqttConfigWarningLogged) {
+        Serial.println("MQTT disabled: broker host or topic is missing.");
+        mqttConfigWarningLogged = true;
+      }
       return;
     }
 
@@ -1079,6 +1160,12 @@ private:
     }
 
     lastMqttAttemptAt = now;
+    if (!ensureTlsClockReady()) {
+      return;
+    }
+#if defined(ESP8266)
+    mqttSecureClient.setX509Time(time(nullptr));
+#endif
     String clientId = String("tantalum-") + TANTALUM_BOARD_ID;
     bool connected = false;
 
@@ -1090,13 +1177,78 @@ private:
 
     if (connected) {
       mqttClient.subscribe(TANTALUM_MQTT_TOPIC);
+      pendingMqttCheckUpdate = true;
       Serial.print("MQTT subscribed: ");
       Serial.println(TANTALUM_MQTT_TOPIC);
     } else {
       Serial.print("MQTT connect failed, state ");
       Serial.println(mqttClient.state());
+      printSecureClientError(mqttSecureClient);
+      mqttSecureClient.stop();
+    }
+#else
+    if (mqttOtaEnabled() && !mqttConfigWarningLogged) {
+      Serial.println("MQTT disabled: PubSubClient library was not compiled into this runtime.");
+      mqttConfigWarningLogged = true;
     }
 #endif
+  }
+
+  time_t parseIsoUtcEpoch(const char* value) {
+    if (value == nullptr || strlen(value) < 19) {
+      return 0;
+    }
+
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    if (sscanf(value, "%4d-%2d-%2dT%2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) != 6) {
+      return 0;
+    }
+
+    struct tm parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.tm_year = year - 1900;
+    parsed.tm_mon = month - 1;
+    parsed.tm_mday = day;
+    parsed.tm_hour = hour;
+    parsed.tm_min = minute;
+    parsed.tm_sec = second;
+    parsed.tm_isdst = 0;
+    return mktime(&parsed);
+  }
+
+  bool mqttCommandIsFresh(const char* issuedAt) {
+    time_t issued = parseIsoUtcEpoch(issuedAt);
+    time_t now = time(nullptr);
+    if (issued <= 0 || now < static_cast<time_t>(TANTALUM_TLS_MIN_EPOCH)) {
+      return false;
+    }
+
+    unsigned long delta = now >= issued
+      ? static_cast<unsigned long>(now - issued)
+      : static_cast<unsigned long>(issued - now);
+    return delta <= TANTALUM_MQTT_COMMAND_MAX_AGE_SECONDS;
+  }
+
+  bool rememberMqttNonce(const char* nonce) {
+    if (nonce == nullptr || strlen(nonce) == 0) {
+      return false;
+    }
+
+    String incoming = String(nonce);
+    for (uint8_t index = 0; index < TANTALUM_MQTT_NONCE_CACHE_SIZE; index += 1) {
+      if (recentMqttNonces[index] == incoming) {
+        return false;
+      }
+    }
+
+    recentMqttNonces[recentMqttNonceIndex] = incoming;
+    recentMqttNonceIndex = (recentMqttNonceIndex + 1) % TANTALUM_MQTT_NONCE_CACHE_SIZE;
+    return true;
   }
 
   void handleMqttMessage(char*, byte* payload, unsigned int length) {
@@ -1118,13 +1270,23 @@ private:
       return;
     }
 
+    if (!mqttCommandIsFresh(issuedAt)) {
+      Serial.println("Ignored stale MQTT command.");
+      return;
+    }
+
+    if (!rememberMqttNonce(nonce)) {
+      Serial.println("Ignored replayed MQTT command.");
+      return;
+    }
+
     if (strcmp(action, "check-update") == 0) {
-      checkForUpdates();
+      pendingMqttCheckUpdate = true;
       return;
     }
 
     if (strcmp(action, "start-provisioning") == 0) {
-      startProvisioning("mqtt");
+      pendingMqttStartProvisioning = true;
     }
   }
 
@@ -1503,7 +1665,7 @@ private:
     Serial.println(WiFi.gatewayIP());
     Serial.print("  DNS: ");
     Serial.println(WiFi.dnsIP());
-    Serial.print("  Appwrite host: ");
+    Serial.print("  Cloud host: ");
     Serial.println(host);
     Serial.print("  DNS resolved: ");
     Serial.println(dnsOk ? resolved.toString() : String("failed"));
@@ -1649,7 +1811,7 @@ private:
   bool postGatewayExecution(const String& url, const String& requestBody, const char* functionPath, String& executionResponse) {
     TantalumUrl parsedUrl;
     if (!parseHttpsUrl(url, parsedUrl)) {
-      Serial.print("Invalid Appwrite gateway URL: ");
+      Serial.print("Invalid cloud gateway URL: ");
       Serial.println(url);
       return false;
     }
@@ -1658,10 +1820,10 @@ private:
       printRuntimeStatus(functionPath);
 #if defined(ESP32)
       WiFiClientSecure gatewayClient;
-      if (!connectVerifiedAppwriteClient(gatewayClient, parsedUrl, "Appwrite gateway")) {
+      if (!connectVerifiedAppwriteClient(gatewayClient, parsedUrl, "cloud gateway")) {
         printGatewayDiagnostics(true);
         if (attempt < TANTALUM_GATEWAY_ATTEMPTS) {
-          Serial.println("Retrying verified Appwrite request.");
+          Serial.println("Retrying verified cloud request.");
           delay(500UL * attempt);
           continue;
         }
@@ -1670,10 +1832,10 @@ private:
       Client& client = gatewayClient;
 #else
       BearSSL::WiFiClientSecure gatewayClient;
-      if (!connectVerifiedAppwriteClient(gatewayClient, parsedUrl, "Appwrite gateway")) {
+      if (!connectVerifiedAppwriteClient(gatewayClient, parsedUrl, "cloud gateway")) {
         printGatewayDiagnostics(true);
         if (attempt < TANTALUM_GATEWAY_ATTEMPTS) {
-          Serial.println("Retrying verified Appwrite request.");
+          Serial.println("Retrying verified cloud request.");
           delay(500UL * attempt);
           continue;
         }
@@ -1701,7 +1863,7 @@ private:
       }
 
       if (attempt < TANTALUM_GATEWAY_ATTEMPTS) {
-        Serial.println("Retrying verified Appwrite request.");
+        Serial.println("Retrying verified cloud request.");
       }
       delay(500UL * attempt);
     }
@@ -1798,9 +1960,11 @@ private:
       startProvisioning("heartbeat");
     }
 
-    JsonVariant otaCommand = responseDoc["data"]["otaCommand"];
-    if (!otaCommand.isNull()) {
-      handleOtaCommand(otaCommand);
+    if (pollingOtaEnabled()) {
+      JsonVariant otaCommand = responseDoc["data"]["otaCommand"];
+      if (!otaCommand.isNull()) {
+        handleOtaCommand(otaCommand);
+      }
     }
   }
 
@@ -2107,7 +2271,7 @@ private:
   bool applyOtaFromResponse(Client& client, const TantalumHttpResponse& response, size_t expectedSize, const char* expectedChecksum, String& errorMessage) {
     size_t writeSize = response.hasContentLength ? response.contentLength : expectedSize;
     if (expectedSize > 0 && response.hasContentLength && response.contentLength != expectedSize) {
-      errorMessage = "OTA content-length did not match Appwrite metadata size.";
+      errorMessage = "OTA content-length did not match cloud metadata size.";
       return false;
     }
 

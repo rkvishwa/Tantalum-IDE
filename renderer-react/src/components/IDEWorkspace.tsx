@@ -50,6 +50,7 @@ import {
   HardDriveUpload,
   LayoutGrid,
   LayoutList,
+  LineChart,
   Columns2,
   Rows2,
   Library,
@@ -69,13 +70,14 @@ import {
   Star,
   TerminalSquare,
   Trash2,
+  Unlink,
   Wifi,
   X,
   type LucideIcon,
 } from 'lucide-react';
 import type { editor } from 'monaco-editor';
 
-import { createBoard, deleteBoard, listBoards, rotateBoardToken, startBoardProvisioning, updateBoard } from '@/lib/boards';
+import { createBoard, deleteBoard, listBoards, normalizeOtaUpdateMode, rotateBoardToken, startBoardProvisioning, updateBoard } from '@/lib/boards';
 import { createAgentThreadMessage, truncateAgentThreadMessages, type AgentThreadMessage } from '@/lib/agent';
 import { buildAgentDiffRows, previewContentForAgentChange } from '@/lib/agentDiff';
 import { appwriteConfig, hasBoardAdminFunction, hasDeviceGatewayFunction, hasRequiredCloudConfiguration } from '@/lib/config';
@@ -84,7 +86,7 @@ import {
   updateArduinoCppDiagnostics,
 } from '@/lib/cppLanguageSupport';
 import { deleteFirmwareRelease, listFirmwareHistory, markFirmwareAsCurrent, uploadFirmwareRelease } from '@/lib/firmware';
-import type { BoardDocument, BoardInput, BoardSecret, FirmwareDocument } from '@/lib/models';
+import type { BoardDocument, BoardInput, BoardSecret, FirmwareDocument, OtaUpdateMode } from '@/lib/models';
 import type { UiPreferences } from '@/lib/uiPreferences';
 import {
   calculateBoardStatus,
@@ -124,17 +126,19 @@ import type {
   BoardCodeSnapshotSummary,
   BoardCodeSourceSnapshotInput,
   BoardCodeViewResult,
+  CloudSyncProject,
   SourceRestoreMarker,
 } from '@/types/electron';
 import type { AgentChangePreview, AgentRestoredFile, AgentRestorePointSummary } from '@/types/electron';
 
 import { AgentPanel, type AgentEditorSelectionContext, type AgentPendingReview, type AgentPreparedReview, type AgentReviewResolutionNotice } from './AgentPanel';
 import { GitHistoryPanel, GitSourceControlPanel, GitWorkspace } from './GitWorkspace';
-import { SerialMonitor } from './SerialMonitor';
+import { SerialMonitor, type SerialMonitorSessionState } from './SerialMonitor';
+import { SerialPlotterPopup } from './SerialPlotterPopup';
 import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
 import { useGitWorkspaceController } from './useGitWorkspaceController';
 import { Modal } from './Modal';
-import { TerminalWorkspace, type TerminalDropZone, type TerminalSplitZone, type TerminalWorkspaceCommand, type TerminalWorkspaceCommandInput, type TerminalWorkspaceSessionSnapshot, type TerminalWorkspaceState } from './TerminalWorkspace';
+import { TerminalWorkspace, type TerminalDropZone, type TerminalHostId, type TerminalSplitZone, type TerminalWorkspaceCommand, type TerminalWorkspaceCommandInput, type TerminalWorkspaceSessionSnapshot, type TerminalWorkspaceState, type TerminalWorkspaceTransferSession } from './TerminalWorkspace';
 import { WorkspaceSearchPopup } from './WorkspaceSearchPopup';
 import { BoardsHubSelect, BoardsHubToggle, type BoardsHubSelectOption } from './BoardsHubControls';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -168,7 +172,7 @@ type IDEWorkspaceProps = {
 };
 
 export type SidebarView = 'explorer' | 'boards' | 'libraries' | 'git' | 'platforms' | 'terminal' | 'my-projects';
-type ConsoleView = 'output' | 'serial';
+type ConsoleView = 'output' | 'serial' | 'terminal';
 type LibraryManagerTab = 'all' | 'installed';
 type LibraryDetailTab = 'overview' | 'versions' | 'examples' | 'dependencies';
 type PlatformDetailTab = 'overview' | 'versions';
@@ -1298,6 +1302,9 @@ type ResizeSession = {
   startX: number;
   startY: number;
   startSize: number;
+  latestSize: number;
+  frameId: number | null;
+  capturedElement: HTMLElement | null;
 };
 
 const DEFAULT_PANEL_SIZES: PanelSizes = {
@@ -1463,11 +1470,11 @@ function estimateCloudRuntimeInstallProgress(event: UsbUploadProgressEvent, last
     estimate = 12;
   }
 
-  if (/generating tantalum cloud runtime sketch/.test(normalized)) {
+  if (/generating (?:tantalum cloud runtime|runtime firmware) sketch/.test(normalized)) {
     estimate = 24;
   }
 
-  if (/uploading tantalum cloud runtime/.test(normalized)) {
+  if (/uploading (?:tantalum cloud runtime|runtime firmware)/.test(normalized)) {
     estimate = 32;
   }
 
@@ -1616,6 +1623,7 @@ type LocalBoardEdit = {
   fqbn?: string;
   boardLabel?: string;
   port?: string;
+  otaUpdateMode?: OtaUpdateMode;
 };
 
 type LocalBoardOption = {
@@ -1658,6 +1666,43 @@ const SOURCE_SNAPSHOT_PROJECT_ROOT_MARKERS = new Set([
 const SOURCE_SNAPSHOT_MAX_FILES = 80;
 const SOURCE_SNAPSHOT_MAX_FILE_BYTES = 512 * 1024;
 const SOURCE_SNAPSHOT_MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+const OTA_UPDATE_MODE_OPTIONS: Array<{ value: OtaUpdateMode; label: string }> = [
+  { value: 'polling', label: 'Polling' },
+  { value: 'mqtt', label: 'MQTT' },
+  { value: 'both', label: 'Both' },
+];
+
+function hasMqttRuntimeConfig() {
+  return Boolean(
+    appwriteConfig.mqttHost &&
+    appwriteConfig.mqttUsername &&
+    appwriteConfig.mqttPassword &&
+    appwriteConfig.mqttCaCert
+  );
+}
+
+function defaultOtaUpdateMode() {
+  return hasMqttRuntimeConfig() ? 'both' : 'polling';
+}
+
+function otaUpdateModeUsesMqtt(mode: OtaUpdateMode) {
+  return mode === 'mqtt' || mode === 'both';
+}
+
+function boardOtaUpdateMode(board: Pick<BoardDocument, 'otaUpdateMode'> | null | undefined) {
+  return normalizeOtaUpdateMode(board?.otaUpdateMode, 'polling');
+}
+
+function formatOtaUpdateMode(mode: OtaUpdateMode) {
+  return OTA_UPDATE_MODE_OPTIONS.find((option) => option.value === mode)?.label ?? 'Polling';
+}
+
+function boardHasCloudCommandSecret(board: Pick<BoardDocument, 'commandSecretEnvelope' | 'otaUpdateMode'> | null | undefined) {
+  if (!board || !otaUpdateModeUsesMqtt(boardOtaUpdateMode(board))) {
+    return true;
+  }
+  return Boolean(String(board.commandSecretEnvelope || '').trim());
+}
 
 type LocalBoardRow = {
   key: string;
@@ -1685,6 +1730,7 @@ type LocalBoardRow = {
   cloudLinkedAt?: string;
   lastCloudProvisionedAt?: string;
   lastCloudUsbUploadAt?: string;
+  otaUpdateMode?: OtaUpdateMode | string;
   sourceCodeVisibility?: 'private' | 'public' | string;
   portChanged?: boolean;
   stalePort?: string;
@@ -1776,6 +1822,67 @@ function findLikelyCloudBoardForLocal(row: Pick<LocalBoardRow, 'name' | 'boardLa
   }
 
   return null;
+}
+
+type LocalBoardCloudLinkResolution = {
+  cloudBoardId: string;
+  board: BoardDocument | null;
+  status: 'none' | 'valid' | 'missing' | 'mismatch' | 'unresolved';
+  valid: boolean;
+  invalid: boolean;
+  reason: string;
+};
+
+function normalizeCloudLinkFqbn(value: string | null | undefined) {
+  return String(value || '').trim();
+}
+
+function resolveLocalBoardCloudLink(
+  row: Pick<LocalBoardRow, 'cloudBoardId' | 'fqbn'>,
+  boards: BoardDocument[],
+  options: { boardsResolved?: boolean } = {},
+): LocalBoardCloudLinkResolution {
+  const cloudBoardId = String(row.cloudBoardId || '').trim();
+  if (!cloudBoardId) {
+    return { cloudBoardId: '', board: null, status: 'none', valid: false, invalid: false, reason: '' };
+  }
+
+  const linkedBoard = boards.find((board) => board.$id === cloudBoardId) ?? null;
+  if (!linkedBoard) {
+    if (options.boardsResolved === false) {
+      return {
+        cloudBoardId,
+        board: null,
+        status: 'unresolved',
+        valid: false,
+        invalid: false,
+        reason: 'Checking the saved cloud board link...',
+      };
+    }
+    return {
+      cloudBoardId,
+      board: null,
+      status: 'missing',
+      valid: false,
+      invalid: true,
+      reason: 'Saved cloud link is missing from the current cloud board list.',
+    };
+  }
+
+  const localFqbn = normalizeCloudLinkFqbn(row.fqbn);
+  const cloudFqbn = normalizeCloudLinkFqbn(linkedBoard.boardType);
+  if (!localFqbn || !cloudFqbn || localFqbn !== cloudFqbn) {
+    return {
+      cloudBoardId,
+      board: linkedBoard,
+      status: 'mismatch',
+      valid: false,
+      invalid: true,
+      reason: `Saved cloud link uses ${cloudFqbn || 'unknown board type'}, not ${localFqbn || 'this board type'}.`,
+    };
+  }
+
+  return { cloudBoardId, board: linkedBoard, status: 'valid', valid: true, invalid: false, reason: '' };
 }
 
 const LOCAL_BOARD_SELECTED_STORAGE_KEY = 'tantalum-local-board-selected:v1';
@@ -1881,7 +1988,7 @@ const AGENT_LIVE_REVIEW_STORAGE_PREFIX = 'tantalum-agent-live-review:';
 const WORKSPACE_EDITOR_TABS_STORAGE_PREFIX = 'tantalum-workspace-editor-tabs:';
 const WORKSPACE_EDITOR_TABS_STORAGE_VERSION = 1;
 
-const FILE_TREE_THEME: FileTreeTheme = {
+const FILE_TREE_THEME_DARK: FileTreeTheme = {
   backgroundPrimary: 'var(--chrome-panel-bg)',
   backgroundSecondary: 'var(--chrome-panel-bg)',
   backgroundHover: 'rgba(108, 166, 255, 0.08)',
@@ -1900,6 +2007,28 @@ const FILE_TREE_THEME: FileTreeTheme = {
   openFolderButtonBackgroundHover: 'transparent',
   openFolderButtonText: 'rgba(255, 255, 255, 0.88)',
   openFolderButtonBorder: 'rgba(255, 255, 255, 0.42)',
+  fontFamily: 'var(--system-font-family)',
+};
+
+const FILE_TREE_THEME_LIGHT: FileTreeTheme = {
+  backgroundPrimary: 'var(--chrome-panel-bg)',
+  backgroundSecondary: 'var(--chrome-panel-bg)',
+  backgroundHover: 'color-mix(in srgb, var(--accent) 8%, transparent)',
+  textPrimary: 'var(--text)',
+  textSecondary: 'var(--text-soft)',
+  textMuted: 'var(--text-muted)',
+  accent: 'var(--accent)',
+  accentTransparent: 'color-mix(in srgb, var(--accent) 16%, transparent)',
+  danger: 'var(--danger)',
+  menuBackground: 'var(--bg-elevated)',
+  menuBorder: 'var(--line)',
+  menuHover: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+  menuText: 'var(--text)',
+  sidebarBorder: 'transparent',
+  openFolderButtonBackground: 'transparent',
+  openFolderButtonBackgroundHover: 'transparent',
+  openFolderButtonText: 'var(--text)',
+  openFolderButtonBorder: 'var(--line-strong)',
   fontFamily: 'var(--system-font-family)',
 };
 
@@ -2808,6 +2937,17 @@ export function IDEWorkspace({
     shellProfiles: [],
     defaultShellId: null,
   });
+  const [bottomTerminalCommand, setBottomTerminalCommand] = useState<TerminalWorkspaceCommand | null>(null);
+  const [bottomTerminalWorkspaceState, setBottomTerminalWorkspaceState] = useState<TerminalWorkspaceState>({
+    sessions: [],
+    panes: [],
+    groups: [],
+    activePaneId: null,
+    activeGroupId: null,
+    activeSessionId: null,
+    shellProfiles: [],
+    defaultShellId: null,
+  });
   const [terminalRenamingSessionId, setTerminalRenamingSessionId] = useState<string | null>(null);
   const [terminalRenameValue, setTerminalRenameValue] = useState('');
   const [terminalContextMenu, setTerminalContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
@@ -2849,6 +2989,13 @@ export function IDEWorkspace({
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [serialBlockerDialog, setSerialBlockerDialog] = useState<SerialBlockerDialogRequest | null>(null);
   const [serialPreflightDialog, setSerialPreflightDialog] = useState<SerialPreflightDialogRequest | null>(null);
+  const [serialPlotterOpen, setSerialPlotterOpen] = useState(false);
+  const [serialSession, setSerialSession] = useState<SerialMonitorSessionState>({
+    sessionId: null,
+    connected: false,
+    port: '',
+    baudRate: 115200,
+  });
   const [boards, setBoards] = useState<BoardDocument[]>([]);
   const [boardsLoading, setBoardsLoading] = useState(() => hasRequiredCloudConfiguration());
   const [boardsError, setBoardsError] = useState<string | null>(null);
@@ -2859,6 +3006,7 @@ export function IDEWorkspace({
   const [localBoardAutoScanLoading, setLocalBoardAutoScanLoading] = useState(false);
   const [localBoardsError, setLocalBoardsError] = useState<string | null>(null);
   const [localBoardEdits, setLocalBoardEdits] = useState<Record<string, LocalBoardEdit>>({});
+  const [cloudBoardOtaModeEdits, setCloudBoardOtaModeEdits] = useState<Record<string, OtaUpdateMode>>({});
   const [manualLocalBoardKeys, setManualLocalBoardKeys] = useState<string[]>([]);
   const [selectedLocalBoardId, setSelectedLocalBoardId] = useState(() => readStoredSelectedLocalBoardId());
   const [editorBoardSelection, setEditorBoardSelection] = useState('');
@@ -2885,6 +3033,7 @@ export function IDEWorkspace({
     name: '',
     boardType: 'esp32:esp32:esp32',
     sourceCodeVisibility: 'private',
+    otaUpdateMode: defaultOtaUpdateMode(),
   });
   const [selectedLinkLocalProfileId, setSelectedLinkLocalProfileId] = useState('');
   const [pendingSelectedLocalCloudLink, setPendingSelectedLocalCloudLink] = useState<{ profileId: string; boardId: string } | null>(null);
@@ -2931,7 +3080,9 @@ export function IDEWorkspace({
   const [projectRenamePrompt, setProjectRenamePrompt] = useState<ProjectFolder | null>(null);
   const [projectRenameValue, setProjectRenameValue] = useState('');
   const [projectRemovalPrompt, setProjectRemovalPrompt] = useState<ProjectFolder | null>(null);
+  const [cloudSyncProjects, setCloudSyncProjects] = useState<CloudSyncProject[]>([]);
   const [fileTreeMoreMenu, setFileTreeMoreMenu] = useState<'workspace' | 'project' | null>(null);
+  const cloudSyncAutoTimersRef = useRef<Map<string, number>>(new Map());
   const localBoardScanGenerationRef = useRef(0);
   const localBoardAutoScanActiveRef = useRef(false);
   const localBoardMonitoringPausedRef = useRef(false);
@@ -2939,6 +3090,7 @@ export function IDEWorkspace({
   const localBoardReconnectScanSignatureRef = useRef('');
   const localBoardUploadInProgressRef = useRef(false);
   const localBoardUploadProgressRef = useRef<UsbUploadProgressTask | null>(null);
+  const invalidCloudLinkRepairRef = useRef(false);
   const firmwareReleaseUploadInProgressRef = useRef(false);
   const serialPreflightResolveRef = useRef<((ready: boolean) => void) | null>(null);
   const verifyInProgressRef = useRef(false);
@@ -3008,16 +3160,32 @@ export function IDEWorkspace({
   const activeTabScrollId = activeTab?.id ?? null;
   const activeTabScrollPath = activeTab?.path ?? null;
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
+  const cloudBoardLinksResolved = !boardsLoading && !boardsError;
   const localBoardRows = useMemo<LocalBoardRow[]>(() => {
     const usedDetectionKeys = new Set<string>();
     const availableDetections = () => detectedLocalBoards.filter((detection) => !usedDetectionKeys.has(localBoardDetectionUsageKey(detection)));
 
     const takeDetection = (identity: LocalBoardHardwareIdentity, selectedPortPath?: string) => {
+      const canUseExactDetection = (detection: LocalBoardDetection) => {
+        const linkedIdentity = identity as LocalBoardHardwareIdentity & { cloudBoardId?: string; fqbn?: string };
+        if (!linkedIdentity.cloudBoardId) {
+          return true;
+        }
+
+        const identityFqbn = normalizeCloudLinkFqbn(linkedIdentity.fqbn);
+        const detectionFqbn = normalizeCloudLinkFqbn(detection.fqbn);
+        if (identityFqbn && detectionFqbn && identityFqbn !== detectionFqbn) {
+          return false;
+        }
+
+        return localBoardTrustedIdentityMatches(detection, linkedIdentity) || !isTrustedLocalBoardFingerprint(linkedIdentity.fingerprint);
+      };
       const exactPort = normalizeLocalBoardHardwareValue(selectedPortPath || localBoardIdentityPort(identity));
       const exactDetection = exactPort
-        ? availableDetections().find((detection) => normalizeLocalBoardHardwareValue(detection.port) === exactPort) ?? null
+        ? availableDetections().find((detection) => normalizeLocalBoardHardwareValue(detection.port) === exactPort && canUseExactDetection(detection)) ?? null
         : null;
-      const detection = exactDetection ?? pickBestLocalBoardHardwareMatch(availableDetections(), identity);
+      const detectionCandidates = availableDetections().filter(canUseExactDetection);
+      const detection = exactDetection ?? pickBestLocalBoardHardwareMatch(detectionCandidates, identity);
       if (detection) {
         usedDetectionKeys.add(localBoardDetectionUsageKey(detection));
       }
@@ -3069,6 +3237,7 @@ export function IDEWorkspace({
         cloudLinkedAt: profile?.cloudLinkedAt || '',
         lastCloudProvisionedAt: profile?.lastCloudProvisionedAt || '',
         lastCloudUsbUploadAt: profile?.lastCloudUsbUploadAt || '',
+        otaUpdateMode: normalizeOtaUpdateMode(edit.otaUpdateMode ?? profile?.otaUpdateMode, defaultOtaUpdateMode()),
         sourceCodeVisibility: profile?.sourceCodeVisibility || 'private',
         portChanged,
         stalePort: portChanged ? savedPort : '',
@@ -3098,7 +3267,12 @@ export function IDEWorkspace({
     ?? localBoardRows.find((row) => row.profileId)
     ?? null;
   const selectedBoardLinkedLocalRow = selectedBoard
-    ? localBoardRows.find((row) => row.profileId && row.cloudBoardId === selectedBoard.$id) ?? null
+    ? localBoardRows.find((row) => {
+        if (!row.profileId || row.cloudBoardId !== selectedBoard.$id) {
+          return false;
+        }
+        return resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved }).valid;
+      }) ?? null
     : null;
   const parsedEditorBoardSelection = parseEditorBoardValue(editorBoardSelection);
   const selectedEditorLocalBoard = parsedEditorBoardSelection.kind === 'local'
@@ -3171,6 +3345,16 @@ export function IDEWorkspace({
     const normalizedWorkspacePath = normalizeProjectPath(workspacePath);
     return projectFolders.find((project) => normalizeProjectPath(project.path) === normalizedWorkspacePath) ?? null;
   }, [projectFolders, workspacePath]);
+  const cloudSyncByWorkspace = useMemo(() => {
+    const next = new Map<string, CloudSyncProject>();
+    for (const project of cloudSyncProjects) {
+      if (project.workspacePath && project.remoteUrl && project.cloudProjectId) {
+        next.set(normalizeProjectPath(project.workspacePath), project);
+      }
+    }
+    return next;
+  }, [cloudSyncProjects]);
+  const selectedProjectCloudSync = selectedProject ? cloudSyncByWorkspace.get(normalizeProjectPath(selectedProject.path)) ?? null : null;
   const visibleProjects = useMemo(() => {
     const query = deferredProjectQuery.trim().toLowerCase();
     const filteredProjects = query
@@ -3221,6 +3405,8 @@ export function IDEWorkspace({
   const [treeTrashMap] = useState(() => new Map<string, string>());
   const panelSizesRef = useRef<PanelSizes>(panelSizes);
   const resizeSessionRef = useRef<ResizeSession | null>(null);
+  const workspaceShellRef = useRef<HTMLElement | null>(null);
+  const consoleShellRef = useRef<HTMLElement | null>(null);
   const editorThemeName = resolvedTheme === 'light' ? 'tantalum-minimal-light' : 'tantalum-minimal-dark';
   const activeEditorFilePath = activeTab?.path.startsWith('untitled:') ? activeTab.name : activeTab?.path;
   const activeEditorLanguage = getEditorLanguage(activeEditorFilePath);
@@ -3284,12 +3470,12 @@ export function IDEWorkspace({
   }, [readActiveEditorSelection]);
   const fileTreeTheme = useMemo<FileTreeTheme>(
     () => ({
-      ...FILE_TREE_THEME,
+      ...(resolvedTheme === 'light' ? FILE_TREE_THEME_LIGHT : FILE_TREE_THEME_DARK),
       fontFamily: 'var(--system-font-family)',
       accent: uiPreferences.accentColor,
       accentTransparent: 'color-mix(in srgb, var(--accent) 16%, transparent)',
     }),
-    [uiPreferences.accentColor],
+    [resolvedTheme, uiPreferences.accentColor],
   );
 
   useEffect(() => {
@@ -3426,6 +3612,20 @@ export function IDEWorkspace({
     setTerminalCommand((current) => ({ id: (current?.id ?? 0) + 1, ...command } as TerminalWorkspaceCommand));
   }
 
+  function handleTerminalSessionTransfer(targetHost: TerminalHostId, session: TerminalWorkspaceTransferSession) {
+    if (targetHost === 'bottom') {
+      if (sidebar === 'terminal') {
+        setSidebar('explorer');
+      }
+      openConsolePanel('terminal');
+      setBottomTerminalCommand((current) => ({ id: (current?.id ?? 0) + 1, type: 'attach-session', session } as TerminalWorkspaceCommand));
+      return;
+    }
+
+    openTerminalPage();
+    setTerminalCommand((current) => ({ id: (current?.id ?? 0) + 1, type: 'attach-session', session } as TerminalWorkspaceCommand));
+  }
+
   function toggleConsolePanel() {
     onBottomPanelOpenChange(!bottomPanelOpen);
   }
@@ -3493,12 +3693,22 @@ export function IDEWorkspace({
     }
 
     event.preventDefault();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the pointer is already released; global listeners still handle the drag.
+    }
+
+    const startSize = panelSizesRef.current[panel];
     resizeSessionRef.current = {
       panel,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      startSize: panelSizesRef.current[panel],
+      startSize,
+      latestSize: startSize,
+      frameId: null,
+      capturedElement: event.currentTarget,
     };
     setActiveResizePanel(panel);
     document.body.classList.add('panel-resizing');
@@ -4733,24 +4943,27 @@ export function IDEWorkspace({
     }
   }
 
-  function buildCloudRuntimeConfig(board: BoardDocument, secrets: BoardSecret, overrides: { firmwareVersion?: string; firmwareId?: string } = {}) {
+  function buildCloudRuntimeConfig(board: BoardDocument, secrets: BoardSecret, overrides: { firmwareVersion?: string; firmwareId?: string; otaUpdateMode?: OtaUpdateMode } = {}) {
+    const otaUpdateMode = normalizeOtaUpdateMode(overrides.otaUpdateMode ?? board.otaUpdateMode, 'polling');
+    const includeMqtt = otaUpdateModeUsesMqtt(otaUpdateMode);
     return {
       boardId: board.$id,
       boardName: board.name,
       apiToken: secrets.apiToken,
       commandSecret: secrets.commandSecret,
-      mqttTopic: secrets.mqttTopic,
+      mqttTopic: includeMqtt ? secrets.mqttTopic : '',
       provisioningPop: secrets.provisioningPop,
       appwriteEndpoint: appwriteConfig.endpoint,
       appwriteProjectId: appwriteConfig.projectId,
       deviceGatewayFunctionId: appwriteConfig.deviceGatewayFunctionId,
       firmwareVersion: overrides.firmwareVersion || board.firmwareVersion || '0.0.0',
       firmwareId: overrides.firmwareId || board.desiredFirmwareId || '',
-      mqttHost: appwriteConfig.mqttHost,
-      mqttPort: appwriteConfig.mqttPort,
-      mqttUsername: appwriteConfig.mqttUsername,
-      mqttPassword: appwriteConfig.mqttPassword,
-      mqttCaCert: appwriteConfig.mqttCaCert,
+      otaUpdateMode,
+      mqttHost: includeMqtt ? appwriteConfig.mqttHost : '',
+      mqttPort: includeMqtt ? appwriteConfig.mqttPort : '',
+      mqttUsername: includeMqtt ? appwriteConfig.mqttUsername : '',
+      mqttPassword: includeMqtt ? appwriteConfig.mqttPassword : '',
+      mqttCaCert: includeMqtt ? appwriteConfig.mqttCaCert : '',
       tlsCaCert: appwriteConfig.tlsCaCert,
     };
   }
@@ -4911,6 +5124,8 @@ export function IDEWorkspace({
   }
 
   function localBoardProfileFromResolvedRow(row: LocalBoardRow, profile: LocalBoardProfile) {
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    const keepCloudLink = cloudLink.valid || cloudLink.status === 'unresolved';
     return {
       ...profile,
       name: row.name || profile.name,
@@ -4928,10 +5143,11 @@ export function IDEWorkspace({
       fingerprint: row.fingerprint || profile.fingerprint,
       confidence: row.confidence ?? profile.confidence,
       connected: row.connected,
-      cloudBoardId: row.cloudBoardId || profile.cloudBoardId,
-      cloudLinkedAt: row.cloudLinkedAt || profile.cloudLinkedAt,
-      lastCloudProvisionedAt: row.lastCloudProvisionedAt || profile.lastCloudProvisionedAt,
-      lastCloudUsbUploadAt: row.lastCloudUsbUploadAt || profile.lastCloudUsbUploadAt,
+      cloudBoardId: keepCloudLink ? row.cloudBoardId || profile.cloudBoardId : '',
+      cloudLinkedAt: keepCloudLink ? row.cloudLinkedAt || profile.cloudLinkedAt : '',
+      lastCloudProvisionedAt: keepCloudLink ? row.lastCloudProvisionedAt || profile.lastCloudProvisionedAt : '',
+      lastCloudUsbUploadAt: keepCloudLink ? row.lastCloudUsbUploadAt || profile.lastCloudUsbUploadAt : '',
+      otaUpdateMode: normalizeOtaUpdateMode(row.otaUpdateMode ?? profile.otaUpdateMode, defaultOtaUpdateMode()),
       sourceCodeVisibility: row.sourceCodeVisibility || profile.sourceCodeVisibility || 'private',
     };
   }
@@ -5150,13 +5366,15 @@ export function IDEWorkspace({
           detectedBoard,
           35,
         );
-        if (existingProfile) {
+        const existingProfileScore = existingProfile ? localBoardHardwareMatchScore(existingProfile, detectedBoard) : 0;
+        const reuseExistingProfile = Boolean(existingProfile && existingProfileScore >= 65);
+        if (existingProfile && reuseExistingProfile) {
           usedExistingProfileIds.add(existingProfile.id);
         }
         const detectedFqbn = normalizeUploadableBoardFqbn(detectedBoard.fqbn);
         return {
-          id: existingProfile?.id,
-          name: existingProfile?.name || '',
+          id: reuseExistingProfile ? existingProfile?.id : undefined,
+          name: reuseExistingProfile ? existingProfile?.name || '' : '',
           fqbn: detectedFqbn,
           boardLabel: detectedBoard.boardLabel || (detectedFqbn ? getBoardOptionLabel(detectedFqbn) : 'Local board'),
           port: detectedBoard.port,
@@ -5352,6 +5570,7 @@ export function IDEWorkspace({
     void refreshGitChangeIndicator(result.path);
     pushConsole(`Opened Project Space: ${result.path}`, 'success');
     void clearInternalTrash(result.path);
+    scheduleCloudSyncForWorkspace(result.path, 'open');
     return true;
   }
 
@@ -5445,6 +5664,170 @@ export function IDEWorkspace({
           : result.projects[0]?.id ?? null;
 
     setSelectedProjectId(nextSelectedProjectId);
+  }
+
+  async function refreshCloudSyncProjects() {
+    const result = await window.tantalum.cloudSync.listProjects();
+    if (!result.success) {
+      pushConsole(result.error, 'error');
+      return [];
+    }
+
+    setCloudSyncProjects(result.projects);
+    return result.projects;
+  }
+
+  function upsertCloudSyncProject(project: CloudSyncProject) {
+    setCloudSyncProjects((current) => {
+      const next = current.filter((entry) => entry.projectId !== project.projectId);
+      next.push(project);
+      return next;
+    });
+  }
+
+  function cloudSyncStatusLabel(project: CloudSyncProject | null) {
+    if (!project) {
+      return 'Not synced';
+    }
+    if (project.paused || project.syncStatus === 'paused') {
+      return 'Paused';
+    }
+    if (project.syncStatus === 'syncing') {
+      return 'Syncing';
+    }
+    if (project.syncStatus === 'conflict') {
+      return 'Conflict';
+    }
+    if (project.syncStatus === 'error') {
+      return 'Error';
+    }
+    return 'Synced';
+  }
+
+  async function enableProjectCloudSync(project: ProjectFolder) {
+    if (!project.exists) {
+      pushToast('Locate this project folder before enabling cloud sync.', 'info');
+      return;
+    }
+
+    setBusyAction(`cloud-sync-enable:${project.id}`);
+    try {
+      const result = await window.tantalum.cloudSync.createProject({
+        workspacePath: project.path,
+        name: getProjectDisplayName(project),
+      });
+      if (!result.success) {
+        pushToast(result.error, 'error');
+        return;
+      }
+
+      upsertCloudSyncProject(result.project);
+      pushToast('Cloud sync enabled.', result.project.syncStatus === 'error' ? 'error' : 'success', undefined, {
+        detail: result.project.syncMessage || undefined,
+      });
+      refreshProjectTree();
+      void refreshGitChangeIndicator(project.path);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function linkProjectCloudSync(project: ProjectFolder) {
+    if (!project.exists) {
+      pushToast('Locate this project folder before linking cloud sync.', 'info');
+      return;
+    }
+
+    const projectId = window.prompt('Cloud project ID');
+    if (!projectId?.trim()) {
+      return;
+    }
+
+    setBusyAction(`cloud-sync-link:${project.id}`);
+    try {
+      const result = await window.tantalum.cloudSync.linkProject({
+        projectId: projectId.trim(),
+        workspacePath: project.path,
+      });
+      if (!result.success) {
+        pushToast(result.error, 'error');
+        return;
+      }
+
+      upsertCloudSyncProject(result.project);
+      pushToast(result.conflict ? 'Cloud sync needs conflict review.' : 'Cloud project linked.', result.conflict ? 'error' : 'success', undefined, {
+        detail: result.project.syncMessage || undefined,
+      });
+      refreshProjectTree();
+      void refreshGitChangeIndicator(project.path);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function syncCloudProject(project: CloudSyncProject, reason: string = 'manual') {
+    if (!project.projectId || project.syncStatus === 'syncing') {
+      return;
+    }
+
+    setBusyAction(`cloud-sync-now:${project.projectId}`);
+    try {
+      const result = await window.tantalum.cloudSync.syncNow({ projectId: project.projectId, reason });
+      if (!result.success) {
+        pushToast(result.error, 'error');
+        return;
+      }
+
+      upsertCloudSyncProject(result.project);
+      pushToast(result.conflict ? 'Cloud sync conflict.' : result.skipped ? 'Cloud sync skipped.' : 'Cloud sync complete.', result.conflict ? 'error' : 'success', undefined, {
+        detail: result.project.syncMessage || result.reason || undefined,
+      });
+      refreshFileTree();
+      refreshProjectTree();
+      void refreshGitChangeIndicator(result.project.workspacePath || workspacePath || undefined);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  function scheduleCloudSyncForWorkspace(targetWorkspacePath: string | null | undefined, reason: string = 'auto') {
+    if (!targetWorkspacePath) {
+      return;
+    }
+
+    const project = cloudSyncByWorkspace.get(normalizeProjectPath(targetWorkspacePath));
+    if (!project || project.paused || ['syncing', 'conflict', 'error'].includes(String(project.syncStatus || ''))) {
+      return;
+    }
+
+    const existingTimer = cloudSyncAutoTimersRef.current.get(project.projectId);
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+    }
+
+    const timer = window.setTimeout(() => {
+      cloudSyncAutoTimersRef.current.delete(project.projectId);
+      void syncCloudProject(project, reason);
+    }, 2500);
+    cloudSyncAutoTimersRef.current.set(project.projectId, timer);
+  }
+
+  async function pauseProjectCloudSync(project: CloudSyncProject) {
+    const result = await window.tantalum.cloudSync.pause(project.projectId);
+    if (!result.success) {
+      pushToast(result.error, 'error');
+      return;
+    }
+    upsertCloudSyncProject(result.project);
+  }
+
+  async function resumeProjectCloudSync(project: CloudSyncProject) {
+    const result = await window.tantalum.cloudSync.resume(project.projectId);
+    if (!result.success) {
+      pushToast(result.error, 'error');
+      return;
+    }
+    upsertCloudSyncProject(result.project);
   }
 
   async function addProjectFolderPath(projectPath: string) {
@@ -6200,6 +6583,7 @@ export function IDEWorkspace({
       }
 
       void refreshGitChangeIndicator();
+      scheduleCloudSyncForWorkspace(workspacePath, 'auto');
     } finally {
       saveInProgressRef.current = false;
     }
@@ -6387,6 +6771,8 @@ export function IDEWorkspace({
 
   function localBoardCodeTarget(row: LocalBoardRow): BoardCodeTarget {
     const label = localBoardDisplayName(row);
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    const linkedCloudBoard = cloudLink.valid ? cloudLink.board : null;
     return {
       label,
       board: {
@@ -6395,21 +6781,22 @@ export function IDEWorkspace({
         port: row.port,
         profileId: row.profileId,
         fingerprint: row.fingerprint,
-        cloudBoardId: row.cloudBoardId,
-        sourceCodeVisibility: row.sourceCodeVisibility || 'private',
+        cloudBoardId: cloudLink.valid ? cloudLink.cloudBoardId : '',
+        sourceCodeVisibility: linkedCloudBoard?.sourceCodeVisibility || row.sourceCodeVisibility || 'private',
       },
     };
   }
 
   function localBoardSourceIdentity(row: LocalBoardRow) {
-    const linkedCloudBoard = row.cloudBoardId ? boards.find((board) => board.$id === row.cloudBoardId) ?? null : null;
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    const linkedCloudBoard = cloudLink.valid ? cloudLink.board : null;
     return {
       boardName: localBoardDisplayName(row),
       fqbn: row.fqbn,
       port: row.port,
       profileId: row.profileId,
       fingerprint: row.fingerprint,
-      cloudBoardId: row.cloudBoardId,
+      cloudBoardId: cloudLink.valid ? cloudLink.cloudBoardId : '',
       sourceCodeVisibility: linkedCloudBoard?.sourceCodeVisibility || row.sourceCodeVisibility || 'private',
     };
   }
@@ -6867,7 +7254,21 @@ export function IDEWorkspace({
       return;
     }
 
-    if (!uploadBoard.cloudBoardId && isCloudCapableBoardFqbn(uploadBoard.fqbn)) {
+    let uploadBoardCloudLink = resolveLocalBoardCloudLink(uploadBoard, boards, { boardsResolved: cloudBoardLinksResolved });
+    if (uploadBoardCloudLink.invalid) {
+      const message = `${localBoardDisplayName(uploadBoard)} has an invalid saved cloud link. This USB upload will treat it as a plain local board.`;
+      pushConsole(`${message} ${uploadBoardCloudLink.reason}`, 'info');
+      uploadBoard = {
+        ...uploadBoard,
+        cloudBoardId: '',
+        cloudLinkedAt: '',
+        lastCloudProvisionedAt: '',
+        lastCloudUsbUploadAt: '',
+      };
+      uploadBoardCloudLink = resolveLocalBoardCloudLink(uploadBoard, boards, { boardsResolved: cloudBoardLinksResolved });
+    }
+
+    if (!uploadBoardCloudLink.valid && isCloudCapableBoardFqbn(uploadBoard.fqbn)) {
       const likelyCloudBoard = findLikelyCloudBoardForLocal(uploadBoard, boards, selectedBoardId);
       if (likelyCloudBoard) {
         const choice = window.prompt(
@@ -6897,8 +7298,9 @@ export function IDEWorkspace({
             lastCloudProvisionedAt: linkedProfile.lastCloudProvisionedAt,
             lastCloudUsbUploadAt: linkedProfile.lastCloudUsbUploadAt,
           };
+          uploadBoardCloudLink = resolveLocalBoardCloudLink(uploadBoard, boards, { boardsResolved: cloudBoardLinksResolved });
           pushToast(`${localBoardDisplayName(uploadBoard)} linked to ${likelyCloudBoard.name}.`, 'success');
-          pushConsole(`Linked ${localBoardDisplayName(uploadBoard)} to cloud board ${likelyCloudBoard.name}; USB upload will keep the Tantalum cloud runtime.`, 'success');
+          pushConsole(`Linked ${localBoardDisplayName(uploadBoard)} to cloud board ${likelyCloudBoard.name}; USB upload will keep runtime firmware.`, 'success');
         } else if (normalizedChoice === 'PLAIN') {
           pushToast('Continuing plain local upload.', 'info', undefined, { detail: 'This can remove OTA/runtime from the board.' });
           pushConsole('Continuing as a plain local upload. If this is a cloud board, the Tantalum runtime and OTA support can be removed.', 'info');
@@ -6910,16 +7312,8 @@ export function IDEWorkspace({
     }
 
     let linkedCloudRuntime: Record<string, unknown> | null = null;
-    if (uploadBoard.cloudBoardId) {
-      const linkedBoard = boards.find((board) => board.$id === uploadBoard.cloudBoardId) ?? null;
-      if (!linkedBoard) {
-        const message = 'This local board is linked to a cloud board that is not available in the current board list.';
-        openConsolePanel('output');
-        pushConsole(message, 'error');
-        pushToast('Linked cloud board unavailable.', 'error', undefined, { detail: message });
-        return;
-      }
-
+    if (uploadBoardCloudLink.valid && uploadBoardCloudLink.board) {
+      const linkedBoard = uploadBoardCloudLink.board;
       const secretResult = await window.tantalum.secrets.getBoardSecrets(linkedBoard.$id);
       if (!secretResult.success || !secretResult.secrets?.apiToken || !secretResult.secrets.commandSecret || !secretResult.secrets.mqttTopic || !secretResult.secrets.provisioningPop) {
         const message = 'Local cloud-board secrets are missing. Rotate the cloud board token, then install Tantalum Cloud again.';
@@ -7417,6 +7811,7 @@ export function IDEWorkspace({
           provisioningPop: secretResult.secrets.provisioningPop,
           firmwareId,
           firmwareVersion: releaseVersion,
+          otaUpdateMode: boardOtaUpdateMode(targetBoard),
           appwriteEndpoint: appwriteConfig.endpoint,
           appwriteProjectId: appwriteConfig.projectId,
           deviceGatewayFunctionId: appwriteConfig.deviceGatewayFunctionId,
@@ -7550,7 +7945,7 @@ export function IDEWorkspace({
         progress: FIRMWARE_RELEASE_PHASE_CONFIG.storage.start,
       });
       pushConsole('Uploading firmware binary to Tantalum Cloud storage...');
-      await uploadFirmwareRelease({
+      const uploadResult = await uploadFirmwareRelease({
         user,
         board: targetBoard,
         firmwareId,
@@ -7585,7 +7980,17 @@ export function IDEWorkspace({
       setReleaseModalOpen(false);
       setReleaseNotes('');
       setReleaseVersion(nextSemver(releaseVersion));
-      const releaseUploadDetail = `Firmware uploaded to Appwrite storage and queued for OTA deployment. ${releaseSourceRestoreDetail}`;
+      const mqttResult = uploadResult.deployment?.mqtt;
+      const mqttDetail = mqttResult?.status === 'published'
+        ? 'MQTT update trigger sent.'
+        : mqttResult?.status === 'skipped-polling-only'
+          ? 'Polling-only update check queued.'
+          : mqttResult?.status === 'mqtt-failed-with-polling-fallback'
+            ? `MQTT trigger failed; polling fallback remains active.${mqttResult.reason ? ` ${mqttResult.reason}` : ''}`
+            : mqttResult?.status === 'mqtt-failed-no-fallback'
+              ? `MQTT trigger failed and this board is MQTT-only.${mqttResult.reason ? ` ${mqttResult.reason}` : ''}`
+              : mqttResult?.reason || '';
+      const releaseUploadDetail = `Firmware uploaded to cloud storage and queued for OTA deployment.${mqttDetail ? ` ${mqttDetail}` : ''} ${releaseSourceRestoreDetail}`;
       persistToolchainNotification({
         id: notificationId,
         kind: 'firmware-upload',
@@ -7661,27 +8066,82 @@ export function IDEWorkspace({
     localBoard?: LocalBoardRow | null;
     busyActionId?: string;
     closeModal?: boolean;
+    otaUpdateMode?: OtaUpdateMode;
   }) {
     const { board, localBoard = null, busyActionId = 'provision', closeModal = false } = options;
+    let runtimeBoard = board;
     let port = options.port;
     let profile = options.profile ?? null;
     let resolvedLocalBoard = localBoard;
+    const otaUpdateMode = normalizeOtaUpdateMode(options.otaUpdateMode ?? localBoard?.otaUpdateMode ?? runtimeBoard.otaUpdateMode, 'polling');
+    const includeMqtt = otaUpdateModeUsesMqtt(otaUpdateMode);
 
     if (!port && !localBoard) {
-      pushToast('Select a USB port before installing Tantalum Cloud.', 'info');
+      pushToast('Select a USB port before installing runtime firmware.', 'info');
       return null;
     }
 
     if (!hasDeviceGatewayFunction()) {
-      pushToast('Device gateway function configuration is required before installing Tantalum Cloud.', 'error');
+      pushToast('Device gateway function configuration is required before installing runtime firmware.', 'error');
       return null;
     }
 
-    const secretResult = await window.tantalum.secrets.getBoardSecrets(board.$id);
-    if (!secretResult.success || !secretResult.secrets?.apiToken || !secretResult.secrets?.commandSecret || !secretResult.secrets?.mqttTopic || !secretResult.secrets?.provisioningPop) {
-      pushToast('Local board secrets are missing. Rotate the board token, then install Tantalum Cloud again.', 'error');
+    if (includeMqtt && !hasMqttRuntimeConfig()) {
+      pushToast('MQTT runtime configuration is missing.', 'error', undefined, {
+        detail: 'Configure MQTT host, device credentials, and CA certificate before choosing MQTT or Both.',
+      });
       return null;
     }
+
+    const secretResult = await window.tantalum.secrets.getBoardSecrets(runtimeBoard.$id);
+    let runtimeSecrets = secretResult.success ? secretResult.secrets : null;
+    const localSecretsMissing = !runtimeSecrets?.apiToken || !runtimeSecrets.commandSecret || !runtimeSecrets.mqttTopic || !runtimeSecrets.provisioningPop;
+    const cloudCommandSecretMissing = includeMqtt && !boardHasCloudCommandSecret(runtimeBoard);
+    if (localSecretsMissing || cloudCommandSecretMissing) {
+      if (!hasBoardAdminFunction()) {
+        pushToast('Board admin function is required to refresh board credentials.', 'error');
+        return null;
+      }
+
+      try {
+        const rotated = await rotateBoardToken(runtimeBoard.$id);
+        if (!rotated.apiToken || !rotated.commandSecret || !rotated.mqttTopic || !rotated.provisioningPop) {
+          throw new Error('Board admin did not return complete board secrets.');
+        }
+        await window.tantalum.secrets.setBoardSecrets({
+          boardId: runtimeBoard.$id,
+          apiToken: rotated.apiToken,
+          commandSecret: rotated.commandSecret,
+          mqttTopic: rotated.mqttTopic,
+          provisioningPop: rotated.provisioningPop,
+        });
+        runtimeBoard = rotated.board;
+        runtimeSecrets = {
+          apiToken: rotated.apiToken,
+          commandSecret: rotated.commandSecret,
+          mqttTopic: rotated.mqttTopic,
+          provisioningPop: rotated.provisioningPop,
+        };
+        pushConsole(`Refreshed cloud credentials for ${runtimeBoard.name} before installing runtime firmware.`);
+      } catch (error) {
+        pushToast('Unable to refresh board credentials.', 'error', undefined, {
+          detail: error instanceof Error ? error.message : 'Rotate the board token, then install runtime firmware again.',
+        });
+        return null;
+      }
+    }
+
+    if (!runtimeSecrets?.apiToken || !runtimeSecrets.commandSecret || !runtimeSecrets.mqttTopic || !runtimeSecrets.provisioningPop) {
+      pushToast('Local board secrets are missing. Rotate the board token, then install runtime firmware again.', 'error');
+      return null;
+    }
+    const provisionSecrets: BoardSecret = {
+      apiToken: runtimeSecrets.apiToken,
+      commandSecret: runtimeSecrets.commandSecret,
+      mqttTopic: runtimeSecrets.mqttTopic,
+      provisioningPop: runtimeSecrets.provisioningPop,
+      updatedAt: runtimeSecrets.updatedAt,
+    };
 
     let notificationId: string | null = null;
     let toastId: number | null = null;
@@ -7706,23 +8166,23 @@ export function IDEWorkspace({
       const serialReady = await ensureUsbSerialPortReady({
         port,
         title: 'Serial port in use',
-        subtitle: `Stop serial connections on ${port} before installing Tantalum Cloud on ${board.name}.`,
+        subtitle: `Stop serial connections on ${port} before installing runtime firmware on ${runtimeBoard.name}.`,
         continueLabel: 'Continue install',
-        cancelMessage: 'Tantalum Cloud install cancelled.',
+        cancelMessage: 'Runtime firmware install cancelled.',
       });
       if (!serialReady) {
         return null;
       }
 
       notificationId = createToolchainTaskId('cloud-runtime-install');
-      notificationTitle = `Installing Tantalum Cloud on ${board.name}`;
+      notificationTitle = `Installing runtime firmware on ${runtimeBoard.name}`;
       notificationMetadata = {
-        boardId: board.$id,
-        boardType: board.boardType,
+        boardId: runtimeBoard.$id,
+        boardType: runtimeBoard.boardType,
         port,
       };
       const initialProgress = 5;
-      const initialDetail = `Uploading Tantalum Cloud runtime to ${board.name} on ${port}...`;
+      const initialDetail = `Uploading runtime firmware to ${runtimeBoard.name} on ${port}...`;
 
       setBusyAction(busyActionId);
       persistToolchainNotification({
@@ -7733,7 +8193,7 @@ export function IDEWorkspace({
         status: 'running',
         phase: 'install',
         progress: initialProgress,
-        name: board.name,
+        name: runtimeBoard.name,
         target: port,
         metadata: notificationMetadata,
       });
@@ -7752,29 +8212,30 @@ export function IDEWorkspace({
         lastProgress: initialProgress,
         notificationKind: 'cloud-runtime-install',
         notificationTitle,
-        notificationName: board.name,
+        notificationName: runtimeBoard.name,
         notificationTarget: port,
         notificationPhase: 'install',
         notificationMetadata,
         progressMode: 'cloud-runtime-install',
       };
-      pushConsole(`Installing Tantalum Cloud on ${board.name} through ${port}...`);
+      pushConsole(`Installing runtime firmware on ${runtimeBoard.name} through ${port}...`);
 
       let result = await window.tantalum.toolchain.provisionBoard({
-        board,
+        board: runtimeBoard,
         port,
         uploadId: notificationId,
-        secrets: secretResult.secrets,
+        secrets: provisionSecrets,
         appwriteConfig: {
           endpoint: appwriteConfig.endpoint,
           projectId: appwriteConfig.projectId,
           deviceGatewayFunctionId: appwriteConfig.deviceGatewayFunctionId,
           firmwareBucketId: appwriteConfig.firmwareBucketId,
-          mqttHost: appwriteConfig.mqttHost,
-          mqttPort: appwriteConfig.mqttPort,
-          mqttUsername: appwriteConfig.mqttUsername,
-          mqttPassword: appwriteConfig.mqttPassword,
-          mqttCaCert: appwriteConfig.mqttCaCert,
+          otaUpdateMode,
+          mqttHost: includeMqtt ? appwriteConfig.mqttHost : '',
+          mqttPort: includeMqtt ? appwriteConfig.mqttPort : '',
+          mqttUsername: includeMqtt ? appwriteConfig.mqttUsername : '',
+          mqttPassword: includeMqtt ? appwriteConfig.mqttPassword : '',
+          mqttCaCert: includeMqtt ? appwriteConfig.mqttCaCert : '',
           tlsCaCert: appwriteConfig.tlsCaCert,
         },
       });
@@ -7785,7 +8246,7 @@ export function IDEWorkspace({
           port = retryResolution.row.port;
           profile = retryResolution.savedProfile ?? retryResolution.row.profile ?? profile;
           resolvedLocalBoard = retryResolution.row;
-          const retryMessage = `USB port changed from ${retryResolution.previousPort} to ${port}; retrying Tantalum Cloud install.`;
+          const retryMessage = `USB port changed from ${retryResolution.previousPort} to ${port}; retrying runtime firmware install.`;
           pushConsole(retryMessage);
           notificationMetadata = {
             ...notificationMetadata,
@@ -7799,7 +8260,7 @@ export function IDEWorkspace({
             status: 'running',
             phase: 'install',
             progress: localBoardUploadProgressRef.current?.uploadId === notificationId ? localBoardUploadProgressRef.current.lastProgress : initialProgress,
-            name: board.name,
+            name: runtimeBoard.name,
             target: port,
             metadata: notificationMetadata,
           });
@@ -7819,20 +8280,21 @@ export function IDEWorkspace({
             };
           }
           result = await window.tantalum.toolchain.provisionBoard({
-            board,
+            board: runtimeBoard,
             port,
             uploadId: notificationId,
-            secrets: secretResult.secrets,
+            secrets: provisionSecrets,
             appwriteConfig: {
               endpoint: appwriteConfig.endpoint,
               projectId: appwriteConfig.projectId,
               deviceGatewayFunctionId: appwriteConfig.deviceGatewayFunctionId,
               firmwareBucketId: appwriteConfig.firmwareBucketId,
-              mqttHost: appwriteConfig.mqttHost,
-              mqttPort: appwriteConfig.mqttPort,
-              mqttUsername: appwriteConfig.mqttUsername,
-              mqttPassword: appwriteConfig.mqttPassword,
-              mqttCaCert: appwriteConfig.mqttCaCert,
+              otaUpdateMode,
+              mqttHost: includeMqtt ? appwriteConfig.mqttHost : '',
+              mqttPort: includeMqtt ? appwriteConfig.mqttPort : '',
+              mqttUsername: includeMqtt ? appwriteConfig.mqttUsername : '',
+              mqttPassword: includeMqtt ? appwriteConfig.mqttPassword : '',
+              mqttCaCert: includeMqtt ? appwriteConfig.mqttCaCert : '',
               tlsCaCert: appwriteConfig.tlsCaCert,
             },
           });
@@ -7847,18 +8309,19 @@ export function IDEWorkspace({
               onSelect: () => {
                 setSerialBlockerDialog({
                   port,
-                  title: 'Tantalum Cloud install blockers',
-                  subtitle: `Checking ${port} before retrying the runtime install.`,
+                  title: 'Runtime firmware install blockers',
+                  subtitle: `Checking ${port} before retrying the runtime firmware install.`,
                   retryLabel: 'Retry install',
                   onRetry: () => {
                     setSerialBlockerDialog(null);
                     void installTantalumCloudRuntime({
-                      board,
+                      board: runtimeBoard,
                       port,
                       profile,
                       localBoard: resolvedLocalBoard,
                       busyActionId,
                       closeModal,
+                      otaUpdateMode,
                     });
                   },
                 });
@@ -7870,19 +8333,19 @@ export function IDEWorkspace({
         persistToolchainNotification({
           id: notificationId,
           kind: 'cloud-runtime-install',
-          title: 'Tantalum Cloud install failed',
+          title: 'Runtime firmware install failed',
           detail: result.error,
           status: 'error',
           phase: 'error',
           progress: failedProgress,
-          name: board.name,
+          name: runtimeBoard.name,
           target: port,
           metadata: notificationMetadata,
         });
         if (toastId !== null) {
           if (blockerActions) {
             updateToast(toastId, {
-              message: 'Tantalum Cloud install failed',
+              message: 'Runtime firmware install failed',
               detail: result.error,
               tone: 'error',
               progress: failedProgress,
@@ -7892,7 +8355,7 @@ export function IDEWorkspace({
             });
           } else {
             finishToast(toastId, {
-              message: 'Tantalum Cloud install failed',
+              message: 'Runtime firmware install failed',
               detail: result.error,
               tone: 'error',
               progress: failedProgress,
@@ -7900,15 +8363,16 @@ export function IDEWorkspace({
             });
           }
         } else {
-          pushToast('Tantalum Cloud install failed.', 'error', undefined, { detail: result.error });
+          pushToast('Runtime firmware install failed.', 'error', undefined, { detail: result.error });
         }
         return null;
       }
 
       const provisionedAt = new Date().toISOString();
-      await updateBoard(board.$id, {
+      await updateBoard(runtimeBoard.$id, {
         status: 'pending',
         provisioningStatus: 'pending',
+        otaUpdateMode,
         lastProvisionedAt: provisionedAt,
         updatedAt: provisionedAt,
       });
@@ -7916,6 +8380,7 @@ export function IDEWorkspace({
         const saveResult = await window.tantalum.toolchain.saveLocalBoardProfile({
           ...profile,
           port,
+          otaUpdateMode,
           lastCloudProvisionedAt: provisionedAt,
         });
         if (!saveResult.success) {
@@ -7931,48 +8396,48 @@ export function IDEWorkspace({
       persistToolchainNotification({
         id: notificationId,
         kind: 'cloud-runtime-install',
-        title: `Tantalum Cloud installed on ${board.name}`,
-        detail: result.message || 'Tantalum Cloud install complete.',
+        title: `Runtime firmware installed on ${runtimeBoard.name}`,
+        detail: result.message || 'Runtime firmware install complete.',
         status: 'success',
         phase: 'complete',
         progress: 100,
-        name: board.name,
+        name: runtimeBoard.name,
         target: port,
         metadata: notificationMetadata,
       });
       if (toastId !== null) {
         finishToast(toastId, {
-          message: `Tantalum Cloud installed on ${board.name}`,
-          detail: result.message || 'Tantalum Cloud install complete.',
+          message: `Runtime firmware installed on ${runtimeBoard.name}`,
+          detail: result.message || 'Runtime firmware install complete.',
           tone: 'success',
           progress: 100,
           progressLabel: '100%',
         });
       } else {
-        pushToast(`Tantalum Cloud installed on ${board.name}.`, 'success');
+        pushToast(`Runtime firmware installed on ${runtimeBoard.name}.`, 'success');
       }
-      pushConsole(result.message || 'Tantalum Cloud install complete.', 'success');
+      pushConsole(result.message || 'Runtime firmware install complete.', 'success');
       return { provisionedAt };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Tantalum Cloud install failed.';
+      const message = error instanceof Error ? error.message : 'Runtime firmware install failed.';
       pushConsole(message, 'error');
       if (notificationId) {
         const failedProgress = localBoardUploadProgressRef.current?.uploadId === notificationId ? localBoardUploadProgressRef.current.lastProgress : null;
         persistToolchainNotification({
           id: notificationId,
           kind: 'cloud-runtime-install',
-          title: 'Tantalum Cloud install failed',
+          title: 'Runtime firmware install failed',
           detail: message,
           status: 'error',
           phase: 'error',
           progress: failedProgress,
-          name: board.name,
+          name: runtimeBoard.name,
           target: port,
           metadata: notificationMetadata,
         });
         if (toastId !== null) {
           finishToast(toastId, {
-            message: 'Tantalum Cloud install failed',
+            message: 'Runtime firmware install failed',
             detail: message,
             tone: 'error',
             progress: failedProgress,
@@ -8010,8 +8475,8 @@ export function IDEWorkspace({
     const action = row?.lastCloudProvisionedAt ? 'Reinstalling' : 'Installing';
     const target = row ? `${localBoardDisplayName(row)} linked to ${board.name}` : board.name;
     return confirm({
-      title: `${action} Tantalum Cloud`,
-      message: `${action} Tantalum Cloud on ${target} will flash the runtime and replace the sketch currently on the board.`,
+      title: `${action} runtime firmware`,
+      message: `${action} runtime firmware on ${target} will flash the runtime and replace the sketch currently on the board.`,
       tone: 'warning',
       confirmLabel: 'Continue',
     });
@@ -8024,7 +8489,7 @@ export function IDEWorkspace({
     }
 
     if (!(await confirmTantalumCloudRuntimeFlash(selectedBoard, selectedBoardLinkedLocalRow))) {
-      pushToast('Tantalum Cloud install cancelled.', 'info');
+      pushToast('Runtime firmware install cancelled.', 'info');
       return;
     }
 
@@ -8035,6 +8500,7 @@ export function IDEWorkspace({
       localBoard: selectedBoardLinkedLocalRow,
       busyActionId: 'provision',
       closeModal: true,
+      otaUpdateMode: selectedCloudBoardOtaMode(selectedBoard),
     });
   }
 
@@ -8059,7 +8525,7 @@ export function IDEWorkspace({
       await refreshBoardsList();
       setSelectedBoardId(created.board.$id);
       setBoardModalOpen(false);
-      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32', sourceCodeVisibility: 'private' });
+      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32', sourceCodeVisibility: 'private', otaUpdateMode: defaultOtaUpdateMode() });
       pushToast(`Added ${created.board.name}`, 'success');
       pushConsole(`Board ${created.board.name} created. Provisioning secrets stored locally on this machine.`, 'success');
     } catch (error) {
@@ -8090,9 +8556,14 @@ export function IDEWorkspace({
       return;
     }
 
-    if (row.cloudBoardId) {
-      setSelectedBoardId(row.cloudBoardId);
+    const existingCloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    if (existingCloudLink.valid) {
+      setSelectedBoardId(existingCloudLink.cloudBoardId);
       pushToast(`${localBoardDisplayName(row)} is already linked to a cloud board.`, 'info');
+      return;
+    }
+    if (existingCloudLink.status === 'unresolved') {
+      pushToast('Cloud boards are still loading. Try again after refresh completes.', 'info');
       return;
     }
 
@@ -8107,10 +8578,19 @@ export function IDEWorkspace({
         return;
       }
 
+      const otaUpdateMode = normalizeOtaUpdateMode(localBoardEdits[row.key]?.otaUpdateMode ?? liveRow.otaUpdateMode, defaultOtaUpdateMode());
+      if (otaUpdateModeUsesMqtt(otaUpdateMode) && !hasMqttRuntimeConfig()) {
+        pushToast('MQTT runtime configuration is missing.', 'error', undefined, {
+          detail: 'Choose Polling or configure MQTT before enabling cloud.',
+        });
+        return;
+      }
+
       const created = await createBoard({
         name: localBoardDisplayName(liveRow),
         boardType: liveRow.fqbn,
         sourceCodeVisibility: liveRow.sourceCodeVisibility === 'public' ? 'public' : 'private',
+        otaUpdateMode,
       }, user);
       if ((created.board.sourceCodeVisibility || 'private') !== (liveRow.sourceCodeVisibility || 'private')) {
         created.board = await updateBoard(created.board.$id, {
@@ -8149,16 +8629,19 @@ export function IDEWorkspace({
         fingerprint: liveRow.fingerprint,
         cloudBoardId: created.board.$id,
         cloudLinkedAt: now,
+        lastCloudProvisionedAt: '',
+        lastCloudUsbUploadAt: '',
+        otaUpdateMode,
         sourceCodeVisibility: liveRow.sourceCodeVisibility || 'private',
       });
       if (!saveResult.success) {
         throw new Error(saveResult.error);
       }
 
-      await refreshBoardsList();
+      await refreshBoardsList({ bypassCache: true });
       await refreshLocalBoardProfiles();
       setSelectedBoardId(created.board.$id);
-      pushConsole('Cloud board created. Provisioning secrets were stored locally; WiFi credentials were not collected or uploaded. Installing Tantalum Cloud runtime now.', 'success');
+      pushConsole('Cloud board created. Provisioning secrets were stored locally; WiFi credentials were not collected or uploaded. Installing runtime firmware now.', 'success');
       const installResult = await installTantalumCloudRuntime({
         board: created.board,
         port: liveRow.port,
@@ -8171,9 +8654,10 @@ export function IDEWorkspace({
           cloudLinkedAt: saveResult.profile.cloudLinkedAt,
         },
         busyActionId: `install-cloud-runtime:${row.key}`,
+        otaUpdateMode,
       });
       if (!installResult) {
-        pushToast('Cloud board linked. Tantalum Cloud install is still needed.', 'info');
+        pushToast('Cloud board linked. Runtime firmware install is still needed.', 'info');
       }
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to enable Tantalum Cloud for this board.', 'error');
@@ -8193,6 +8677,13 @@ export function IDEWorkspace({
       return null;
     }
 
+    if (normalizeCloudLinkFqbn(row.fqbn) !== normalizeCloudLinkFqbn(board.boardType)) {
+      pushToast('Board type mismatch.', 'error', undefined, {
+        detail: `${localBoardDisplayName(row)} is ${row.fqbn || 'unknown board type'}, but ${board.name} is ${board.boardType || 'unknown board type'}.`,
+      });
+      return null;
+    }
+
     if (row.cloudBoardId && row.cloudBoardId !== board.$id) {
       const existingBoard = boards.find((entry) => entry.$id === row.cloudBoardId);
       const confirmed = await confirm({
@@ -8207,6 +8698,7 @@ export function IDEWorkspace({
 
     setBusyAction(`link-cloud-board:${row.key}`);
     try {
+      const cloudBoardChanged = row.cloudBoardId !== board.$id;
       const result = await window.tantalum.toolchain.saveLocalBoardProfile({
         ...row.profile,
         name: row.name || row.profile?.name,
@@ -8224,6 +8716,8 @@ export function IDEWorkspace({
         fingerprint: row.fingerprint,
         cloudBoardId: board.$id,
         cloudLinkedAt: new Date().toISOString(),
+        lastCloudProvisionedAt: cloudBoardChanged ? '' : row.lastCloudProvisionedAt || row.profile.lastCloudProvisionedAt || '',
+        lastCloudUsbUploadAt: cloudBoardChanged ? '' : row.lastCloudUsbUploadAt || row.profile.lastCloudUsbUploadAt || '',
       });
 
       if (!result.success) {
@@ -8235,12 +8729,71 @@ export function IDEWorkspace({
       setSelectedBoardId(board.$id);
       if (!options.quiet) {
         pushToast(`${board.name} linked to ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}.`, 'success', undefined, {
-          detail: 'Linked. Install Tantalum Cloud only when you want to flash the runtime.',
+          detail: 'Linked. Install runtime firmware only when you want to flash the runtime.',
         });
       }
       return result.profile;
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to link local board.', 'error');
+      return null;
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function unlinkLocalBoardFromCloud(row: LocalBoardRow, options: { quiet?: boolean } = {}) {
+    if (!row.profileId || !row.profile || !row.cloudBoardId) {
+      return null;
+    }
+
+    const linkedBoard = boards.find((entry) => entry.$id === row.cloudBoardId) ?? null;
+    if (!options.quiet) {
+      const confirmed = await confirm({
+        title: 'Remove local link?',
+        message: `Remove the link between ${localBoardDisplayName(row)} and ${linkedBoard?.name || 'the cloud board'}?`,
+        tone: 'warning',
+        confirmLabel: 'Remove link',
+      });
+      if (!confirmed) {
+        return null;
+      }
+    }
+
+    setBusyAction(`unlink-cloud-board:${row.key}`);
+    try {
+      const result = await window.tantalum.toolchain.saveLocalBoardProfile({
+        ...row.profile,
+        name: row.name || row.profile?.name,
+        fqbn: row.fqbn,
+        boardLabel: row.boardLabel,
+        port: row.port,
+        protocol: row.protocol,
+        protocolLabel: row.protocolLabel,
+        manufacturer: row.manufacturer,
+        vendorId: row.vendorId,
+        productId: row.productId,
+        serialNumber: row.serialNumber,
+        pnpId: row.pnpId,
+        locationId: row.locationId,
+        fingerprint: row.fingerprint,
+        cloudBoardId: '',
+        cloudLinkedAt: '',
+        lastCloudProvisionedAt: '',
+        lastCloudUsbUploadAt: '',
+      });
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      await refreshLocalBoardProfiles();
+      setSelectedLinkLocalProfileId('');
+      if (!options.quiet) {
+        pushToast('Local board link removed.', 'success');
+      }
+      return result.profile;
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : 'Unable to remove local board link.', 'error');
       return null;
     } finally {
       setBusyAction(null);
@@ -8259,6 +8812,14 @@ export function IDEWorkspace({
     }
 
     await linkLocalBoardToCloud(row, selectedBoard);
+  }
+
+  async function handleUnlinkSelectedCloudBoardFromLocal() {
+    if (!selectedBoardLinkedLocalRow) {
+      return;
+    }
+
+    await unlinkLocalBoardFromCloud(selectedBoardLinkedLocalRow);
   }
 
   const processPendingSelectedLocalCloudLink = useEffectEvent(async (request: { profileId: string; boardId: string }) => {
@@ -8288,13 +8849,14 @@ export function IDEWorkspace({
   }, [pendingSelectedLocalCloudLink]);
 
   async function openUsbWifiProvisioning(row: LocalBoardRow) {
-    if (!row.profileId || !row.cloudBoardId) {
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    if (!row.profileId || !cloudLink.valid) {
       pushToast('Link this local board to a cloud board before USB WiFi provisioning.', 'info');
       return;
     }
 
     if (!row.lastCloudProvisionedAt) {
-      pushToast('Install Tantalum Cloud before sending WiFi credentials over USB.', 'info');
+      pushToast('Install runtime firmware before sending WiFi credentials over USB.', 'info');
       return;
     }
 
@@ -8325,22 +8887,29 @@ export function IDEWorkspace({
   }
 
   async function handleInstallTantalumCloudForLocalBoard(row: LocalBoardRow, board: BoardDocument | null) {
-    if (!row.profileId || !row.profile || !board) {
-      pushToast('Link this local board to a cloud board before installing Tantalum Cloud.', 'info');
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    const targetBoard = board && cloudLink.valid && cloudLink.cloudBoardId === board.$id ? cloudLink.board : null;
+    if (!row.profileId || !row.profile || !targetBoard) {
+      pushToast('Link this local board to a cloud board before installing runtime firmware.', 'info');
       return;
     }
 
-    if (!(await confirmTantalumCloudRuntimeFlash(board, row))) {
-      pushToast('Tantalum Cloud install cancelled.', 'info');
+    if (!(await confirmTantalumCloudRuntimeFlash(targetBoard, row))) {
+      pushToast('Runtime firmware install cancelled.', 'info');
       return;
     }
 
+    const otaUpdateMode = normalizeOtaUpdateMode(
+      localBoardEdits[row.key]?.otaUpdateMode ?? cloudBoardOtaModeEdits[targetBoard.$id] ?? targetBoard.otaUpdateMode,
+      boardOtaUpdateMode(targetBoard),
+    );
     await installTantalumCloudRuntime({
-      board,
+      board: targetBoard,
       port: row.port,
       profile: row.profile,
       localBoard: row,
       busyActionId: `install-cloud-runtime:${row.key}`,
+      otaUpdateMode,
     });
   }
 
@@ -8348,7 +8917,7 @@ export function IDEWorkspace({
     const board = boards.find((entry) => entry.$id === request.boardId) ?? null;
     const row = localBoardRows.find((entry) => entry.profileId === request.profileId) ?? null;
     if (!board || !row) {
-      pushToast('Link and connect the matching local board before installing Tantalum Cloud.', 'info');
+      pushToast('Link and connect the matching local board before installing runtime firmware.', 'info');
       return;
     }
 
@@ -8368,7 +8937,10 @@ export function IDEWorkspace({
   async function handleProvisionWifiOverUsb(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!usbWifiTargetRow?.cloudBoardId || (!usbWifiTargetRow.port && !usbWifiTargetRow.fingerprint)) {
+    const usbWifiCloudLink = usbWifiTargetRow
+      ? resolveLocalBoardCloudLink(usbWifiTargetRow, boards, { boardsResolved: cloudBoardLinksResolved })
+      : null;
+    if (!usbWifiTargetRow || !usbWifiCloudLink?.valid || (!usbWifiTargetRow.port && !usbWifiTargetRow.fingerprint)) {
       pushToast('Choose a linked USB board before provisioning WiFi.', 'info');
       return;
     }
@@ -8399,7 +8971,7 @@ export function IDEWorkspace({
         return;
       }
 
-      const targetCloudBoardId = usbWifiTargetRow.cloudBoardId;
+      const targetCloudBoardId = usbWifiCloudLink.cloudBoardId;
       pushConsole('Sending WiFi credentials over USB.', 'info');
       const result = await window.tantalum.toolchain.provisionBoardWifiUsb({
         boardId: targetCloudBoardId,
@@ -8445,6 +9017,49 @@ export function IDEWorkspace({
         ...patch,
       },
     }));
+  }
+
+  function selectedCloudBoardOtaMode(board: BoardDocument) {
+    return cloudBoardOtaModeEdits[board.$id] ?? boardOtaUpdateMode(board);
+  }
+
+  function updateCloudBoardOtaMode(boardId: string, mode: OtaUpdateMode) {
+    setCloudBoardOtaModeEdits((current) => ({
+      ...current,
+      [boardId]: mode,
+    }));
+  }
+
+  function renderOtaUpdateModeControl(options: {
+    value: OtaUpdateMode;
+    onChange: (mode: OtaUpdateMode) => void;
+    disabled?: boolean;
+  }) {
+    const mqttReady = hasMqttRuntimeConfig();
+    return (
+      <div className="boards-hub-field boards-hub-field-span-2">
+        <span>Update method</span>
+        <div className="segmented-control boards-hub-ota-mode" role="group" aria-label="OTA update method">
+          {OTA_UPDATE_MODE_OPTIONS.map((option) => {
+            const requiresMqtt = otaUpdateModeUsesMqtt(option.value);
+            const disabled = Boolean(options.disabled || (requiresMqtt && !mqttReady));
+            return (
+              <button
+                key={option.value}
+                className={options.value === option.value ? 'active' : ''}
+                type="button"
+                onClick={() => options.onChange(option.value)}
+                disabled={disabled}
+                title={requiresMqtt && !mqttReady ? 'Configure MQTT host, device credentials, and CA certificate first.' : undefined}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        {!mqttReady ? <small className="boards-hub-help">MQTT options need broker settings.</small> : null}
+      </div>
+    );
   }
 
   function handleAddManualLocalBoard() {
@@ -8493,6 +9108,8 @@ export function IDEWorkspace({
 
     setBusyAction(`save-local-board:${row.key}`);
     try {
+      const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+      const keepCloudLink = cloudLink.valid || cloudLink.status === 'unresolved';
       const result = await window.tantalum.toolchain.saveLocalBoardProfile({
         id: row.profileId,
         name,
@@ -8510,10 +9127,10 @@ export function IDEWorkspace({
         fingerprint: row.fingerprint,
         confidence: row.confidence,
         connected: row.connected,
-        cloudBoardId: row.cloudBoardId,
-        cloudLinkedAt: row.cloudLinkedAt,
-        lastCloudProvisionedAt: row.lastCloudProvisionedAt,
-        lastCloudUsbUploadAt: row.lastCloudUsbUploadAt,
+        cloudBoardId: keepCloudLink ? row.cloudBoardId : '',
+        cloudLinkedAt: keepCloudLink ? row.cloudLinkedAt : '',
+        lastCloudProvisionedAt: keepCloudLink ? row.lastCloudProvisionedAt : '',
+        lastCloudUsbUploadAt: keepCloudLink ? row.lastCloudUsbUploadAt : '',
       });
 
       if (!result.success) {
@@ -8601,7 +9218,7 @@ export function IDEWorkspace({
     if (!(await confirm({
       title: 'Rotate credentials',
       message: `Rotate credentials for ${selectedBoard.name}?`,
-      detail: 'This invalidates the current API token and related secrets. Install Tantalum Cloud runtime again over USB before the board can reconnect.',
+      detail: 'This invalidates the current API token and related secrets. Install runtime firmware again over USB before the board can reconnect.',
       tone: 'warning',
       confirmLabel: 'Rotate',
     }))) {
@@ -8685,10 +9302,20 @@ export function IDEWorkspace({
     }
 
     try {
-      await markFirmwareAsCurrent(selectedBoard, firmware);
+      const result = await markFirmwareAsCurrent(selectedBoard, firmware);
       await refreshBoardsList();
       await refreshFirmware(selectedBoard);
-      pushToast(`Deployment requested for ${firmware.version}`, 'success');
+      const mqttStatus = result?.mqtt?.status;
+      const detail = mqttStatus === 'published'
+        ? 'MQTT update trigger sent.'
+        : mqttStatus === 'skipped-polling-only'
+          ? 'Board will pick it up by polling.'
+          : mqttStatus === 'mqtt-failed-with-polling-fallback'
+            ? `MQTT trigger failed; polling fallback remains active.${result?.mqtt?.reason ? ` ${result.mqtt.reason}` : ''}`
+            : mqttStatus === 'mqtt-failed-no-fallback'
+              ? `MQTT trigger failed and this board is MQTT-only.${result?.mqtt?.reason ? ` ${result.mqtt.reason}` : ''}`
+          : result?.mqtt?.reason;
+      pushToast(`Deployment requested for ${firmware.version}`, 'success', undefined, detail ? { detail } : undefined);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to deploy firmware.', 'error');
     }
@@ -9829,7 +10456,7 @@ export function IDEWorkspace({
       task.lineBuffer = '';
     }
 
-    const detail = event.message || lines.at(-1) || (task.progressMode === 'cloud-runtime-install' ? 'Installing Tantalum Cloud runtime...' : 'Uploading over USB...');
+    const detail = event.message || lines.at(-1) || (task.progressMode === 'cloud-runtime-install' ? 'Installing runtime firmware...' : 'Uploading over USB...');
     task.lastProgress = getUsbUploadTaskProgress(task, event);
     persistToolchainNotification({
       id: task.notificationId,
@@ -9975,6 +10602,7 @@ export function IDEWorkspace({
     void refreshDefaultLibraries();
     void refreshDefaultPlatforms();
     void refreshProjectFolders();
+    void refreshCloudSyncProjects();
   });
 
   const refreshLocalBoardsSilently = useEffectEvent(() => {
@@ -9983,6 +10611,48 @@ export function IDEWorkspace({
 
   const refreshRemoteBoardsSilently = useEffectEvent(() => {
     void refreshBoardsList({ silent: true });
+  });
+
+  const clearInvalidLocalCloudLinks = useEffectEvent(async () => {
+    if (!cloudBoardLinksResolved || invalidCloudLinkRepairRef.current) {
+      return;
+    }
+
+    const invalidProfiles = localBoardProfiles.filter((profile) => {
+      return resolveLocalBoardCloudLink(profile, boards, { boardsResolved: true }).invalid;
+    });
+    if (invalidProfiles.length === 0) {
+      return;
+    }
+
+    invalidCloudLinkRepairRef.current = true;
+    const repairedProfiles = new Map<string, LocalBoardProfile>();
+    try {
+      for (const profile of invalidProfiles) {
+        const result = await window.tantalum.toolchain.saveLocalBoardProfile({
+          ...profile,
+          cloudBoardId: '',
+          cloudLinkedAt: '',
+          lastCloudProvisionedAt: '',
+          lastCloudUsbUploadAt: '',
+          otaUpdateMode: profile.otaUpdateMode || defaultOtaUpdateMode(),
+        });
+        if (result.success) {
+          repairedProfiles.set(result.profile.id, result.profile);
+        } else {
+          pushConsole(result.error || `Unable to clear stale cloud link from ${profile.name || profile.boardLabel || profile.fqbn}.`, 'error');
+        }
+      }
+
+      if (repairedProfiles.size > 0) {
+        setLocalBoardProfiles((current) => current.map((profile) => repairedProfiles.get(profile.id) ?? profile));
+        pushToast('Cleared stale cloud board link.', 'info', undefined, {
+          detail: 'The saved local board no longer points at an unrelated cloud board.',
+        });
+      }
+    } finally {
+      invalidCloudLinkRepairRef.current = false;
+    }
   });
 
   function handleTreeDeleted(targetPath: string, type: FileTreeItemType, skipBroadcast?: boolean) {
@@ -10073,6 +10743,7 @@ export function IDEWorkspace({
     closeTabsForPath(targetPath, type);
     refreshProjectTree();
     refreshGitIfPathIsInActiveWorkspace(targetPath);
+    scheduleCloudSyncForWorkspace(selectedProject?.path, 'auto');
     void refreshProjectFolders(selectedProjectId);
     pushToast(`Removed ${fileNameFromPath(targetPath)}`, 'info');
   }
@@ -10081,6 +10752,7 @@ export function IDEWorkspace({
     remapOpenTabs(oldPath, newPath);
     refreshProjectTree();
     refreshGitIfPathIsInActiveWorkspace(newPath);
+    scheduleCloudSyncForWorkspace(selectedProject?.path, 'auto');
     void refreshProjectFolders(selectedProjectId);
   }
 
@@ -10099,12 +10771,14 @@ export function IDEWorkspace({
 
     refreshProjectTree();
     refreshGitIfPathIsInActiveWorkspace(createdPath);
+    scheduleCloudSyncForWorkspace(selectedProject?.path, 'auto');
     void refreshProjectFolders(selectedProjectId);
   }
 
   function handleProjectTreeFolderCreated(path: string) {
     refreshProjectTree();
     refreshGitIfPathIsInActiveWorkspace(path);
+    scheduleCloudSyncForWorkspace(selectedProject?.path, 'auto');
     void refreshProjectFolders(selectedProjectId);
   }
 
@@ -10115,6 +10789,7 @@ export function IDEWorkspace({
 
     refreshProjectTree();
     refreshGitIfPathIsInActiveWorkspace(newPath);
+    scheduleCloudSyncForWorkspace(selectedProject?.path, 'auto');
     void refreshProjectFolders(selectedProjectId);
   }
 
@@ -10122,6 +10797,7 @@ export function IDEWorkspace({
     refreshProjectTree();
     if (selectedProject) {
       refreshGitIfPathIsInActiveWorkspace(selectedProject.path);
+      scheduleCloudSyncForWorkspace(selectedProject.path, 'auto');
     }
     void refreshProjectFolders(selectedProjectId);
   }
@@ -10685,7 +11361,7 @@ export function IDEWorkspace({
   const isTerminalWorkspaceActive = sidebar === 'terminal';
   const renderLegacyLeftTools = false;
   const isConsoleVisible = bottomPanelOpen && !isTerminalWorkspaceActive;
-  const consoleViewLabel = consoleView === 'serial' ? 'Serial Monitor' : 'Output';
+  const consoleViewLabel = consoleView === 'serial' ? 'Serial Monitor' : consoleView === 'terminal' ? 'Terminal' : 'Output';
   const leftPanelMax = getPanelMaxSize('left', panelSizes);
   const rightPanelMax = getPanelMaxSize('right', panelSizes);
   const bottomPanelMax = getPanelMaxSize('bottom', panelSizes);
@@ -10696,6 +11372,37 @@ export function IDEWorkspace({
   const consoleShellStyle = {
     '--console-height': `${panelSizes.bottom}px`,
   } as CSSProperties;
+
+  function getResizeTarget(panel: ResizablePanel) {
+    return panel === 'bottom' ? consoleShellRef.current : workspaceShellRef.current;
+  }
+
+  function writePanelSizeToDom(panel: ResizablePanel, size: number) {
+    const target = getResizeTarget(panel);
+    if (!target) {
+      return;
+    }
+
+    const property = panel === 'bottom' ? '--console-height' : panel === 'left' ? '--left-panel-width' : '--right-panel-width';
+    target.style.setProperty(property, `${size}px`);
+  }
+
+  function clampPanelResizeSize(panel: ResizablePanel, value: number) {
+    return normalizePanelSizes({ ...panelSizesRef.current, [panel]: value })[panel];
+  }
+
+  function schedulePanelSizeWrite(activeResize: ResizeSession, size: number) {
+    activeResize.latestSize = size;
+
+    if (activeResize.frameId !== null) {
+      return;
+    }
+
+    activeResize.frameId = window.requestAnimationFrame(() => {
+      activeResize.frameId = null;
+      writePanelSizeToDom(activeResize.panel, activeResize.latestSize);
+    });
+  }
 
   const handleResizeMove = useEffectEvent((event: PointerEvent) => {
     const activeResize = resizeSessionRef.current;
@@ -10712,7 +11419,7 @@ export function IDEWorkspace({
           ? activeResize.startX - event.clientX
           : activeResize.startY - event.clientY;
 
-    setSinglePanelSize(activeResize.panel, activeResize.startSize + delta);
+    schedulePanelSizeWrite(activeResize, clampPanelResizeSize(activeResize.panel, activeResize.startSize + delta));
   });
 
   const stopResizing = useEffectEvent((event?: Event) => {
@@ -10725,7 +11432,21 @@ export function IDEWorkspace({
       return;
     }
 
+    if (activeResize.frameId !== null) {
+      window.cancelAnimationFrame(activeResize.frameId);
+    }
+    writePanelSizeToDom(activeResize.panel, activeResize.latestSize);
+
+    try {
+      if (activeResize.capturedElement?.hasPointerCapture(activeResize.pointerId)) {
+        activeResize.capturedElement.releasePointerCapture(activeResize.pointerId);
+      }
+    } catch {
+      // The pointer may already be released by the time the global handler runs.
+    }
+
     resizeSessionRef.current = null;
+    setSinglePanelSize(activeResize.panel, activeResize.latestSize);
     setActiveResizePanel(null);
     document.body.classList.remove('panel-resizing', 'panel-resizing-row', 'panel-resizing-column');
   });
@@ -10814,6 +11535,7 @@ export function IDEWorkspace({
       }
 
       void refreshGitChangeIndicator();
+      scheduleCloudSyncForWorkspace(workspacePath, 'auto');
     } finally {
       saveInProgressRef.current = false;
     }
@@ -11044,6 +11766,18 @@ export function IDEWorkspace({
   }, [localBoardRows, selectedLocalBoardId]);
 
   useEffect(() => {
+    if (!cloudBoardLinksResolved || localBoardProfiles.length === 0) {
+      return;
+    }
+
+    if (!localBoardProfiles.some((profile) => resolveLocalBoardCloudLink(profile, boards, { boardsResolved: true }).invalid)) {
+      return;
+    }
+
+    void clearInvalidLocalCloudLinks();
+  }, [boards, cloudBoardLinksResolved, localBoardProfiles]);
+
+  useEffect(() => {
     if (!active || (sidebar !== 'boards' && !hasConfiguredLocalBoard)) {
       return;
     }
@@ -11150,6 +11884,21 @@ export function IDEWorkspace({
   }, []);
 
   useEffect(() => {
+    const handleOnline = () => {
+      for (const project of cloudSyncProjects) {
+        if (!project.paused && !['syncing', 'conflict', 'error'].includes(String(project.syncStatus || ''))) {
+          void syncCloudProject(project, 'reconnect');
+        }
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [cloudSyncProjects]);
+
+  useEffect(() => {
     window.addEventListener('keydown', handleEditorSaveShortcut, true);
     return () => {
       window.removeEventListener('keydown', handleEditorSaveShortcut, true);
@@ -11172,6 +11921,18 @@ export function IDEWorkspace({
     window.addEventListener('blur', stopResizing);
 
     return () => {
+      const activeResize = resizeSessionRef.current;
+      if (activeResize?.frameId !== null && activeResize?.frameId !== undefined) {
+        window.cancelAnimationFrame(activeResize.frameId);
+      }
+      try {
+        if (activeResize?.capturedElement?.hasPointerCapture(activeResize.pointerId)) {
+          activeResize.capturedElement.releasePointerCapture(activeResize.pointerId);
+        }
+      } catch {
+        // The pointer may already be released during teardown.
+      }
+      resizeSessionRef.current = null;
       window.removeEventListener('pointermove', handleResizeMove);
       window.removeEventListener('pointerup', stopResizing);
       window.removeEventListener('pointercancel', stopResizing);
@@ -11381,13 +12142,21 @@ export function IDEWorkspace({
         label: `${localBoardDisplayName(row)}${row.port ? ` (${row.port})` : ''}`,
       })),
     ];
-    const needsRuntimeInstall = liveStatus === 'pending' || !selectedBoard.lastSeen || !selectedBoard.runtimeVersion;
+    const selectedLinkLocalAlreadyLinked = Boolean(selectedBoardLinkedLocalRow?.profileId && selectedLinkLocalProfileId === selectedBoardLinkedLocalRow.profileId);
+    const linkLocalBusy = Boolean(busyAction?.startsWith('link-cloud-board'));
+    const unlinkLocalBusy = Boolean(busyAction?.startsWith('unlink-cloud-board'));
+    const hasRuntimeInstallRecord = Boolean(selectedBoard.runtimeVersion || selectedBoard.lastProvisionedAt || selectedBoardLinkedLocalRow?.lastCloudProvisionedAt);
+    const needsRuntimeInstall = !hasRuntimeInstallRecord || !boardHasCloudCommandSecret(selectedBoard);
     const canOpenRemoteWifiSetup = liveStatus === 'online';
     const canInstallFromLinkedLocal = Boolean(selectedBoardLinkedLocalRow?.profile && (selectedBoardLinkedLocalRow.port || selectedBoardLinkedLocalRow.fingerprint));
     const linkedLocalInstallBusy = selectedBoardLinkedLocalRow ? busyAction === `install-cloud-runtime:${selectedBoardLinkedLocalRow.key}` : false;
+    const selectedOtaUpdateMode = selectedCloudBoardOtaMode(selectedBoard);
+    const persistedOtaUpdateMode = boardOtaUpdateMode(selectedBoard);
+    const otaUpdateModePending = selectedOtaUpdateMode !== persistedOtaUpdateMode;
     const cloudInspectorMeta = [
       selectedBoardLinkedLocalRow ? 'Local linked' : 'No local link',
       selectedBoard.sourceCodeVisibility === 'public' ? 'Public code' : 'Private code',
+      formatOtaUpdateMode(persistedOtaUpdateMode),
       needsRuntimeInstall ? 'Install needed' : null,
     ].filter(Boolean);
 
@@ -11413,16 +12182,26 @@ export function IDEWorkspace({
 
         <div className="boards-inspector-body">
           {selectedBoard.lastOtaError ? <div className="boards-hub-note boards-hub-note-warning">{selectedBoard.lastOtaError}</div> : null}
-          {needsRuntimeInstall ? <div className="boards-hub-note boards-hub-note-warning">Install Tantalum Cloud from a linked local board over USB.</div> : null}
+          {needsRuntimeInstall ? <div className="boards-hub-note boards-hub-note-warning">Install runtime firmware from a linked local board over USB.</div> : null}
           {!hasDeviceGatewayFunction() ? <div className="boards-hub-note boards-hub-note-warning">Device gateway env var is missing for OTA installs.</div> : null}
           {selectedBoardLinkedLocalRow && !canInstallFromLinkedLocal ? (
             <div className="boards-hub-note boards-hub-note-warning">Connect {localBoardDisplayName(selectedBoardLinkedLocalRow)} over USB before installing.</div>
           ) : null}
-          {!selectedBoardLinkedLocalRow ? <div className="boards-hub-note">Link a local board to enable cloud runtime install.</div> : null}
+          {!selectedBoardLinkedLocalRow ? <div className="boards-hub-note">Link a local board to enable runtime firmware install.</div> : null}
           {!canOpenRemoteWifiSetup ? <div className="boards-hub-note">Board is offline. Use USB WiFi setup from a linked local board.</div> : null}
 
           <section className="boards-inspector-block">
             <h4 className="boards-inspector-block-title">Actions</h4>
+            <div className="boards-inspector-fields">
+              {renderOtaUpdateModeControl({
+                value: selectedOtaUpdateMode,
+                onChange: (mode) => updateCloudBoardOtaMode(selectedBoard.$id, mode),
+                disabled: linkedLocalInstallBusy,
+              })}
+            </div>
+            {otaUpdateModePending ? (
+              <div className="boards-hub-note">Reinstall runtime firmware to apply {formatOtaUpdateMode(selectedOtaUpdateMode)} updates on the board.</div>
+            ) : null}
             <div className="boards-inspector-action-stack">
               <button
                 className="boards-hub-btn boards-hub-btn-primary"
@@ -11433,10 +12212,10 @@ export function IDEWorkspace({
                   }
                 }}
                 disabled={!hasDeviceGatewayFunction() || !canInstallFromLinkedLocal || linkedLocalInstallBusy}
-                title={!canInstallFromLinkedLocal ? 'Link the matching local board before installing Tantalum Cloud.' : undefined}
+                title={!canInstallFromLinkedLocal ? 'Link the matching local board before installing runtime firmware.' : undefined}
               >
                 {linkedLocalInstallBusy ? <LoaderCircle size={14} className="spin" /> : <HardDriveUpload size={14} />}
-                {linkedLocalInstallBusy ? 'Installing…' : 'Install runtime'}
+                {linkedLocalInstallBusy ? 'Installing runtime firmware...' : 'Install runtime firmware'}
               </button>
               <button className="boards-hub-btn" type="button" onClick={() => void handleRequestBoardProvisioning()} disabled={busyAction === 'start-provisioning' || !hasBoardAdminFunction() || !canOpenRemoteWifiSetup}>
                 <Wifi size={14} />
@@ -11491,10 +12270,16 @@ export function IDEWorkspace({
                   onChange={(profileId) => setSelectedLinkLocalProfileId(profileId)}
                 />
               </div>
-              <button className="boards-hub-btn" type="button" onClick={() => void handleLinkSelectedCloudBoardToLocal()} disabled={Boolean(busyAction?.startsWith('link-cloud-board')) || !selectedLinkLocalProfileId}>
-                <Link2 size={14} />
-                Link board
+              <button className="boards-hub-btn" type="button" onClick={() => void handleLinkSelectedCloudBoardToLocal()} disabled={linkLocalBusy || unlinkLocalBusy || !selectedLinkLocalProfileId || selectedLinkLocalAlreadyLinked}>
+                {linkLocalBusy ? <LoaderCircle size={14} className="spin" /> : <Link2 size={14} />}
+                {selectedLinkLocalAlreadyLinked ? 'Linked' : 'Link board'}
               </button>
+              {selectedBoardLinkedLocalRow ? (
+                <button className="boards-hub-btn" type="button" onClick={() => void handleUnlinkSelectedCloudBoardFromLocal()} disabled={linkLocalBusy || unlinkLocalBusy}>
+                  {unlinkLocalBusy ? <LoaderCircle size={14} className="spin" /> : <Unlink size={14} />}
+                  Remove link
+                </button>
+              ) : null}
             </div>
           </section>
 
@@ -11516,6 +12301,10 @@ export function IDEWorkspace({
               <div>
                 <dt>OTA status</dt>
                 <dd>{selectedBoard.otaStatus || 'idle'}</dd>
+              </div>
+              <div>
+                <dt>Update method</dt>
+                <dd>{formatOtaUpdateMode(persistedOtaUpdateMode)}</dd>
               </div>
               <div>
                 <dt>Runtime</dt>
@@ -11709,14 +12498,25 @@ export function IDEWorkspace({
     const installCloudBusy = busyAction === `install-cloud-runtime:${row.key}`;
     const isActiveBoard = Boolean(row.profileId && row.profileId === selectedLocalBoardId);
     const advancedOpen = localBoardAdvancedOpenKey === row.key;
-    const linkedCloudBoard = row.cloudBoardId ? boards.find((board) => board.$id === row.cloudBoardId) ?? null : null;
+    const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
+    const linkedCloudBoard = cloudLink.valid ? cloudLink.board : null;
     const linkedCloudStatus = linkedCloudBoard ? calculateBoardStatus(linkedCloudBoard.lastSeen, linkedCloudBoard.status) : null;
-    const likelyCloudBoard = !row.cloudBoardId ? findLikelyCloudBoardForLocal(row, boards, selectedBoardId) : null;
-    const cloudLinkMissing = Boolean(row.cloudBoardId && !linkedCloudBoard);
+    const cloudLinkMissing = cloudLink.status === 'missing';
+    const cloudLinkMismatch = cloudLink.status === 'mismatch';
+    const cloudLinkUnresolved = cloudLink.status === 'unresolved';
+    const likelyCloudBoard = !linkedCloudBoard && !cloudLinkUnresolved ? findLikelyCloudBoardForLocal(row, boards, selectedBoardId) : null;
     const linkCloudBusy = busyAction === `link-cloud-board:${row.key}` || busyAction === `install-cloud-runtime:${row.key}`;
+    const unlinkCloudBusy = busyAction === `unlink-cloud-board:${row.key}`;
     const canResolveUsbPort = Boolean(row.port || row.fingerprint);
-    const canEnableTantalumCloud = Boolean(row.profileId && isCloudCapableBoardFqbn(row.fqbn) && canResolveUsbPort);
-    const canInstallTantalumCloud = Boolean(row.profileId && row.cloudBoardId && linkedCloudBoard && canResolveUsbPort);
+    const canEnableTantalumCloud = Boolean(row.profileId && isCloudCapableBoardFqbn(row.fqbn) && canResolveUsbPort && !cloudLinkUnresolved);
+    const canInstallTantalumCloud = Boolean(row.profileId && linkedCloudBoard && canResolveUsbPort);
+    const validRuntimeInstalled = Boolean(linkedCloudBoard && row.lastCloudProvisionedAt && boardHasCloudCommandSecret(linkedCloudBoard));
+    const localOtaUpdateMode = linkedCloudBoard
+      ? normalizeOtaUpdateMode(
+        localBoardEdits[row.key]?.otaUpdateMode ?? cloudBoardOtaModeEdits[linkedCloudBoard.$id] ?? linkedCloudBoard.otaUpdateMode,
+        boardOtaUpdateMode(linkedCloudBoard),
+      )
+      : normalizeOtaUpdateMode(localBoardEdits[row.key]?.otaUpdateMode ?? row.otaUpdateMode, defaultOtaUpdateMode());
 
     const boardTypeOptions: BoardsHubSelectOption[] = [
       ...commonBoardOptions.map((option) => ({ ...option, group: 'Common boards' })),
@@ -11728,8 +12528,11 @@ export function IDEWorkspace({
       label: localBoardPortLabel(port),
       group: 'Available ports',
     }));
-    const panelAlerts = [
+    type PanelAlert = { tone: 'default' | 'warning' | 'error'; text: string };
+    const panelAlerts = ([
       aiMessage ? { tone: 'error' as const, text: aiMessage } : null,
+      cloudLinkMissing ? { tone: 'error' as const, text: 'Cloud link is missing from the current board list.' } : null,
+      cloudLinkMismatch ? { tone: 'error' as const, text: cloudLink.reason } : null,
       row.matchingBoards && row.matchingBoards.length > 1 && !exactChipProbe
         ? { tone: 'default' as const, text: 'Multiple board matches found. Confirm the board type before saving.' }
         : null,
@@ -11745,17 +12548,16 @@ export function IDEWorkspace({
       row.portChanged && row.stalePort
         ? { tone: 'default' as const, text: `USB port changed from ${row.stalePort} to ${row.port}.` }
         : null,
-      linkedCloudBoard && !row.lastCloudProvisionedAt
-        ? { tone: 'warning' as const, text: 'Cloud runtime install needed for OTA and WiFi provisioning.' }
+      linkedCloudBoard && !validRuntimeInstalled
+        ? { tone: 'default' as const, text: 'Runtime firmware install needed for OTA and WiFi provisioning.' }
         : null,
-      cloudLinkMissing ? { tone: 'error' as const, text: 'Cloud link is missing from the current board list.' } : null,
-      likelyCloudBoard && !row.cloudBoardId
-        ? { tone: 'default' as const, text: `Likely match: ${likelyCloudBoard.name}. Link it before USB upload.` }
+      likelyCloudBoard
+        ? { tone: 'default' as const, text: `Possible existing cloud board: ${likelyCloudBoard.name}.` }
         : null,
-      !row.cloudBoardId && isCloudCapableBoardFqbn(row.fqbn) && (!row.connected || !row.port)
+      !linkedCloudBoard && isCloudCapableBoardFqbn(row.fqbn) && (!row.connected || !row.port)
         ? { tone: 'default' as const, text: 'Connect and save this board over USB before enabling cloud.' }
         : null,
-    ].filter((entry): entry is { tone: 'default' | 'warning' | 'error'; text: string } => Boolean(entry)).slice(0, 2);
+    ] as Array<PanelAlert | null>).filter((entry): entry is PanelAlert => Boolean(entry)).slice(0, 2);
 
     const inspectorMeta = [
       row.port || null,
@@ -11763,9 +12565,12 @@ export function IDEWorkspace({
       localBoardConfidenceText(row),
     ].filter(Boolean);
     if (linkedCloudBoard) {
-      inspectorMeta.push(`Cloud ${linkedCloudStatus}${row.lastCloudProvisionedAt ? '' : ', needs runtime'}`);
+      inspectorMeta.push(`Cloud ${linkedCloudStatus}${validRuntimeInstalled ? '' : ', needs runtime'}`);
+      inspectorMeta.push(formatOtaUpdateMode(boardOtaUpdateMode(linkedCloudBoard)));
     } else if (cloudLinkMissing) {
       inspectorMeta.push('Cloud link missing');
+    } else if (cloudLinkMismatch) {
+      inspectorMeta.push('Cloud link mismatch');
     }
 
     return (
@@ -11889,19 +12694,35 @@ export function IDEWorkspace({
           {row.profileId && isCloudCapableBoardFqbn(row.fqbn) ? (
             <section className="boards-inspector-block">
               <h4 className="boards-inspector-block-title">Cloud</h4>
+              <div className="boards-inspector-fields">
+                {renderOtaUpdateModeControl({
+                  value: localOtaUpdateMode,
+                  onChange: (mode) => {
+                    updateLocalBoardEdit(row.key, { otaUpdateMode: mode });
+                    if (linkedCloudBoard) {
+                      updateCloudBoardOtaMode(linkedCloudBoard.$id, mode);
+                    }
+                  },
+                  disabled: makeCloudBusy || installCloudBusy,
+                })}
+              </div>
+              {linkedCloudBoard && localOtaUpdateMode !== boardOtaUpdateMode(linkedCloudBoard) ? (
+                <div className="boards-hub-note">Reinstall runtime firmware to apply {formatOtaUpdateMode(localOtaUpdateMode)} updates on the board.</div>
+              ) : null}
               <div className="boards-inspector-action-stack">
-                {!row.cloudBoardId ? (
-                  likelyCloudBoard ? (
+                {!linkedCloudBoard ? (
+                  <>
+                    {likelyCloudBoard ? (
                     <button className="boards-hub-btn" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard)} disabled={linkCloudBusy}>
                       {linkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
                       Link cloud board
-                    </button>
-                  ) : (
+                      </button>
+                    ) : null}
                     <button className="boards-hub-btn" type="button" onClick={() => void handleMakeLocalBoardCloud(row)} disabled={makeCloudBusy || !canEnableTantalumCloud}>
                       {makeCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Cloud size={13} />}
                       Enable cloud
                     </button>
-                  )
+                  </>
                 ) : (
                   <>
                     <button
@@ -11911,16 +12732,25 @@ export function IDEWorkspace({
                       disabled={!canInstallTantalumCloud || installCloudBusy}
                     >
                       {installCloudBusy ? <LoaderCircle size={13} className="spin" /> : <HardDriveUpload size={13} />}
-                      {row.lastCloudProvisionedAt ? 'Reinstall runtime' : 'Install runtime'}
+                      {validRuntimeInstalled ? 'Reinstall runtime firmware' : 'Install runtime firmware'}
                     </button>
                     <button
                       className="boards-hub-btn"
                       type="button"
                       onClick={() => void openUsbWifiProvisioning(row)}
-                      disabled={!canResolveUsbPort || !row.lastCloudProvisionedAt || busyAction === 'wifi-usb-provision'}
+                      disabled={!canResolveUsbPort || !validRuntimeInstalled || busyAction === 'wifi-usb-provision'}
                     >
                       <Wifi size={13} />
                       WiFi over USB
+                    </button>
+                    <button
+                      className="boards-hub-btn"
+                      type="button"
+                      onClick={() => void unlinkLocalBoardFromCloud(row)}
+                      disabled={installCloudBusy || unlinkCloudBusy}
+                    >
+                      {unlinkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Unlink size={13} />}
+                      Remove link
                     </button>
                   </>
                 )}
@@ -12478,6 +13308,14 @@ export function IDEWorkspace({
       .filter(Boolean)
       .join(' · ');
 
+    const cloudSyncProject = selectedProjectCloudSync;
+    const cloudSyncStatus = cloudSyncStatusLabel(cloudSyncProject);
+    const cloudSyncBusy = Boolean(
+      busyAction === `cloud-sync-enable:${project.id}`
+      || busyAction === `cloud-sync-link:${project.id}`
+      || (cloudSyncProject && busyAction === `cloud-sync-now:${cloudSyncProject.projectId}`),
+    );
+
     return (
       <section className="projects-inspector" aria-label={`${getProjectDisplayName(project)} details`}>
         <header className="projects-inspector-header" title={project.path}>
@@ -12486,6 +13324,11 @@ export function IDEWorkspace({
             <div className="projects-inspector-header-badges">
               {project.favorite ? (
                 <Star size={12} fill="currentColor" className="projects-inspector-favorite" aria-label="Favorite project" />
+              ) : null}
+              {cloudSyncProject ? (
+                <span className={`projects-inspector-status-pill cloud-sync-${String(cloudSyncProject.syncStatus || 'idle')}`}>
+                  {cloudSyncStatus}
+                </span>
               ) : null}
               <span className={`projects-inspector-status-pill ${project.exists ? 'ready' : 'missing'}`}>
                 {project.exists ? 'Ready' : 'Missing'}
@@ -12516,6 +13359,51 @@ export function IDEWorkspace({
               Locate
             </button>
           )}
+          <div className="projects-inspector-cloud-actions">
+            {cloudSyncProject ? (
+              <>
+                <button
+                  className="projects-inspector-open-btn projects-inspector-cloud-btn"
+                  type="button"
+                  onClick={() => void syncCloudProject(cloudSyncProject)}
+                  disabled={cloudSyncBusy || cloudSyncProject.paused || cloudSyncProject.syncStatus === 'conflict'}
+                  title={cloudSyncProject.syncMessage || 'Sync now'}
+                >
+                  {cloudSyncBusy || cloudSyncProject.syncStatus === 'syncing' ? <LoaderCircle size={14} className="spin" /> : <Cloud size={14} />}
+                  Sync
+                </button>
+                <button
+                  className="projects-inspector-icon-btn"
+                  type="button"
+                  onClick={() => void (cloudSyncProject.paused ? resumeProjectCloudSync(cloudSyncProject) : pauseProjectCloudSync(cloudSyncProject))}
+                  title={cloudSyncProject.paused ? 'Resume cloud sync' : 'Pause cloud sync'}
+                >
+                  {cloudSyncProject.paused ? <RefreshCcw size={14} /> : <CircleStop size={14} />}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="projects-inspector-open-btn projects-inspector-cloud-btn"
+                  type="button"
+                  onClick={() => void enableProjectCloudSync(project)}
+                  disabled={cloudSyncBusy || !project.exists}
+                >
+                  {cloudSyncBusy ? <LoaderCircle size={14} className="spin" /> : <Cloud size={14} />}
+                  Enable sync
+                </button>
+                <button
+                  className="projects-inspector-icon-btn"
+                  type="button"
+                  onClick={() => void linkProjectCloudSync(project)}
+                  disabled={cloudSyncBusy || !project.exists}
+                  title="Link existing cloud project"
+                >
+                  <Link2 size={14} />
+                </button>
+              </>
+            )}
+          </div>
           <div className="projects-inspector-icon-actions">
             <button className="projects-inspector-icon-btn" type="button" onClick={() => void renameProjectFolder(project)} title="Rename project">
               <PencilLine size={15} />
@@ -14214,6 +15102,21 @@ export function IDEWorkspace({
                   <SquarePen size={14} />
                 </button>
                 <button
+                  className="projects-inspector-icon-btn"
+                  type="button"
+                  draggable={false}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    sendTerminalCommand({ type: 'move-to-bottom', sessionId: session.id });
+                  }}
+                  onDragStart={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  title={`Move ${session.title} to bottom panel`}
+                  aria-label={`Move ${session.title} to bottom panel`}
+                >
+                  <PanelBottom size={14} />
+                </button>
+                <button
                   className="projects-inspector-icon-btn danger"
                   type="button"
                   draggable={false}
@@ -14428,6 +15331,23 @@ export function IDEWorkspace({
               onMouseDown={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
+                sendTerminalCommand({ type: 'move-to-bottom', sessionId: contextSession.id });
+                setTerminalContextMenu(null);
+              }}
+              onClick={() => {
+                sendTerminalCommand({ type: 'move-to-bottom', sessionId: contextSession.id });
+                setTerminalContextMenu(null);
+              }}
+            >
+              <PanelBottom size={13} />
+              Move to bottom panel
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
                 void confirmCloseTerminalSession(contextSession);
               }}
               onClick={() => void confirmCloseTerminalSession(contextSession)}
@@ -14444,16 +15364,17 @@ export function IDEWorkspace({
     <div className={`ide-shell ${bottomPanelOpen ? '' : 'ide-shell-console-collapsed'}`}>
       {!hasRequiredCloudConfiguration() ? (
         <div className="inline-banner inline-banner-error">
-          Appwrite configuration is incomplete. Add the missing values in `appwrite.config.json` or provide renderer env overrides before using authentication, boards, database documents, or storage uploads.
+          Cloud configuration is incomplete. Update the local cloud settings before using authentication, boards, database documents, or storage uploads.
         </div>
       ) : null}
       {!hasBoardAdminFunction() ? (
         <div className="inline-banner inline-banner-warning">
-          `VITE_APPWRITE_BOARD_ADMIN_FUNCTION_ID` is missing. Board registration still works with a client fallback, but token handling is less robust.
+          Cloud board administration is not fully configured. Board registration still works with a client fallback, but token handling is less robust.
         </div>
       ) : null}
 
       <main
+        ref={workspaceShellRef}
         className={`workspace-shell ${leftPanelOpen ? '' : 'workspace-shell-left-collapsed'} ${
           rightPanelOpen ? '' : 'workspace-shell-agent-collapsed'
         }`}
@@ -14776,8 +15697,11 @@ export function IDEWorkspace({
             active={isTerminalWorkspaceActive}
             currentFolderPath={currentTerminalFolderPath}
             uiPreferences={uiPreferences}
+            host="page"
+            variant="page"
             command={terminalCommand}
             onStateChange={setTerminalWorkspaceState}
+            onTransferSession={handleTerminalSessionTransfer}
           />
         </section>
 
@@ -15125,6 +16049,16 @@ export function IDEWorkspace({
         onNotify={pushToast}
       />
 
+      <SerialPlotterPopup
+        open={serialPlotterOpen}
+        onClose={() => setSerialPlotterOpen(false)}
+        sessionId={serialSession.sessionId}
+        connected={serialSession.connected}
+        port={serialSession.port}
+        baudRate={serialSession.baudRate}
+        resolvedTheme={resolvedTheme}
+      />
+
       {isConsoleVisible ? (
         <div
           className={`panel-resizer panel-resizer-horizontal panel-resizer-bottom ${activeResizePanel === 'bottom' ? 'panel-resizer-active' : ''}`}
@@ -15141,14 +16075,35 @@ export function IDEWorkspace({
         />
       ) : null}
 
-      <section className={`console-shell ${isConsoleVisible ? '' : 'console-shell-collapsed'}`} style={consoleShellStyle}>
+      <section ref={consoleShellRef} className={`console-shell ${isConsoleVisible ? '' : 'console-shell-collapsed'}`} style={consoleShellStyle}>
         <div className="console-header">
-          <div className="console-tabs">
-            <button className={consoleView === 'output' ? 'active' : ''} type="button" onClick={() => openConsolePanel('output')}>
+          <div className="console-tabs segmented-control" role="tablist" aria-label="Bottom panel views">
+            <button
+              role="tab"
+              type="button"
+              aria-selected={consoleView === 'output'}
+              className={consoleView === 'output' ? 'active' : ''}
+              onClick={() => openConsolePanel('output')}
+            >
               Output
             </button>
-            <button className={consoleView === 'serial' ? 'active' : ''} type="button" onClick={() => openConsolePanel('serial')}>
+            <button
+              role="tab"
+              type="button"
+              aria-selected={consoleView === 'serial'}
+              className={consoleView === 'serial' ? 'active' : ''}
+              onClick={() => openConsolePanel('serial')}
+            >
               Serial Monitor
+            </button>
+            <button
+              role="tab"
+              type="button"
+              aria-selected={consoleView === 'terminal'}
+              className={consoleView === 'terminal' ? 'active' : ''}
+              onClick={() => openConsolePanel('terminal')}
+            >
+              Terminal{bottomTerminalWorkspaceState.sessions.length > 0 ? ` ${bottomTerminalWorkspaceState.sessions.length}` : ''}
             </button>
           </div>
           <div className="console-actions">
@@ -15167,18 +16122,39 @@ export function IDEWorkspace({
                 </button>
               </>
             ) : null}
-            <button className="icon-button console-collapse-button" type="button" onClick={toggleConsolePanel} title="Minimize bottom panel">
+            <button
+              className="icon-button"
+              type="button"
+              title="Serial Plotter"
+              onClick={() => {
+                openConsolePanel('serial');
+                setSerialPlotterOpen(true);
+              }}
+            >
+              <LineChart size={16} />
+            </button>
+            <button
+              className="icon-button console-collapse-button"
+              type="button"
+              onClick={toggleConsolePanel}
+              title="Minimize bottom panel"
+              aria-label="Close bottom panel"
+            >
               <ChevronDown size={16} />
             </button>
           </div>
         </div>
         {!isConsoleVisible ? null : (
           <div ref={consoleOutputRef} className={`console-output console-pane ${consoleView === 'output' ? 'console-pane-active' : 'console-pane-hidden'}`}>
-            {consoleEntries.map((entry) => (
-              <div key={entry.id} className={`console-line console-${entry.level}`}>
-                {entry.message}
-              </div>
-            ))}
+            {consoleEntries.length === 0 ? (
+              <div className="console-output-empty">Build and upload output will appear here.</div>
+            ) : (
+              consoleEntries.map((entry) => (
+                <div key={entry.id} className={`console-line console-${entry.level}`}>
+                  {entry.message}
+                </div>
+              ))
+            )}
           </div>
         )}
         <SerialMonitor
@@ -15186,6 +16162,17 @@ export function IDEWorkspace({
           selectedPort={selectedLocalBoard?.port || null}
           selectedBoardName={selectedLocalBoard ? localBoardDisplayName(selectedLocalBoard) : null}
           uiPreferences={uiPreferences}
+          onSessionChange={setSerialSession}
+        />
+        <TerminalWorkspace
+          active={isConsoleVisible && consoleView === 'terminal'}
+          currentFolderPath={currentTerminalFolderPath}
+          uiPreferences={uiPreferences}
+          host="bottom"
+          variant="bottom"
+          command={bottomTerminalCommand}
+          onStateChange={setBottomTerminalWorkspaceState}
+          onTransferSession={handleTerminalSessionTransfer}
         />
       </section>
 
@@ -15298,8 +16285,8 @@ export function IDEWorkspace({
 
       <Modal
         open={provisionModalOpen}
-        title="Install Tantalum Cloud"
-        subtitle="This flashes the Tantalum cloud runtime so the board can heartbeat, receive OTA updates, and accept secure WiFi provisioning. WiFi credentials are not uploaded."
+        title="Install runtime firmware"
+        subtitle="This flashes runtime firmware so the board can heartbeat, receive OTA updates, and accept secure WiFi provisioning. WiFi credentials are not uploaded."
         onClose={() => setProvisionModalOpen(false)}
       >
         <div className="modal-form">
@@ -15342,18 +16329,23 @@ export function IDEWorkspace({
               </button>
             </div>
           </label>
+          {selectedBoard ? renderOtaUpdateModeControl({
+            value: selectedCloudBoardOtaMode(selectedBoard),
+            onChange: (mode) => updateCloudBoardOtaMode(selectedBoard.$id, mode),
+            disabled: busyAction === 'provision',
+          }) : null}
           <div className="form-actions">
             <button className="secondary-button" type="button" onClick={() => setProvisionModalOpen(false)}>
               Cancel
             </button>
             <button className="primary-button" type="button" onClick={() => void handleProvisionBoard()} disabled={busyAction === 'provision'}>
-              {busyAction === 'provision' ? 'Installing...' : 'Install runtime'}
+              {busyAction === 'provision' ? 'Installing runtime firmware...' : 'Install runtime firmware'}
             </button>
           </div>
         </div>
       </Modal>
 
-      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current Project Space and upload it to Appwrite storage." onClose={() => setReleaseModalOpen(false)}>
+      <Modal open={releaseModalOpen} title="Create firmware release" subtitle="Compile the current Project Space and upload it to cloud storage." onClose={() => setReleaseModalOpen(false)}>
         <div className="modal-form">
           <label>
             Target board

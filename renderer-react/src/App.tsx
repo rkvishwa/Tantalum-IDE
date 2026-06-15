@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import type { Models } from 'appwrite';
 
 import { getCurrentUser } from '@/lib/auth';
+import { applyPlatformDocumentClass } from '@/lib/platformUi';
+import { useBootDocumentTheme } from '@/lib/useDocumentTheme';
 
 import { AuthScreen } from './components/AuthScreen';
 import { AppShell } from './components/AppShell';
@@ -13,8 +15,13 @@ type AppInfo = {
 };
 
 function App() {
+  useBootDocumentTheme();
   const [user, setUser] = useState<Models.User<Models.Preferences> | null | undefined>(undefined);
   const [appInfo, setAppInfo] = useState<AppInfo>({ appName: 'Tantalum IDE', version: '1.0.0', platform: navigator.platform });
+
+  useEffect(() => {
+    applyPlatformDocumentClass(appInfo.platform);
+  }, [appInfo.platform]);
 
   useEffect(() => {
     let mounted = true;
@@ -53,7 +60,7 @@ function App() {
         <div className="boot-card">
           <p className="eyebrow">Booting</p>
           <h1>{appInfo.appName}</h1>
-          <p>Loading your local workspace, Appwrite session, and desktop toolchain.</p>
+          <p>Loading your local workspace, cloud session, and desktop toolchain.</p>
         </div>
       </div>
     );

@@ -90,6 +90,7 @@ import type {
 
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { Modal } from './Modal';
+import { BoardsHubToggle } from './BoardsHubControls';
 import { useConfirm } from './ConfirmProvider';
 
 export type AgentPendingReview = {
@@ -171,12 +172,14 @@ type AgentPanelProps = {
   defaultView?: AgentView;
   hideChat?: boolean;
   chatOnly?: boolean;
+  settingsOnly?: boolean;
   onOpenSettings?: () => void;
   onClosePanel?: () => void;
   onSignedOut?: () => void;
 };
 
 type AgentView = 'chat' | 'settings';
+type AgentSettingsSection = 'general' | 'keys' | 'tools' | 'usage';
 type AgentComposeTarget = 'new' | 'thread';
 type AgentCloudLoadScope = 'settings' | 'threads';
 type AgentIntent = 'agent' | 'ask';
@@ -417,7 +420,7 @@ function writeAgentPanelDisplayCache(
       } satisfies AgentPanelDisplayCache),
     );
   } catch {
-    // Best-effort display cache only; Appwrite remains authoritative.
+    // Best-effort display cache only; the cloud state remains authoritative.
   }
 }
 
@@ -1150,7 +1153,7 @@ function agentCloudLoadErrorMessage(error: unknown, scope: AgentCloudLoadScope) 
   }
 
   if (/fetch failed|failed to fetch|network|enotfound|econnrefused|etimedout/i.test(cleanMessage)) {
-    return `${prefix} Check the Appwrite connection and try again.`;
+    return `${prefix} Check the cloud connection and try again.`;
   }
 
   return cleanMessage ? `${prefix} ${cleanMessage}` : `${prefix} Try again from the refresh button.`;
@@ -2056,6 +2059,7 @@ export function AgentPanel({
   defaultView = 'chat',
   hideChat = false,
   chatOnly = false,
+  settingsOnly = false,
   onOpenSettings,
   onClosePanel,
 }: AgentPanelProps) {
@@ -2114,6 +2118,9 @@ export function AgentPanel({
   const [composerReviewOpen, setComposerReviewOpen] = useState(true);
   const [composerTasksOpen, setComposerTasksOpen] = useState(false);
   const [credentialForm, setCredentialForm] = useState<CredentialFormState>(EMPTY_CREDENTIAL_FORM);
+  const [agentSettingsSection, setAgentSettingsSection] = useState<AgentSettingsSection>('general');
+  const [credentialModalOpen, setCredentialModalOpen] = useState(false);
+  const [usageLedgerExpanded, setUsageLedgerExpanded] = useState(false);
   const [agentToolSettings, setAgentToolSettings] = useState<AgentToolSettingsResponse | null>(null);
   const [savingAgentToolId, setSavingAgentToolId] = useState<string | null>(null);
 
@@ -3960,6 +3967,19 @@ export function AgentPanel({
       modelNames: credential.modelNames.join('\n'),
       enabled: credential.enabled,
     });
+    if (settingsOnly) {
+      setCredentialModalOpen(true);
+    }
+  }
+
+  function openAddCredentialModal() {
+    setCredentialForm(EMPTY_CREDENTIAL_FORM);
+    setCredentialModalOpen(true);
+  }
+
+  function closeCredentialModal() {
+    setCredentialForm(EMPTY_CREDENTIAL_FORM);
+    setCredentialModalOpen(false);
   }
 
   async function handleCredentialSubmit(event: FormEvent<HTMLFormElement>) {
@@ -3992,6 +4012,9 @@ export function AgentPanel({
       }
 
       setCredentialForm(EMPTY_CREDENTIAL_FORM);
+      if (settingsOnly) {
+        setCredentialModalOpen(false);
+      }
       await refreshAgentSettings(false);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to save custom credential.', 'error');
@@ -5347,7 +5370,7 @@ export function AgentPanel({
       >
         {!loadingInitialAgentData && !hasCloudAgent ? (
           <div className="inline-banner inline-banner-warning agent-inline-banner">
-            Push the Tantalum AI Appwrite tables and functions before using managed models, custom credentials, or synced threads.
+            Deploy the Tantalum AI cloud tables and functions before using managed models, custom credentials, or synced threads.
           </div>
         ) : null}
 
@@ -5413,12 +5436,13 @@ export function AgentPanel({
       groups[key] = [...(groups[key] ?? []), descriptor];
       return groups;
     }, {});
+    const iconClass = settingsOnly ? 'settings-card-icon' : 'text-accent';
 
     return (
       <section className="tantalum-ai-settings-card agent-tools-settings-card">
         <div className="card-header agent-tools-card-header">
           <div>
-            <Wrench size={14} className="text-accent" />
+            <Wrench size={14} className={iconClass} />
             <h3>Agent Tools</h3>
           </div>
           <span>Local IDE actions available to Tantalum AI</span>
@@ -5445,15 +5469,13 @@ export function AgentPanel({
                           <code>{descriptor.id}</code>
                           {descriptor.unavailableReason ? <small>{descriptor.unavailableReason}</small> : null}
                         </div>
-                        <label className="agent-tool-toggle">
-                          <input
-                            type="checkbox"
-                            checked={enabled}
-                            disabled={disabled}
-                            onChange={(event) => void handleAgentToolToggle(descriptor, event.target.checked)}
-                          />
-                          <span>{enabled ? 'Enabled' : 'Disabled'}</span>
-                        </label>
+                        <BoardsHubToggle
+                          checked={enabled}
+                          label={descriptor.label}
+                          toggleOnly
+                          disabled={disabled}
+                          onChange={(checked) => void handleAgentToolToggle(descriptor, checked)}
+                        />
                       </article>
                     );
                   })}
@@ -5466,203 +5488,267 @@ export function AgentPanel({
     );
   }
 
-  function renderSettingsView() {
-    return (
-      <div className="agent-settings-view tantalum-ai-settings-layout">
-        {/* Relocated Core Configuration Card */}
-        <div className="tantalum-ai-settings-card core-config-card">
-          <div className="card-header">
-            <Sliders size={14} className="text-accent" />
-            <h3>Agent Configuration</h3>
-          </div>
-          <div className="card-body">
-            <div className="settings-field">
-              <label className="field-label">Model Source</label>
-              <div className="segmented-control font-sans" style={{ display: 'inline-flex', width: 'auto', marginBottom: '8px' }}>
-                <button
-                  className={preferences.selectedSource === 'managed' ? 'active' : ''}
-                  type="button"
-                  disabled={loadingSettings}
-                  onClick={() => void persistPreferences({ ...preferences, selectedSource: 'managed' })}
-                >
-                  Managed Pool
-                </button>
-                <button
-                  className={preferences.selectedSource === 'custom' ? 'active' : ''}
-                  type="button"
-                  disabled={loadingSettings || enabledCustomCredentials.length === 0}
-                  onClick={() =>
-                    void persistPreferences({
-                      ...preferences,
-                      selectedSource: 'custom',
-                      selectedCustomCredentialId: selectedCredential?.id ?? null,
-                      selectedCustomModelName: selectedModel,
-                    })
-                  }
-                >
-                  Custom Keys
-                </button>
-              </div>
-              <p className="field-help text-muted">
-                Managed Pool uses fast cloud credits. Custom Keys lets you plug in OpenAI, Anthropic, or other providers directly.
-              </p>
-            </div>
+  function renderSettingsSubTabs() {
+    const sections: Array<{ id: AgentSettingsSection; label: string }> = [
+      { id: 'general', label: 'General' },
+      { id: 'keys', label: 'API Keys' },
+      { id: 'tools', label: 'Tools' },
+      { id: 'usage', label: 'Usage' },
+    ];
 
-            {preferences.selectedSource === 'custom' && (
-              <div className="custom-api-selectors animate-fade-in">
-                <div className="selectors-grid">
-                  <div className="settings-field">
-                    <label className="field-label">Active Provider Key</label>
-                    <CustomDropdown
-                      className="tantalum-ai-settings-select"
-                      value={selectedCredential?.id ?? ''}
-                      options={enabledCustomCredentials.length === 0
-                        ? [{ label: 'No custom keys enabled', value: '' }]
-                        : enabledCustomCredentials.map(c => ({ label: c.displayName, value: c.id }))
-                      }
-                      onChange={(val) => {
-                        const credential = settings.customCredentials.find((entry) => entry.id === val) ?? null;
-                        void persistPreferences({
-                          ...preferences,
-                          selectedSource: 'custom',
-                          selectedCustomCredentialId: credential?.id ?? null,
-                          selectedCustomModelName: credential?.modelNames[0] ?? null,
-                        });
-                      }}
-                    />
-                  </div>
-                  <div className="settings-field">
-                    <label className="field-label">Active Custom Model</label>
-                    <CustomDropdown
-                      className="tantalum-ai-settings-select"
-                      value={selectedModel ?? ''}
-                      options={selectedCredential
-                        ? selectedCredential.modelNames.map(m => ({ label: m, value: m }))
-                        : [{ label: 'Select custom key first', value: '' }]
-                      }
-                      onChange={(val) => void persistPreferences({ ...preferences, selectedCustomModelName: val })}
-                    />
-                  </div>
+    return (
+      <div className="boards-hub-center-tabs agent-settings-subtabs" role="tablist" aria-label="Agent settings sections">
+        {sections.map((section) => (
+          <button
+            key={section.id}
+            className={agentSettingsSection === section.id ? 'active' : ''}
+            type="button"
+            role="tab"
+            aria-selected={agentSettingsSection === section.id}
+            onClick={() => setAgentSettingsSection(section.id)}
+          >
+            {section.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderCoreConfigCard() {
+    const iconClass = settingsOnly ? 'settings-card-icon' : 'text-accent';
+    return (
+      <div className="tantalum-ai-settings-card core-config-card">
+        <div className="card-header">
+          <Sliders size={14} className={iconClass} />
+          <h3>Agent Configuration</h3>
+        </div>
+        <div className="card-body">
+          <div className="settings-field">
+            <label className="field-label">Model Source</label>
+            <div className="segmented-control font-sans" style={{ display: 'inline-flex', width: 'auto', marginBottom: '8px' }}>
+              <button
+                className={preferences.selectedSource === 'managed' ? 'active' : ''}
+                type="button"
+                disabled={loadingSettings}
+                onClick={() => void persistPreferences({ ...preferences, selectedSource: 'managed' })}
+              >
+                Managed Pool
+              </button>
+              <button
+                className={preferences.selectedSource === 'custom' ? 'active' : ''}
+                type="button"
+                disabled={loadingSettings || enabledCustomCredentials.length === 0}
+                onClick={() =>
+                  void persistPreferences({
+                    ...preferences,
+                    selectedSource: 'custom',
+                    selectedCustomCredentialId: selectedCredential?.id ?? null,
+                    selectedCustomModelName: selectedModel,
+                  })
+                }
+              >
+                Custom Keys
+              </button>
+            </div>
+            <p className="field-help text-muted">
+              Managed Pool uses fast cloud credits. Custom Keys lets you plug in OpenAI, Anthropic, or other providers directly.
+            </p>
+          </div>
+
+          {preferences.selectedSource === 'custom' && (
+            <div className="custom-api-selectors animate-fade-in">
+              <div className="selectors-grid">
+                <div className="settings-field">
+                  <label className="field-label">Active Provider Key</label>
+                  <CustomDropdown
+                    className="tantalum-ai-settings-select"
+                    value={selectedCredential?.id ?? ''}
+                    options={enabledCustomCredentials.length === 0
+                      ? [{ label: 'No custom keys enabled', value: '' }]
+                      : enabledCustomCredentials.map(c => ({ label: c.displayName, value: c.id }))
+                    }
+                    onChange={(val) => {
+                      const credential = settings.customCredentials.find((entry) => entry.id === val) ?? null;
+                      void persistPreferences({
+                        ...preferences,
+                        selectedSource: 'custom',
+                        selectedCustomCredentialId: credential?.id ?? null,
+                        selectedCustomModelName: credential?.modelNames[0] ?? null,
+                      });
+                    }}
+                  />
+                </div>
+                <div className="settings-field">
+                  <label className="field-label">Active Custom Model</label>
+                  <CustomDropdown
+                    className="tantalum-ai-settings-select"
+                    value={selectedModel ?? ''}
+                    options={selectedCredential
+                      ? selectedCredential.modelNames.map(m => ({ label: m, value: m }))
+                      : [{ label: 'Select custom key first', value: '' }]
+                    }
+                    onChange={(val) => void persistPreferences({ ...preferences, selectedCustomModelName: val })}
+                  />
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
+      </div>
+    );
+  }
 
+  function renderCredentialFormFields() {
+    return (
+      <div className="agent-settings-grid">
+        <label>
+          Display name
+          <input
+            value={credentialForm.displayName}
+            disabled={savingSettings}
+            onChange={(event) => setCredentialForm((current) => ({ ...current, displayName: event.target.value }))}
+            placeholder="Azure AI Foundry"
+          />
+        </label>
+        <label>
+          Base URL
+          <input
+            value={credentialForm.baseUrl}
+            disabled={savingSettings}
+            onChange={(event) => setCredentialForm((current) => ({ ...current, baseUrl: event.target.value }))}
+            placeholder="https://resource.openai.azure.com/openai/v1"
+          />
+        </label>
+        <label>
+          API key
+          <input
+            type="password"
+            value={credentialForm.apiKey}
+            disabled={savingSettings}
+            onChange={(event) => setCredentialForm((current) => ({ ...current, apiKey: event.target.value }))}
+            placeholder={credentialForm.credentialId ? 'Leave blank to keep current key' : 'sk-...'}
+          />
+        </label>
+        <label>
+          Enabled
+          <CustomDropdown
+            className="tantalum-ai-settings-select"
+            value={credentialForm.enabled ? 'yes' : 'no'}
+            options={[
+              { label: 'Enabled', value: 'yes' },
+              { label: 'Disabled', value: 'no' }
+            ]}
+            onChange={(val) => setCredentialForm((current) => ({ ...current, enabled: val === 'yes' }))}
+          />
+        </label>
+        <label className="agent-settings-span">
+          Model names
+          <textarea
+            value={credentialForm.modelNames}
+            disabled={savingSettings}
+            onChange={(event) => setCredentialForm((current) => ({ ...current, modelNames: event.target.value }))}
+            placeholder={'gpt-4.1\ngpt-5.5'}
+            rows={3}
+          />
+        </label>
+      </div>
+    );
+  }
+
+  function renderCredentialFormCard() {
+    const iconClass = settingsOnly ? 'settings-card-icon' : 'text-accent';
+    return (
+      <form className="agent-settings-card" onSubmit={(event) => void handleCredentialSubmit(event)}>
+        <div className="card-header">
+          <KeyRound size={14} className={iconClass} />
+          <h3>{credentialForm.credentialId ? 'Edit Custom Credential' : 'Add Custom Credential'}</h3>
+        </div>
+        {renderCredentialFormFields()}
+        <div className="form-actions">
+          {credentialForm.credentialId ? (
+            <button className="ghost-button compact" type="button" onClick={() => setCredentialForm(EMPTY_CREDENTIAL_FORM)}>
+              <X size={14} />
+              Cancel
+            </button>
+          ) : null}
+          <button className="primary-button compact" type="submit" disabled={savingSettings}>
+            {savingSettings ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
+            {credentialForm.credentialId ? 'Save changes' : 'Add key'}
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  function renderCredentialListSection() {
+    return (
+      <div className="agent-credential-list">
+        <div className="agent-settings-keys-toolbar">
+          <h3>Registered Keys</h3>
+          {settingsOnly ? (
+            <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={openAddCredentialModal}>
+              <Plus size={14} />
+              Add key
+            </button>
+          ) : null}
+        </div>
+        {settings.customCredentials.length === 0 ? (
+          <div className="agent-empty-state">
+            <KeyRound size={18} />
+            <span>No custom keys yet.</span>
+          </div>
+        ) : null}
+        {settings.customCredentials.map((credential) => (
+          <article key={credential.id} className="agent-credential-row">
+            <div>
+              <strong>{credential.displayName}</strong>
+              <span>
+                {credential.enabled ? 'Enabled' : 'Disabled'} / {credential.apiKeyPreview} / {credential.modelNames.join(', ')}
+              </span>
+              <code>{credential.baseUrl}</code>
+            </div>
+            <div className="action-row">
+              <button className="ghost-button compact" type="button" onClick={() => startEditingCredential(credential)}>
+                <Settings2 size={14} />
+                Edit
+              </button>
+              <button className="ghost-button compact" type="button" disabled={savingSettings} onClick={() => void handleTestCredential(credential)}>
+                <Play size={14} />
+                Test
+              </button>
+              <button className="ghost-button compact" type="button" disabled={savingSettings} onClick={() => void handleToggleCredential(credential)}>
+                {credential.enabled ? 'Disable' : 'Enable'}
+              </button>
+              <button className="danger-button compact" type="button" disabled={savingSettings} onClick={() => void handleDeleteCredential(credential)}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    );
+  }
+
+  function renderSettingsView() {
+    if (settingsOnly) {
+      return (
+        <div className="agent-settings-view tantalum-ai-settings-layout agent-settings-view-embedded">
+          {renderSettingsSubTabs()}
+          {agentSettingsSection === 'general' ? renderCoreConfigCard() : null}
+          {agentSettingsSection === 'keys' ? renderCredentialListSection() : null}
+          {agentSettingsSection === 'tools' ? renderAgentToolSettingsSection() : null}
+          {agentSettingsSection === 'usage' ? renderAgentUsageSection() : null}
+        </div>
+      );
+    }
+
+    return (
+      <div className="agent-settings-view tantalum-ai-settings-layout">
+        {renderCoreConfigCard()}
         {renderAgentUsageSection()}
         {renderAgentToolSettingsSection()}
-
-        {/* Existing credential creation/edit form */}
-        <form className="agent-settings-card" onSubmit={(event) => void handleCredentialSubmit(event)}>
-          <div className="card-header">
-            <KeyRound size={14} className="text-accent" />
-            <h3>{credentialForm.credentialId ? 'Edit Custom Credential' : 'Add Custom Credential'}</h3>
-          </div>
-          <div className="agent-settings-grid">
-            <label>
-              Display name
-              <input
-                value={credentialForm.displayName}
-                disabled={savingSettings}
-                onChange={(event) => setCredentialForm((current) => ({ ...current, displayName: event.target.value }))}
-                placeholder="Azure AI Foundry"
-              />
-            </label>
-            <label>
-              Base URL
-              <input
-                value={credentialForm.baseUrl}
-                disabled={savingSettings}
-                onChange={(event) => setCredentialForm((current) => ({ ...current, baseUrl: event.target.value }))}
-                placeholder="https://resource.openai.azure.com/openai/v1"
-              />
-            </label>
-            <label>
-              API key
-              <input
-                type="password"
-                value={credentialForm.apiKey}
-                disabled={savingSettings}
-                onChange={(event) => setCredentialForm((current) => ({ ...current, apiKey: event.target.value }))}
-                placeholder={credentialForm.credentialId ? 'Leave blank to keep current key' : 'sk-...'}
-              />
-            </label>
-            <label>
-              Enabled
-              <CustomDropdown
-                className="tantalum-ai-settings-select"
-                value={credentialForm.enabled ? 'yes' : 'no'}
-                options={[
-                  { label: 'Enabled', value: 'yes' },
-                  { label: 'Disabled', value: 'no' }
-                ]}
-                onChange={(val) => setCredentialForm((current) => ({ ...current, enabled: val === 'yes' }))}
-              />
-            </label>
-            <label className="agent-settings-span">
-              Model names
-              <textarea
-                value={credentialForm.modelNames}
-                disabled={savingSettings}
-                onChange={(event) => setCredentialForm((current) => ({ ...current, modelNames: event.target.value }))}
-                placeholder={'gpt-4.1\ngpt-5.5'}
-                rows={3}
-              />
-            </label>
-          </div>
-          <div className="form-actions">
-            {credentialForm.credentialId ? (
-              <button className="ghost-button compact" type="button" onClick={() => setCredentialForm(EMPTY_CREDENTIAL_FORM)}>
-                <X size={14} />
-                Cancel
-              </button>
-            ) : null}
-            <button className="primary-button compact" type="submit" disabled={savingSettings}>
-              {savingSettings ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
-              {credentialForm.credentialId ? 'Save changes' : 'Add key'}
-            </button>
-          </div>
-        </form>
-
-        {/* Existing credential list */}
-        <div className="agent-credential-list">
-          <div className="card-header">
-            <h3>Registered Keys</h3>
-          </div>
-          {settings.customCredentials.length === 0 ? (
-            <div className="agent-empty-state">
-              <KeyRound size={18} />
-              <span>No custom keys yet.</span>
-            </div>
-          ) : null}
-          {settings.customCredentials.map((credential) => (
-            <article key={credential.id} className="agent-credential-row">
-              <div>
-                <strong>{credential.displayName}</strong>
-                <span>
-                  {credential.enabled ? 'Enabled' : 'Disabled'} / {credential.apiKeyPreview} / {credential.modelNames.join(', ')}
-                </span>
-                <code>{credential.baseUrl}</code>
-              </div>
-              <div className="action-row">
-                <button className="ghost-button compact" type="button" onClick={() => startEditingCredential(credential)}>
-                  <Settings2 size={14} />
-                  Edit
-                </button>
-                <button className="ghost-button compact" type="button" disabled={savingSettings} onClick={() => void handleTestCredential(credential)}>
-                  <Play size={14} />
-                  Test
-                </button>
-                <button className="ghost-button compact" type="button" disabled={savingSettings} onClick={() => void handleToggleCredential(credential)}>
-                  {credential.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button className="danger-button compact" type="button" disabled={savingSettings} onClick={() => void handleDeleteCredential(credential)}>
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
+        {renderCredentialFormCard()}
+        {renderCredentialListSection()}
       </div>
     );
   }
@@ -5677,11 +5763,12 @@ export function AgentPanel({
     const managedEvents = recentUsage.filter((event) => event.source === 'managed').length;
     const customEvents = recentUsage.filter((event) => event.source === 'custom').length;
     const blockedOrFailedEvents = recentUsage.filter((event) => event.status === 'blocked' || event.status === 'failed').length;
+    const iconClass = settingsOnly ? 'settings-card-icon' : 'text-accent';
 
     return (
       <section className="tantalum-ai-settings-card agent-usage-settings-card">
         <div className="card-header agent-usage-card-header">
-          <Bot size={14} className="text-accent" />
+          <Bot size={14} className={iconClass} />
           <div>
             <h3>Agent Usage</h3>
             <span>Credit account and usage ledger</span>
@@ -5766,15 +5853,23 @@ export function AgentPanel({
         <div className="agent-usage-list">
           <div className="agent-usage-subsection-title">
             <h4>Usage Ledger</h4>
-            <span>Newest first</span>
+            {settingsOnly ? (
+              <button className="boards-hub-btn" type="button" onClick={() => setUsageLedgerExpanded((current) => !current)}>
+                {usageLedgerExpanded ? 'Hide recent activity' : 'Show recent activity'}
+              </button>
+            ) : (
+              <span>Newest first</span>
+            )}
           </div>
-          {settings.recentUsage.length === 0 ? (
-            <div className="agent-empty-state">
-              <Bot size={18} />
-              <span>No agent runs recorded yet.</span>
-            </div>
-          ) : null}
-          {settings.recentUsage.map((event) => (
+          {settingsOnly && !usageLedgerExpanded ? null : (
+            <>
+              {settings.recentUsage.length === 0 ? (
+                <div className="agent-empty-state">
+                  <Bot size={18} />
+                  <span>No agent runs recorded yet.</span>
+                </div>
+              ) : null}
+              {settings.recentUsage.map((event) => (
             <article key={event.id} className="agent-usage-row">
               <div className="agent-usage-row-head">
                 <div>
@@ -5830,6 +5925,8 @@ export function AgentPanel({
               ) : null}
             </article>
           ))}
+            </>
+          )}
         </div>
       </section>
     );
@@ -5837,13 +5934,34 @@ export function AgentPanel({
 
   return (
     <>
-      <section className={`agent-panel tantalum-ai-panel ${chatOnly ? 'tantalum-ai-panel-compact' : ''}`}>
-        {renderHeader()}
-        {renderTabs()}
+      <section className={`agent-panel tantalum-ai-panel ${chatOnly ? 'tantalum-ai-panel-compact' : ''} ${settingsOnly ? 'agent-panel-settings-only' : ''}`}>
+        {!settingsOnly ? renderHeader() : null}
+        {!settingsOnly ? renderTabs() : null}
 
         {view === 'chat' ? renderChatView() : null}
         {view === 'settings' ? renderSettingsView() : null}
       </section>
+      {settingsOnly ? (
+        <Modal
+          open={credentialModalOpen}
+          title={credentialForm.credentialId ? 'Edit Custom Credential' : 'Add Custom Credential'}
+          size="md"
+          onClose={closeCredentialModal}
+        >
+          <form className="modal-form" onSubmit={(event) => void handleCredentialSubmit(event)}>
+            {renderCredentialFormFields()}
+            <div className="form-actions">
+              <button className="boards-hub-btn" type="button" onClick={closeCredentialModal}>
+                Cancel
+              </button>
+              <button className="boards-hub-btn boards-hub-btn-primary" type="submit" disabled={savingSettings}>
+                {savingSettings ? <LoaderCircle size={14} className="spin" /> : <Save size={14} />}
+                {credentialForm.credentialId ? 'Save changes' : 'Add key'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
       <Modal
         open={Boolean(renameThreadPrompt)}
         title="Rename thread"

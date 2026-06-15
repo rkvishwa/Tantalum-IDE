@@ -1,18 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Models } from 'appwrite';
-import { AlertTriangle, Code2, Cpu, Download, FolderInput, FolderOpen, GitBranch, KeyRound, Monitor, Moon, Palette, Plus, RotateCcw, Save, Sun, Type } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Code2, Cpu, Download, FolderInput, FolderOpen, GitBranch, KeyRound, LoaderCircle, Monitor, Moon, Palette, RefreshCcw, RotateCcw, Save, Sun, Type, X } from 'lucide-react';
 
-import { createBoard, deleteBoard, listBoards } from '@/lib/boards';
+import { deleteBoard, listBoards } from '@/lib/boards';
 import { hasRequiredCloudConfiguration } from '@/lib/config';
-// no firmware
-import type { BoardDocument, BoardInput } from '@/lib/models';
+import type { BoardDocument } from '@/lib/models';
 import { ACCENT_PRESETS, FONT_FAMILY_OPTIONS, type ThemePreference, type UiPreferences } from '@/lib/uiPreferences';
 import { calculateBoardStatus } from '@/lib/utils';
 import type { ArduinoLibraryDirectoryInfo, ArduinoStorageInfo, GitConfiguration, GitProvider, LibraryMigrationProgressEvent, LibraryMigrationResult } from '@/types/electron';
 
 import { AgentPanel } from './AgentPanel';
-import { Modal } from './Modal';
+import { BoardsHubToggle } from './BoardsHubControls';
 import { useConfirm } from './ConfirmProvider';
+
+type SettingsToast = {
+  id: number;
+  message: string;
+  tone: 'info' | 'success' | 'error';
+};
 
 type SettingsPageProps = {
   appName: string;
@@ -23,20 +28,10 @@ type SettingsPageProps = {
   onActiveTabChange: (tab: SettingsTab) => void;
   onPreferencesChange: (preferences: UiPreferences) => void;
   onResetPreferences: () => void;
+  onBackToWorkspace: () => void;
 };
 
 export type SettingsTab = 'appearance' | 'editor' | 'agent' | 'git' | 'arduino' | 'boards';
-
-const BOARD_OPTIONS = [
-  { value: 'esp32:esp32:esp32', label: 'ESP32 DevKit' },
-  { value: 'esp32:esp32:esp32s2', label: 'ESP32-S2' },
-  { value: 'esp32:esp32:esp32s3', label: 'ESP32-S3' },
-  { value: 'esp32:esp32:esp32c3', label: 'ESP32-C3' },
-  { value: 'esp8266:esp8266:generic', label: 'ESP8266 Generic' },
-  { value: 'arduino:avr:uno', label: 'Arduino Uno' },
-];
-
-const CLOUD_BOARD_OPTIONS = BOARD_OPTIONS.filter((option) => option.value.startsWith('esp32:') || option.value.startsWith('esp8266:'));
 
 const EMPTY_GIT_CONFIGURATION: GitConfiguration = {
   defaultProvider: 'github',
@@ -57,11 +52,15 @@ export function SettingsPage({
   onActiveTabChange,
   onPreferencesChange,
   onResetPreferences,
+  onBackToWorkspace,
 }: SettingsPageProps) {
   const { confirm } = useConfirm();
+  const toastCounterRef = useRef(0);
+  const [toasts, setToasts] = useState<SettingsToast[]>([]);
   const [boards, setBoards] = useState<BoardDocument[]>([]);
+  const [boardsLoading, setBoardsLoading] = useState(false);
+  const [boardsError, setBoardsError] = useState('');
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
-  const [boardModalOpen, setBoardModalOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [gitConfiguration, setGitConfiguration] = useState<GitConfiguration>(EMPTY_GIT_CONFIGURATION);
   const [gitConfigMessage, setGitConfigMessage] = useState('');
@@ -75,60 +74,76 @@ export function SettingsPage({
   const [libraryMigrationError, setLibraryMigrationError] = useState('');
   const [libraryMigrationProgress, setLibraryMigrationProgress] = useState<LibraryMigrationProgressEvent | null>(null);
   const [libraryMigrationResult, setLibraryMigrationResult] = useState<LibraryMigrationResult | null>(null);
-  const [boardForm, setBoardForm] = useState<BoardInput>({
-    name: '',
-    boardType: 'esp32:esp32:esp32',
-  });
 
   const selectedBoard = boards.find((board) => board.$id === selectedBoardId) ?? null;
+
+  function pushToast(message: string, tone: SettingsToast['tone'] = 'info') {
+    const id = toastCounterRef.current++;
+    setToasts((current) => [...current, { id, message, tone }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 4000);
+  }
+
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
 
   function updatePreferences(nextPreferences: Partial<UiPreferences>) {
     onPreferencesChange({ ...preferences, ...nextPreferences });
   }
 
   function renderToggleSetting(key: keyof UiPreferences, title: string, description: string) {
-    const checked = Boolean(preferences[key]);
-
     return (
-      <label className="settings-row">
-        <span>
-          <strong>{title}</strong>
-          <small>{description}</small>
-        </span>
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={(event) => updatePreferences({ [key]: event.target.checked } as Partial<UiPreferences>)}
+      <div className="settings-toggle-row">
+        <BoardsHubToggle
+          checked={Boolean(preferences[key])}
+          label={title}
+          description={description}
+          onChange={(checked) => updatePreferences({ [key]: checked } as Partial<UiPreferences>)}
         />
-      </label>
+      </div>
     );
   }
 
   async function refreshBoardsList() {
     if (!hasRequiredCloudConfiguration()) {
+      setBoardsError('Cloud configuration is incomplete.');
+      setBoardsLoading(false);
       return;
     }
+
+    setBoardsLoading(true);
+    setBoardsError('');
+
     try {
       const nextBoards = await listBoards({ bypassCache: true });
       setBoards(nextBoards);
-      if (!selectedBoardId && nextBoards.length > 0) {
-        setSelectedBoardId(nextBoards[0].$id);
-      }
-      if (selectedBoardId && !nextBoards.some((board) => board.$id === selectedBoardId)) {
-        setSelectedBoardId(nextBoards[0]?.$id ?? '');
-      }
+      setSelectedBoardId((current) => {
+        if (!current && nextBoards.length > 0) {
+          return nextBoards[0].$id;
+        }
+        if (current && !nextBoards.some((board) => board.$id === current)) {
+          return nextBoards[0]?.$id ?? '';
+        }
+        return current;
+      });
     } catch (error) {
-      console.error(error);
+      const message = error instanceof Error ? error.message : 'Unable to load boards.';
+      setBoardsError(message);
+      pushToast(message, 'error');
+    } finally {
+      setBoardsLoading(false);
     }
   }
 
   useEffect(() => {
-    void refreshBoardsList();
-  }, []);
+    if (activeTab !== 'boards') {
+      return;
+    }
 
-  useEffect(() => {
-    // Left intentionally empty or we can just remove it
-  }, [selectedBoardId]);
+    void refreshBoardsList();
+  }, [activeTab]);
 
   async function refreshGitConfiguration() {
     const result = await window.tantalum.git.getConfiguration();
@@ -315,29 +330,6 @@ export function SettingsPage({
     }
   }
 
-  async function handleCreateBoard(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusyAction('create-board');
-    try {
-      const result = await createBoard(boardForm, user);
-      const doc = result.board;
-      await window.tantalum.secrets.setBoardSecrets({
-        boardId: doc.$id,
-        apiToken: result.apiToken || doc.tokenPreview || '',
-        commandSecret: result.commandSecret ?? '',
-        mqttTopic: result.mqttTopic ?? '',
-        provisioningPop: result.provisioningPop ?? '',
-      });
-      setBoardModalOpen(false);
-      setBoardForm({ name: '', boardType: 'esp32:esp32:esp32' });
-      await refreshBoardsList();
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function handleDeleteBoard() {
     if (!selectedBoard) {
       return;
@@ -366,52 +358,51 @@ export function SettingsPage({
   function renderBoardDetails() {
     if (!selectedBoard) {
       return (
-        <div className="empty-panel">
+        <div className="boards-hub-empty settings-boards-empty">
           <Cpu size={22} />
-          <p>Select a board to view details.</p>
+          <strong>Select a device</strong>
+          <p>Choose a registered board from the list to view provisioning and firmware details.</p>
         </div>
       );
     }
     const liveStatus = calculateBoardStatus(selectedBoard.lastSeen, selectedBoard.status);
 
     return (
-      <div className="detail-stack">
-        <section className="detail-card">
-          <div className="detail-head">
-            <div>
-              <h3>{selectedBoard.name}</h3>
-              <p>{selectedBoard.boardType}</p>
-            </div>
-            <span className={`status-pill status-${liveStatus}`}>{liveStatus}</span>
+      <section className="settings-card settings-boards-detail-card">
+        <div className="settings-boards-detail-header">
+          <div>
+            <h3>{selectedBoard.name}</h3>
+            <p>{selectedBoard.boardType}</p>
           </div>
-          <dl className="detail-grid">
-            <div>
-              <dt>Provisioning</dt>
-              <dd>{selectedBoard.provisioningStatus || 'pending'}</dd>
-            </div>
-            <div>
-              <dt>Actual version</dt>
-              <dd>{selectedBoard.firmwareVersion || '0.0.0'}</dd>
-            </div>
-            <div>
-              <dt>Desired version</dt>
-              <dd>{selectedBoard.desiredVersion || 'No deployment'}</dd>
-            </div>
-            <div>
-              <dt>WiFi credentials</dt>
-              <dd>Stored only on board</dd>
-            </div>
-          </dl>
-          <div className="inline-banner">
-            Your WiFi name and password are sent directly to the board. They are not uploaded to Tantalum Cloud and are not stored by the IDE.
+          <span className={`status-pill status-${liveStatus}`}>{liveStatus}</span>
+        </div>
+        <dl className="settings-boards-field-grid">
+          <div>
+            <dt>Provisioning</dt>
+            <dd>{selectedBoard.provisioningStatus || 'pending'}</dd>
           </div>
-          <div className="action-row">
-            <button className="danger-button" type="button" onClick={() => void handleDeleteBoard()} disabled={busyAction === 'delete-board'}>
-              Delete board
-            </button>
+          <div>
+            <dt>Actual version</dt>
+            <dd>{selectedBoard.firmwareVersion || '0.0.0'}</dd>
           </div>
-        </section>
-      </div>
+          <div>
+            <dt>Desired version</dt>
+            <dd>{selectedBoard.desiredVersion || 'No deployment'}</dd>
+          </div>
+          <div>
+            <dt>WiFi credentials</dt>
+            <dd>Stored only on board</dd>
+          </div>
+        </dl>
+        <div className="inline-banner">
+          Your WiFi name and password are sent directly to the board. They are not uploaded to Tantalum Cloud and are not stored by the IDE.
+        </div>
+        <div className="settings-boards-detail-actions">
+          <button className="boards-hub-btn boards-hub-btn-danger" type="button" onClick={() => void handleDeleteBoard()} disabled={busyAction === 'delete-board'}>
+            Delete board
+          </button>
+        </div>
+      </section>
     );
   }
 
@@ -432,22 +423,29 @@ export function SettingsPage({
       </div>
       
       <div className="settings-content">
+        <div className="settings-top-bar">
+          <button className="boards-hub-btn" type="button" onClick={onBackToWorkspace}>
+            <ChevronLeft size={14} />
+            Back to app
+          </button>
+        </div>
+
         {activeTab === 'appearance' && (
           <div className="settings-pane appearance-pane">
-            <div className="settings-pane-header">
+            <div className="settings-pane-header settings-pane-hero">
               <div>
-                <h2>Appearance</h2>
-                <p className="text-muted">{appName} {version}</p>
+                <h1>Appearance</h1>
+                <p className="settings-pane-subtitle">{appName} {version}</p>
               </div>
-              <button className="secondary-button compact" type="button" onClick={onResetPreferences}>
-                <RotateCcw size={15} /> Reset
+              <button className="boards-hub-btn" type="button" onClick={onResetPreferences}>
+                <RotateCcw size={14} /> Reset
               </button>
             </div>
 
             <div className="appearance-grid">
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <Palette size={18} />
+                  <Palette size={16} />
                   <div>
                     <h3>Theme</h3>
                     <p>Choose light, dark, or your system default.</p>
@@ -477,10 +475,12 @@ export function SettingsPage({
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <Type size={18} />
+                  <Type size={16} />
                   <div>
                     <h3>Font</h3>
-                    <p>VS Code defaults are used across the interface.</p>
+                    <p style={{ fontFamily: preferences.fontFamily }}>
+                      {FONT_FAMILY_OPTIONS.find((option) => option.value === preferences.fontFamily)?.label ?? preferences.fontFamily}
+                    </p>
                   </div>
                 </div>
                 <div className="settings-form-grid">
@@ -520,7 +520,7 @@ export function SettingsPage({
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <Palette size={18} />
+                  <Palette size={16} />
                   <div>
                     <h3>Accent color</h3>
                     <p>Pick a preset or choose any custom color.</p>
@@ -552,25 +552,20 @@ export function SettingsPage({
 
         {activeTab === 'editor' && (
           <div className="settings-pane editor-settings-pane">
-            <div className="settings-pane-header">
+            <div className="settings-pane-header settings-pane-hero">
               <div>
-                <h2>Editor</h2>
-                <p className="text-muted">Customize Monaco editing behavior and code intelligence.</p>
+                <h1>Editor</h1>
+                <p className="settings-pane-subtitle">Customize Monaco editing behavior and code intelligence.</p>
               </div>
-              <button className="secondary-button compact" type="button" onClick={onResetPreferences}>
-                <RotateCcw size={15} /> Reset
+              <button className="boards-hub-btn" type="button" onClick={onResetPreferences}>
+                <RotateCcw size={14} /> Reset
               </button>
-            </div>
-
-            <div className="settings-search-box">
-              <Code2 size={16} />
-              <span>Editor settings</span>
             </div>
 
             <div className="appearance-grid">
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <Type size={18} />
+                  <Type size={16} />
                   <div>
                     <h3>Text Editor</h3>
                     <p>Set the code font, size, tabs, wrapping, and line numbers.</p>
@@ -636,7 +631,7 @@ export function SettingsPage({
 
               <section className="settings-card settings-list-card">
                 <div className="settings-card-heading">
-                  <Code2 size={18} />
+                  <Code2 size={16} />
                   <div>
                     <h3>Editor Features</h3>
                     <p>Control suggestions, navigation aids, formatting, and visual helpers.</p>
@@ -660,28 +655,35 @@ export function SettingsPage({
         )}
 
         {activeTab === 'agent' && (
-          <div className="settings-pane">
-            <AgentPanel 
-              user={user} 
-              workspacePath={null} 
-              activeTab={null} 
-              pushConsole={() => {}} 
-              pushToast={() => {}} 
-              defaultView="settings" 
-              hideChat={true} 
+          <div className="settings-pane agent-settings-pane">
+            <div className="settings-pane-header settings-pane-hero">
+              <div>
+                <h1>Agent Configuration</h1>
+                <p className="settings-pane-subtitle">Configure AI models, API keys, tools, and usage.</p>
+              </div>
+            </div>
+            <AgentPanel
+              user={user}
+              workspacePath={null}
+              activeTab={null}
+              pushConsole={() => {}}
+              pushToast={pushToast}
+              defaultView="settings"
+              hideChat={true}
+              settingsOnly={true}
             />
           </div>
         )}
 
         {activeTab === 'git' && (
           <div className="settings-pane git-settings-pane">
-            <div className="settings-pane-header">
+            <div className="settings-pane-header settings-pane-hero">
               <div>
-                <h2>Git Configuration</h2>
-                <p className="text-muted">Configure Git identity and publishing credentials for GitHub or GitLab.</p>
+                <h1>Git Configuration</h1>
+                <p className="settings-pane-subtitle">Configure Git identity and publishing credentials for GitHub or GitLab.</p>
               </div>
-              <button className="primary-button compact" type="button" onClick={() => void handleSaveGitConfiguration()} disabled={busyAction === 'save-git-config'}>
-                <Save size={15} /> Save
+              <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void handleSaveGitConfiguration()} disabled={busyAction === 'save-git-config'}>
+                <Save size={14} /> Save
               </button>
             </div>
 
@@ -691,7 +693,7 @@ export function SettingsPage({
             <div className="appearance-grid">
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <GitBranch size={18} />
+                  <GitBranch size={16} />
                   <div>
                     <h3>Identity</h3>
                     <p>Stored in your global Git config and used for commits.</p>
@@ -711,7 +713,7 @@ export function SettingsPage({
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <KeyRound size={18} />
+                  <KeyRound size={16} />
                   <div>
                     <h3>Provider</h3>
                     <p>Used by Publish Repository when creating hosted remotes.</p>
@@ -738,7 +740,7 @@ export function SettingsPage({
 
               <section className="settings-card settings-list-card git-token-card">
                 <div className="settings-card-heading">
-                  <KeyRound size={18} />
+                  <KeyRound size={16} />
                   <div>
                     <h3>Tokens</h3>
                     <p>Tokens stay in the local desktop secret store and are used only for creating and publishing remotes.</p>
@@ -766,11 +768,11 @@ export function SettingsPage({
                 </div>
                 <div className="git-token-actions">
                   <span>{gitConfiguration.githubTokenConfigured ? 'GitHub token configured' : 'No GitHub token'}</span>
-                  <button className="secondary-button compact" type="button" onClick={() => void handleSaveGitConfiguration({ clearGithubToken: true })} disabled={!gitConfiguration.githubTokenConfigured || busyAction === 'save-git-config'}>
+                  <button className="boards-hub-btn" type="button" onClick={() => void handleSaveGitConfiguration({ clearGithubToken: true })} disabled={!gitConfiguration.githubTokenConfigured || busyAction === 'save-git-config'}>
                     Clear GitHub token
                   </button>
                   <span>{gitConfiguration.gitlabTokenConfigured ? 'GitLab token configured' : 'No GitLab token'}</span>
-                  <button className="secondary-button compact" type="button" onClick={() => void handleSaveGitConfiguration({ clearGitlabToken: true })} disabled={!gitConfiguration.gitlabTokenConfigured || busyAction === 'save-git-config'}>
+                  <button className="boards-hub-btn" type="button" onClick={() => void handleSaveGitConfiguration({ clearGitlabToken: true })} disabled={!gitConfiguration.gitlabTokenConfigured || busyAction === 'save-git-config'}>
                     Clear GitLab token
                   </button>
                 </div>
@@ -781,10 +783,10 @@ export function SettingsPage({
 
         {activeTab === 'arduino' && (
           <div className="settings-pane arduino-settings-pane">
-            <div className="settings-pane-header">
+            <div className="settings-pane-header settings-pane-hero">
               <div>
-                <h2>Arduino Storage</h2>
-                <p className="text-muted">Move board cores, package downloads, temp extraction, build cache, and libraries off the system disk.</p>
+                <h1>Arduino Storage</h1>
+                <p className="settings-pane-subtitle">Move board cores, package downloads, temp extraction, build cache, and libraries off the system disk.</p>
               </div>
             </div>
 
@@ -794,7 +796,7 @@ export function SettingsPage({
             <div className="appearance-grid">
               <section className="settings-card settings-list-card">
                 <div className="settings-card-heading">
-                  <AlertTriangle size={18} />
+                  <AlertTriangle size={16} />
                   <div>
                     <h3>Upload safety</h3>
                     <p>Control whether USB and OTA uploads verify the sketch before upload work starts.</p>
@@ -818,7 +820,7 @@ export function SettingsPage({
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <FolderInput size={18} />
+                  <FolderInput size={16} />
                   <div>
                     <h3>Toolchain storage root</h3>
                     <p>Use a folder on another drive for Arduino15 data, downloads, temporary files, build cache, and the sketchbook.</p>
@@ -849,13 +851,13 @@ export function SettingsPage({
                   </div>
                 ) : null}
                 <div className="settings-action-row">
-                  <button className="primary-button compact" type="button" onClick={() => void handleSelectArduinoStorageFolder()} disabled={busyAction === 'select-arduino-storage'}>
-                    <FolderOpen size={15} /> {busyAction === 'select-arduino-storage' ? 'Choosing...' : 'Choose folder'}
+                  <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void handleSelectArduinoStorageFolder()} disabled={busyAction === 'select-arduino-storage'}>
+                    <FolderOpen size={14} /> {busyAction === 'select-arduino-storage' ? 'Choosing...' : 'Choose folder'}
                   </button>
-                  <button className="secondary-button compact" type="button" onClick={() => void refreshArduinoStorage()}>
+                  <button className="boards-hub-btn" type="button" onClick={() => void refreshArduinoStorage()}>
                     Refresh
                   </button>
-                  <button className="secondary-button compact" type="button" onClick={() => void handleClearArduinoStorageFolder()} disabled={!arduinoStorageInfo?.configured || busyAction === 'clear-arduino-storage'}>
+                  <button className="boards-hub-btn" type="button" onClick={() => void handleClearArduinoStorageFolder()} disabled={!arduinoStorageInfo?.configured || busyAction === 'clear-arduino-storage'}>
                     Use default
                   </button>
                 </div>
@@ -863,7 +865,7 @@ export function SettingsPage({
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <FolderOpen size={18} />
+                  <FolderOpen size={16} />
                   <div>
                     <h3>Active library folder</h3>
                     <p>Tantalum installs and compiles libraries from this writable folder.</p>
@@ -879,18 +881,18 @@ export function SettingsPage({
                   </div>
                 ) : null}
                 <div className="settings-action-row">
-                  <button className="secondary-button compact" type="button" onClick={() => void refreshArduinoLibraryDirectory()}>
+                  <button className="boards-hub-btn" type="button" onClick={() => void refreshArduinoLibraryDirectory()}>
                     Refresh
                   </button>
-                  <button className="secondary-button compact" type="button" onClick={() => void handleRevealArduinoLibraryFolder()} disabled={!libraryDirectoryInfo}>
-                    <FolderOpen size={15} /> Reveal folder
+                  <button className="boards-hub-btn" type="button" onClick={() => void handleRevealArduinoLibraryFolder()} disabled={!libraryDirectoryInfo}>
+                    <FolderOpen size={14} /> Reveal folder
                   </button>
                 </div>
               </section>
 
               <section className="settings-card">
                 <div className="settings-card-heading">
-                  <FolderInput size={18} />
+                  <FolderInput size={16} />
                   <div>
                     <h3>Migrate from another Arduino IDE</h3>
                     <p>Choose the official Arduino sketchbook or its libraries folder and copy its libraries into Tantalum.</p>
@@ -898,8 +900,8 @@ export function SettingsPage({
                 </div>
 
                 <div className="settings-action-row">
-                  <button className="primary-button compact" type="button" onClick={() => void handleMigrateArduinoLibraries()} disabled={busyAction === 'migrate-libraries'}>
-                    <Download size={15} /> {busyAction === 'migrate-libraries' ? 'Migrating...' : 'Migrate libraries'}
+                  <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void handleMigrateArduinoLibraries()} disabled={busyAction === 'migrate-libraries'}>
+                    <Download size={14} /> {busyAction === 'migrate-libraries' ? 'Migrating...' : 'Migrate libraries'}
                   </button>
                 </div>
 
@@ -942,71 +944,89 @@ export function SettingsPage({
         )}
 
         {activeTab === 'boards' && (
-          <div className="settings-pane boards-pane">
-            <div className="settings-pane-header">
+          <div className="settings-pane settings-boards-pane">
+            <div className="settings-pane-header settings-pane-hero">
               <div>
-                <h2>Devices</h2>
-                <p className="text-muted">Manage your cloud boards and hardware devices.</p>
+                <h1>Devices</h1>
+                <p className="settings-pane-subtitle">Manage your cloud boards and hardware devices.</p>
               </div>
-              <button className="primary-button compact" type="button" disabled title="Connect and save a local ESP32/ESP8266 board in the IDE, then choose Enable Tantalum Cloud.">
-                <Plus size={16} /> Use local board
+              <button className="boards-hub-btn" type="button" onClick={() => void refreshBoardsList()} disabled={boardsLoading} title="Refresh cloud boards">
+                {boardsLoading ? <LoaderCircle size={14} className="spin" /> : <RefreshCcw size={14} />}
+                Refresh
               </button>
             </div>
-            <div className="boards-split-view">
-              <div className="board-list">
-                {boards.map((board) => {
-                  const status = calculateBoardStatus(board.lastSeen, board.status);
-                  return (
-                    <button
-                      key={board.$id}
-                      className={`board-card ${selectedBoardId === board.$id ? 'active' : ''}`}
-                      type="button"
-                      onClick={() => setSelectedBoardId(board.$id)}
-                    >
-                      <div className="board-card-head">
-                        <strong>{board.name}</strong>
-                        <span className={`status-pill status-${status}`}>{status}</span>
-                      </div>
-                      <p>{board.boardType}</p>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="board-details-container">
-                {renderBoardDetails()}
-              </div>
+
+            <div className="inline-banner settings-boards-callout">
+              Register new ESP devices from <strong>My Boards</strong> in the workspace. Connect a local board, then choose Enable Tantalum Cloud from the board card.
             </div>
+
+            {boardsError ? <div className="inline-banner inline-banner-error">{boardsError}</div> : null}
+
+            {boards.length === 0 && !boardsLoading ? (
+              <div className="settings-boards-empty-panel boards-hub-empty">
+                <Cpu size={22} />
+                <strong>No cloud devices yet</strong>
+                <p>Register devices from My Boards in the workspace.</p>
+              </div>
+            ) : (
+              <div className="settings-boards-layout">
+                <div className="settings-boards-list-panel">
+                  <div className="settings-boards-list">
+                    {boardsLoading && boards.length === 0 ? (
+                      <div className="settings-boards-loading">
+                        <LoaderCircle size={16} className="spin" />
+                        <span>Loading cloud devices...</span>
+                      </div>
+                    ) : null}
+                    {boards.map((board) => {
+                      const status = calculateBoardStatus(board.lastSeen, board.status);
+                      const isSelected = selectedBoardId === board.$id;
+                      return (
+                        <article key={board.$id} className={`boards-hub-card ${isSelected ? 'selected' : ''}`}>
+                          <button
+                            className="boards-hub-card-trigger"
+                            type="button"
+                            aria-pressed={isSelected}
+                            onClick={() => setSelectedBoardId(board.$id)}
+                          >
+                            <span className="boards-hub-card-icon">
+                              <Cpu size={18} strokeWidth={1.75} />
+                              <span className={`boards-hub-status-dot status-${status}`} aria-hidden="true" />
+                            </span>
+                            <span className="boards-hub-card-text">
+                              <strong>{board.name}</strong>
+                              <span>{board.boardType}</span>
+                            </span>
+                            <ChevronRight size={16} className="boards-hub-card-chevron" aria-hidden="true" />
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="settings-boards-detail-panel">
+                  <div className="settings-boards-detail">
+                    {renderBoardDetails()}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      <Modal open={boardModalOpen} title="Enable Tantalum Cloud from a local board" subtitle="Connect and save a local ESP32/ESP8266 board in the IDE, then choose Enable Tantalum Cloud from the local board card." onClose={() => setBoardModalOpen(false)}>
-        <form className="modal-form" onSubmit={handleCreateBoard}>
-          <label>
-            Board name
-            <input value={boardForm.name} onChange={(event) => setBoardForm((current) => ({ ...current, name: event.target.value }))} placeholder="Living room ESP32" disabled />
-          </label>
-          <label>
-            Board type
-            <select value={boardForm.boardType} onChange={(event) => setBoardForm((current) => ({ ...current, boardType: event.target.value }))} disabled>
-              {CLOUD_BOARD_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="form-actions">
-            <button className="secondary-button" type="button" onClick={() => setBoardModalOpen(false)}>
-              Cancel
-            </button>
-            <button className="primary-button" type="submit" disabled>
-              Use Local boards
+      <div className="toast-stack settings-toast-stack">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast toast-${toast.tone}`}>
+            <div className="toast-content">
+              <span className="toast-message">{toast.message}</span>
+            </div>
+            <button className="toast-close-button" type="button" onClick={() => dismissToast(toast.id)} aria-label="Close notification">
+              <X size={14} />
             </button>
           </div>
-        </form>
-      </Modal>
-
+        ))}
+      </div>
     </div>
   );
 }

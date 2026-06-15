@@ -159,3 +159,34 @@ export function normalizeUiPreferences(preferences: Partial<UiPreferences>): UiP
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
+
+export function getAccentContrastColor(accentColor: string) {
+  const hex = accentColor.replace('#', '');
+  if (!/^[0-9a-f]{6}$/i.test(hex)) {
+    return '#ffffff';
+  }
+
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  const yiq = (red * 299 + green * 587 + blue * 114) / 1000;
+
+  return yiq >= 150 ? '#081018' : '#ffffff';
+}
+
+export type ResolvedTheme = 'light' | 'dark';
+
+export function applyDocumentTheme(preferences: UiPreferences): ResolvedTheme {
+  const resolved = resolveThemePreference(preferences.theme);
+  const root = document.documentElement;
+
+  root.dataset.theme = resolved;
+  root.dataset.themePreference = preferences.theme;
+  root.style.setProperty('--app-font-family', preferences.fontFamily);
+  root.style.setProperty('--app-font-size', `${preferences.fontSize}px`);
+  root.style.setProperty('--accent', preferences.accentColor);
+  root.style.setProperty('--accent-contrast', getAccentContrastColor(preferences.accentColor));
+  root.style.setProperty('--color-accent', preferences.accentColor);
+
+  return resolved;
+}

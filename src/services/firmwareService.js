@@ -28,7 +28,7 @@ class FirmwareService {
             const tempPath = path.join(require('os').tmpdir(), filename);
             fs.writeFileSync(tempPath, binaryData);
 
-            // Upload to Appwrite Storage
+            // Upload to cloud storage
             const file = await storage.createFile(
                 firmwareBucketId,
                 ID.unique(),

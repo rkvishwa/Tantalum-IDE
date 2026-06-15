@@ -1,8 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Models } from 'appwrite';
 
 import { appwriteConfig, hasRequiredCloudConfiguration } from '@/lib/config';
-import { register, signIn } from '@/lib/auth';
+import { startWebLogin } from '@/lib/auth';
+import { useDocumentTheme } from '@/lib/useDocumentTheme';
+import tantalumIcon from '@/assets/tantalum-icon.svg';
+import tantalumIconDark from '@/assets/tantalum-icon-dark.svg';
 
 type AuthScreenProps = {
   appName: string;
@@ -10,173 +13,93 @@ type AuthScreenProps = {
 };
 
 function formatAuthError(caughtError: unknown) {
-  const message = caughtError instanceof Error ? caughtError.message : 'Unable to reach Appwrite.';
+  const message = caughtError instanceof Error ? caughtError.message : 'Unable to reach the cloud service.';
 
   if (/network request failed|failed to fetch/i.test(message)) {
-    return `Unable to reach Appwrite at ${appwriteConfig.endpoint}. Restart the app and verify the endpoint is reachable from this machine.`;
+    return `Unable to reach the cloud service at ${appwriteConfig.endpoint}. Restart the app and verify the endpoint is reachable from this machine.`;
   }
 
   return message;
 }
 
 export function AuthScreen({ appName, onAuthenticated }: AuthScreenProps) {
-  const [mode, setMode] = useState<'signin' | 'register'>('signin');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
-  const [registerForm, setRegisterForm] = useState({ name: '', email: '', password: '', confirmPassword: '' });
-
+  const [status, setStatus] = useState<string | null>(null);
+  const resolvedTheme = useDocumentTheme();
   const canUseCloud = hasRequiredCloudConfiguration();
 
-  async function handleSignIn(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  useEffect(() => {
+    const unsubscribe = window.tantalum?.cloud?.auth?.onWebLoginResult?.((result) => {
+      setBusy(false);
+      if (result.success) {
+        onAuthenticated(result.user);
+        return;
+      }
+
+      setError(result.error || 'Web login failed.');
+      setStatus(null);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [onAuthenticated]);
+
+  async function handleWebLogin() {
     setError(null);
-
-    if (!loginForm.email || !loginForm.password) {
-      setError('Enter both your email and password.');
-      return;
-    }
-
+    setStatus(null);
     setBusy(true);
     try {
-      const user = await signIn(loginForm.email.trim(), loginForm.password);
-      onAuthenticated(user);
+      const result = await startWebLogin();
+      setStatus(`Continue in your browser. This login request expires at ${new Date(result.expiresAt).toLocaleTimeString()}.`);
     } catch (caughtError) {
       setError(formatAuthError(caughtError));
-    } finally {
       setBusy(false);
     }
   }
 
-  async function handleRegister(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(null);
-
-    if (!registerForm.name || !registerForm.email || !registerForm.password || !registerForm.confirmPassword) {
-      setError('Complete every field to create an account.');
+  async function openCreateAccount() {
+    if (!appwriteConfig.webAppUrl) {
       return;
     }
 
-    if (registerForm.password.length < 8) {
-      setError('Passwords must be at least 8 characters long.');
-      return;
-    }
-
-    if (registerForm.password !== registerForm.confirmPassword) {
-      setError('Passwords do not match.');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const user = await register(registerForm.email.trim(), registerForm.password, registerForm.name.trim());
-      onAuthenticated(user);
-    } catch (caughtError) {
-      setError(formatAuthError(caughtError));
-    } finally {
-      setBusy(false);
-    }
+    await window.tantalum?.shell?.openExternal?.(`${appwriteConfig.webAppUrl}/register`);
   }
 
   return (
     <div className="auth-shell">
       <div className="auth-panel">
         <div className="brand-mark">
-          <span className="brand-dot" />
+          <img className="brand-icon" src={resolvedTheme === 'dark' ? tantalumIconDark : tantalumIcon} alt="" />
           <span className="brand-text">{appName}</span>
         </div>
         <div className="auth-copy">
           <p className="eyebrow">Desktop control room</p>
-          <h1>Code, flash, and ship OTA firmware with a safer Appwrite workflow.</h1>
+          <h1>Sign in through the Tantalum web portal.</h1>
           <p>
-            Tantalum IDE keeps native device tooling inside Electron, keeps Appwrite auth in the renderer where it belongs,
-            and keeps board secrets local to this machine instead of pushing them into your database.
+            Account creation, email verification, password reset, Google login, and GitHub login now happen in the browser.
+            The IDE receives a short-lived cloud session after the web login succeeds.
           </p>
-        </div>
-        <div className="auth-tabs">
-          <button className={mode === 'signin' ? 'active' : ''} type="button" onClick={() => setMode('signin')}>
-            Sign in
-          </button>
-          <button className={mode === 'register' ? 'active' : ''} type="button" onClick={() => setMode('register')}>
-            Create account
-          </button>
         </div>
 
         {!canUseCloud ? (
           <div className="inline-banner inline-banner-warning">
-            Appwrite configuration is incomplete. Add the missing values in `appwrite.config.json` or provide renderer env overrides before using authentication or cloud features.
+            Cloud configuration is incomplete. Update the local cloud settings before using authentication or cloud features.
           </div>
         ) : null}
 
         {error ? <div className="inline-banner inline-banner-error">{error}</div> : null}
+        {status ? <div className="inline-banner">{status}</div> : null}
 
-        {mode === 'signin' ? (
-          <form className="auth-form" onSubmit={handleSignIn}>
-            <label>
-              Email
-              <input
-                type="email"
-                value={loginForm.email}
-                onChange={(event) => setLoginForm((current) => ({ ...current, email: event.target.value }))}
-                placeholder="you@example.com"
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={loginForm.password}
-                onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
-                placeholder="••••••••"
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={busy || !canUseCloud}>
-              {busy ? 'Signing in...' : 'Sign in'}
-            </button>
-          </form>
-        ) : (
-          <form className="auth-form" onSubmit={handleRegister}>
-            <label>
-              Full name
-              <input
-                type="text"
-                value={registerForm.name}
-                onChange={(event) => setRegisterForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Ada Lovelace"
-              />
-            </label>
-            <label>
-              Email
-              <input
-                type="email"
-                value={registerForm.email}
-                onChange={(event) => setRegisterForm((current) => ({ ...current, email: event.target.value }))}
-                placeholder="you@example.com"
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={registerForm.password}
-                onChange={(event) => setRegisterForm((current) => ({ ...current, password: event.target.value }))}
-                placeholder="At least 8 characters"
-              />
-            </label>
-            <label>
-              Confirm password
-              <input
-                type="password"
-                value={registerForm.confirmPassword}
-                onChange={(event) => setRegisterForm((current) => ({ ...current, confirmPassword: event.target.value }))}
-                placeholder="Repeat your password"
-              />
-            </label>
-            <button className="primary-button" type="submit" disabled={busy || !canUseCloud}>
-              {busy ? 'Creating account...' : 'Create account'}
-            </button>
-          </form>
-        )}
+        <div className="auth-form">
+          <button className="primary-button" type="button" onClick={() => void handleWebLogin()} disabled={busy || !canUseCloud}>
+            {busy ? 'Waiting for browser login...' : 'Login from web'}
+          </button>
+          <button className="secondary-button" type="button" onClick={() => void openCreateAccount()} disabled={!canUseCloud}>
+            Create account on web
+          </button>
+        </div>
       </div>
     </div>
   );

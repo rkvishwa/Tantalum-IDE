@@ -310,36 +310,41 @@ export function WorkspaceSearchPopup({
     <div className="workspace-search-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="workspace-search-dialog" role="dialog" aria-modal="true" aria-label="Project Space search" onKeyDown={(event) => void handleKeyDown(event)}>
         <div className="workspace-search-head">
-          <Search size={17} />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search files, folders, or text"
-            aria-label="Search Project Space"
-          />
-          {searching ? <LoaderCircle size={16} className="spin" /> : null}
-          <select className="workspace-search-mode-select" value={mode} onChange={(event) => setMode(event.target.value as WorkspaceSearchMode)} aria-label="Search mode">
-            {MODES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <div className="workspace-search-toggles" aria-label="Search options">
-            <button className={useRegex ? 'active' : ''} type="button" onClick={() => setUseRegex((current) => !current)} title="Use regex">
-              <Regex size={14} />
-            </button>
-            <button className={matchCase ? 'active' : ''} type="button" onClick={() => setMatchCase((current) => !current)} title="Match case">
-              <CaseSensitive size={15} />
-            </button>
-            <button className={wholeWord ? 'active' : ''} type="button" onClick={() => setWholeWord((current) => !current)} title="Match whole word">
-              W
+          <div className="workspace-search-head-top">
+            <strong className="workspace-search-title">Project Space search</strong>
+            <button className="icon-button workspace-search-close" type="button" onClick={onClose} aria-label="Close Project Space search">
+              <X size={16} />
             </button>
           </div>
-          <button className="workspace-search-close" type="button" onClick={onClose} aria-label="Close Project Space search">
-            <X size={16} />
-          </button>
+          <div className="workspace-search-toolbar">
+            <Search size={17} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search files, folders, or text"
+              aria-label="Search Project Space"
+            />
+            {searching ? <LoaderCircle size={16} className="spin" /> : null}
+            <select className="workspace-search-mode-select" value={mode} onChange={(event) => setMode(event.target.value as WorkspaceSearchMode)} aria-label="Search mode">
+              {MODES.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            <div className="workspace-search-toggles" aria-label="Search options">
+              <button className={useRegex ? 'active' : ''} type="button" onClick={() => setUseRegex((current) => !current)} title="Use regex">
+                <Regex size={14} />
+              </button>
+              <button className={matchCase ? 'active' : ''} type="button" onClick={() => setMatchCase((current) => !current)} title="Match case">
+                <CaseSensitive size={15} />
+              </button>
+              <button className={wholeWord ? 'active' : ''} type="button" onClick={() => setWholeWord((current) => !current)} title="Match whole word">
+                W
+              </button>
+            </div>
+          </div>
         </div>
 
         <details className="workspace-search-filters">
@@ -371,14 +376,14 @@ export function WorkspaceSearchPopup({
         ) : null}
 
         {error ? (
-          <div className="workspace-search-message error">
+          <div className="inline-banner inline-banner-error">
             <AlertTriangle size={15} />
             <span>{error}</span>
           </div>
         ) : null}
 
         {replacePreview ? (
-          <div className={`workspace-search-message ${blockedDirtyFiles.length > 0 ? 'warning' : 'success'}`}>
+          <div className={`inline-banner ${blockedDirtyFiles.length > 0 ? 'inline-banner-warning' : 'inline-banner-success'}`}>
             {blockedDirtyFiles.length > 0 ? <AlertTriangle size={15} /> : <Check size={15} />}
             <span>
               {blockedDirtyFiles.length > 0

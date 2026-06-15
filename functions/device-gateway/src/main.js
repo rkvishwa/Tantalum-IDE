@@ -19,6 +19,16 @@ const {
 } = process.env;
 
 const DEFAULT_RECOMMENDED_POLL_MS = 15 * 60 * 1000;
+const OTA_UPDATE_MODES = new Set(['polling', 'mqtt', 'both']);
+
+function normalizeOtaUpdateMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return OTA_UPDATE_MODES.has(mode) ? mode : 'polling';
+}
+
+function heartbeatCanOfferOta(board) {
+  return normalizeOtaUpdateMode(board?.otaUpdateMode) !== 'mqtt';
+}
 
 function createAdminClient(req) {
   if (!APPWRITE_FUNCTION_API_ENDPOINT || !APPWRITE_FUNCTION_PROJECT_ID) {
@@ -118,13 +128,14 @@ function buildOtaCommand(board, firmware, payload) {
 }
 
 async function buildDeviceResponse(databases, board, payload, options = {}) {
-  const shouldResolveFirmware = options.resolveFirmware || hasPendingDesiredFirmware(board, payload);
+  const allowOtaCommand = options.allowOtaCommand !== false;
+  const shouldResolveFirmware = allowOtaCommand && (options.resolveFirmware || hasPendingDesiredFirmware(board, payload));
   const firmware = shouldResolveFirmware ? await resolveDesiredFirmware(databases, board) : null;
   const data = {
     recommendedPollMs: DEFAULT_RECOMMENDED_POLL_MS,
   };
 
-  if (shouldOfferUpdate(board, firmware, payload)) {
+  if (allowOtaCommand && shouldOfferUpdate(board, firmware, payload)) {
     data.otaCommand = buildOtaCommand(board, firmware, payload);
   }
 
@@ -146,7 +157,9 @@ async function handleHeartbeat(databases, payload, res) {
   const updates = buildTelemetryUpdates(board, payload, now);
 
   await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_BOARDS_COLLECTION_ID, board.$id, updates);
-  const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload);
+  const response = await buildDeviceResponse(databases, { ...board, ...updates }, payload, {
+    allowOtaCommand: heartbeatCanOfferOta(board),
+  });
   return ok(res, response);
 }
 

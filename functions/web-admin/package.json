@@ -1,0 +1,9 @@
+{
+  "name": "tantalum-web-admin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "node-appwrite": "^13.0.0"
+  }
+}

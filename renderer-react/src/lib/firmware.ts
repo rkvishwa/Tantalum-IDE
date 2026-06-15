@@ -85,6 +85,16 @@ async function listDeployedFirmware(boardId: string) {
   return response.documents;
 }
 
+export type FirmwareDeployResult = {
+  board?: BoardDocument;
+  firmware?: FirmwareDocument;
+  mqtt?: {
+    published: boolean;
+    status?: 'published' | 'skipped-polling-only' | 'mqtt-failed-with-polling-fallback' | 'mqtt-failed-no-fallback' | string;
+    reason?: string;
+  };
+};
+
 export async function uploadFirmwareRelease(payload: {
   user: Models.User<Models.Preferences>;
   board: BoardDocument;
@@ -154,14 +164,14 @@ export async function uploadFirmwareRelease(payload: {
     firmwarePermissions(payload.user.$id),
   );
 
-  await deployFirmwareToBoard(payload.board.$id, payload.firmwareId, payload.deploymentId);
+  const deployment = await deployFirmwareToBoard(payload.board.$id, payload.firmwareId, payload.deploymentId);
 
-  return firmware;
+  return { firmware, deployment };
 }
 
 async function deployFirmwareToBoard(boardId: string, firmwareId: string, deploymentId: string) {
   if (hasBoardAdminFunction()) {
-    return executeFunction<{ boardId: string; firmwareId: string; deploymentId: string }, { board: BoardDocument; firmware: FirmwareDocument; mqtt?: { published: boolean; reason?: string } }>(
+    return executeFunction<{ boardId: string; firmwareId: string; deploymentId: string }, FirmwareDeployResult>(
       appwriteConfig.boardAdminFunctionId,
       { boardId, firmwareId, deploymentId },
       '/deploy-firmware',
@@ -192,7 +202,7 @@ async function deployFirmwareToBoard(boardId: string, firmwareId: string, deploy
 
 export async function markFirmwareAsCurrent(board: BoardDocument, firmware: FirmwareDocument) {
   const deploymentId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
-  await deployFirmwareToBoard(board.$id, firmware.$id, deploymentId);
+  return deployFirmwareToBoard(board.$id, firmware.$id, deploymentId);
 }
 
 export async function deleteFirmwareRelease(firmware: FirmwareDocument) {

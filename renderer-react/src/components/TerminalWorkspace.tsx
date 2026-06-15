@@ -1,22 +1,28 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, PanelRight, Plus, TerminalSquare, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink, PanelRight, Plus, SquarePen, TerminalSquare, Trash2, X } from 'lucide-react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 
 import { resolveThemePreference, type UiPreferences } from '@/lib/uiPreferences';
+import { readTerminalTheme } from '@/lib/terminalTheme';
 import type { TerminalDataEvent, TerminalExitEvent, TerminalShellProfile } from '@/types/electron';
 
 type TerminalWorkspaceProps = {
   active: boolean;
   currentFolderPath: string | null;
   uiPreferences: UiPreferences;
+  host?: TerminalHostId;
+  variant?: TerminalWorkspaceVariant;
   command?: TerminalWorkspaceCommand | null;
   onStateChange?: (state: TerminalWorkspaceState) => void;
+  onTransferSession?: (targetHost: TerminalHostId, session: TerminalWorkspaceTransferSession) => void;
 };
 
 export type TerminalSessionStatus = 'running' | 'exited' | 'error';
+export type TerminalHostId = 'page' | 'bottom';
+export type TerminalWorkspaceVariant = 'page' | 'bottom';
 export type TerminalLocation = 'project' | 'home';
 export type TerminalSplitZone = 'left' | 'right' | 'top' | 'bottom';
 export type TerminalDropZone = TerminalSplitZone | 'center';
@@ -30,7 +36,10 @@ export type TerminalWorkspaceCommandInput =
   | { type: 'rename'; sessionId: string; title: string }
   | { type: 'move-session'; sessionId: string; targetPaneId: string; targetIndex?: number }
   | { type: 'unsplit-session'; sessionId: string; targetIndex?: number }
-  | { type: 'split-session'; sessionId: string; targetPaneId: string; targetSessionId?: string; zone: TerminalSplitZone };
+  | { type: 'split-session'; sessionId: string; targetPaneId: string; targetSessionId?: string; zone: TerminalSplitZone }
+  | { type: 'move-to-bottom'; sessionId: string }
+  | { type: 'move-to-page'; sessionId: string }
+  | { type: 'attach-session'; session: TerminalWorkspaceTransferSession; split?: TerminalSplitZone };
 
 export type TerminalWorkspaceCommand = TerminalWorkspaceCommandInput & {
   id: number;
@@ -44,6 +53,10 @@ export type TerminalWorkspaceSessionSnapshot = {
   paneId: string | null;
   shellId: string | null;
   shellLabel: string | null;
+};
+
+export type TerminalWorkspaceTransferSession = TerminalWorkspaceSessionSnapshot & {
+  pristine?: boolean;
 };
 
 export type TerminalWorkspacePaneSnapshot = {
@@ -121,6 +134,7 @@ type ShellActionButtonProps = {
   label: string;
   disabled?: boolean;
   title?: string;
+  allowSplits?: boolean;
 };
 
 const DEFAULT_PANE_ID = 'terminal-pane-1';
@@ -198,16 +212,6 @@ function getShellMenuOverlayStyle(anchorRect: MenuAnchorRect, profileCount: numb
     '--terminal-shell-menu-flyout-top': `${flyoutTop}px`,
     '--terminal-shell-menu-flyout-left': `${flyoutLeft}px`,
     '--terminal-shell-menu-flyout-max-height': `${Math.max(140, viewportHeight - SHELL_MENU_VIEWPORT_MARGIN - flyoutTop)}px`,
-  };
-}
-
-function readTerminalTheme() {
-  const root = getComputedStyle(document.documentElement);
-  return {
-    background: '#00000000',
-    foreground: root.getPropertyValue('--text').trim() || '#e3eaf2',
-    cursor: root.getPropertyValue('--accent').trim() || '#6ca6ff',
-    selectionBackground: root.getPropertyValue('--accent-soft').trim() || '#182434',
   };
 }
 
@@ -497,7 +501,15 @@ function orderedPanes(panes: TerminalPaneState[], layout: TerminalLayoutNode | n
   return [...ordered, ...panes.filter((pane) => !orderedIds.has(pane.id))];
 }
 
-export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, command, onStateChange }: TerminalWorkspaceProps) {
+export function TerminalWorkspace({
+  active,
+  currentFolderPath,
+  uiPreferences,
+  variant = 'page',
+  command,
+  onStateChange,
+  onTransferSession,
+}: TerminalWorkspaceProps) {
   const [sessions, setSessions] = useState<TerminalSessionState[]>([]);
   const [panes, setPanes] = useState<TerminalPaneState[]>([]);
   const [layout, setLayout] = useState<TerminalLayoutNode | null>(null);
@@ -507,9 +519,12 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
   const [shellProfiles, setShellProfiles] = useState<TerminalShellProfile[]>([]);
   const [defaultShellId, setDefaultShellId] = useState<string | null>(null);
   const [shellMenu, setShellMenu] = useState<ShellMenuState | null>(null);
+  const [railRenamingSessionId, setRailRenamingSessionId] = useState<string | null>(null);
+  const [railRenameValue, setRailRenameValue] = useState('');
+  const [bottomTabContextMenu, setBottomTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
 
   const workspaceStageRef = useRef<HTMLDivElement | null>(null);
-  const shellMenuAnchorRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const shellMenuAnchorRefs = useRef<Map<string, HTMLElement>>(new Map());
   const stageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const terminalRefs = useRef<Map<string, Terminal>>(new Map());
   const fitAddonRefs = useRef<Map<string, FitAddon>>(new Map());
@@ -831,7 +846,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     }
 
     let nextLayout = layoutRef.current;
-    let nextPanes = currentPanes
+    const nextPanes = currentPanes
       .map((pane) => {
         if (!pane.sessionIds.includes(sessionId)) {
           return pane;
@@ -1148,7 +1163,76 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     setSessions((current) => current.filter((session) => session.id !== sessionId));
   }, [disposeTerminalUi, removeSessionFromLayout]);
 
+  const attachTerminalSession = useCallback((session: TerminalWorkspaceTransferSession, options: { split?: TerminalSplitZone } = {}) => {
+    if (!session?.id) {
+      return;
+    }
+
+    if (sessionsRef.current.some((entry) => entry.id === session.id)) {
+      activateSession(session.id);
+      return;
+    }
+
+    setShellMenu(null);
+    setNotice(null);
+    const restoredSession: TerminalSessionState = {
+      id: session.id,
+      title: session.title,
+      cwd: session.cwd,
+      status: session.status,
+      pristine: session.pristine ?? false,
+      paneId: null,
+      shellId: session.shellId,
+      shellLabel: session.shellLabel,
+    };
+    const titleMatch = /^Terminal\s+(\d+)$/i.exec(session.title);
+    if (titleMatch) {
+      const nextTitleIndex = Number.parseInt(titleMatch[1], 10) + 1;
+      if (Number.isFinite(nextTitleIndex)) {
+        titleCounterRef.current = Math.max(titleCounterRef.current, nextTitleIndex);
+      }
+    }
+
+    setSessions((current) => (current.some((entry) => entry.id === restoredSession.id) ? current : [...current, restoredSession]));
+    addSessionToLayout(restoredSession.id, options.split);
+
+    window.setTimeout(() => {
+      ensureTerminalInstance(restoredSession.id);
+      fitTerminal(restoredSession.id);
+    }, 0);
+  }, [activateSession, addSessionToLayout, ensureTerminalInstance, fitTerminal]);
+
+  const detachTerminalSession = useCallback((sessionId: string, targetHost: TerminalHostId) => {
+    const session = sessionsRef.current.find((entry) => entry.id === sessionId) ?? null;
+    if (!session) {
+      return;
+    }
+
+    const transferSession: TerminalWorkspaceTransferSession = {
+      id: session.id,
+      title: session.title,
+      cwd: session.cwd,
+      status: session.status,
+      paneId: getSessionPaneId(panesRef.current, session.id),
+      shellId: session.shellId,
+      shellLabel: session.shellLabel,
+      pristine: session.pristine,
+    };
+
+    setShellMenu(null);
+    setRailRenamingSessionId(null);
+    setRailRenameValue('');
+    disposeTerminalUi(session.id);
+    removeSessionFromLayout(session.id);
+    setSessions((current) => current.filter((entry) => entry.id !== session.id));
+    onTransferSession?.(targetHost, transferSession);
+  }, [disposeTerminalUi, onTransferSession, removeSessionFromLayout]);
+
   const handleTerminalData = useEffectEvent((event: TerminalDataEvent) => {
+    if (!sessionsRef.current.some((session) => session.id === event.sessionId)) {
+      return;
+    }
+
     const terminal = terminalRefs.current.get(event.sessionId);
     if (terminal) {
       terminal.write(event.data);
@@ -1162,6 +1246,10 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
   });
 
   const handleTerminalExit = useEffectEvent((event: TerminalExitEvent) => {
+    if (!sessionsRef.current.some((session) => session.id === event.sessionId)) {
+      return;
+    }
+
     setSessions((current) =>
       current.map((session) =>
         session.id === event.sessionId
@@ -1230,13 +1318,18 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
   }, []);
 
   useEffect(() => {
-    if (!active || autoCreatedRef.current || sessions.length > 0) {
+    const hasPendingCommand = Boolean(command && command.id !== lastCommandIdRef.current);
+    if (!active || autoCreatedRef.current || sessions.length > 0 || hasPendingCommand) {
+      return;
+    }
+
+    if (variant === 'bottom' && !currentFolderPath) {
       return;
     }
 
     autoCreatedRef.current = true;
-    void createTerminalSession(currentFolderPath ? 'project' : 'home');
-  }, [active, createTerminalSession, currentFolderPath, sessions.length]);
+    void createTerminalSession(variant === 'bottom' ? 'project' : currentFolderPath ? 'project' : 'home');
+  }, [active, command, createTerminalSession, currentFolderPath, sessions.length, variant]);
 
   useEffect(() => {
     if (!command || command.id === lastCommandIdRef.current) {
@@ -1269,8 +1362,17 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
       case 'split-session':
         splitSessionIntoPane(command.sessionId, command.targetPaneId, command.zone, command.targetSessionId);
         break;
+      case 'move-to-bottom':
+        detachTerminalSession(command.sessionId, 'bottom');
+        break;
+      case 'move-to-page':
+        detachTerminalSession(command.sessionId, 'page');
+        break;
+      case 'attach-session':
+        attachTerminalSession(command.session, { split: command.split });
+        break;
     }
-  }, [activateSession, closeTerminalSession, command, createTerminalSession, moveSessionToPane, moveSessionToStandalone, renameTerminalSession, splitSessionIntoPane]);
+  }, [activateSession, attachTerminalSession, closeTerminalSession, command, createTerminalSession, detachTerminalSession, moveSessionToPane, moveSessionToStandalone, renameTerminalSession, splitSessionIntoPane]);
 
   useEffect(() => {
     const paneOrder = orderedPanes(panes, layout);
@@ -1402,7 +1504,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     };
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Element && event.target.closest('.terminal-shell-split-button, .terminal-shell-menu')) {
+      if (event.target instanceof Element && event.target.closest('.terminal-shell-split-button, .terminal-shell-menu, .terminal-pane-tab-create')) {
         return;
       }
       setShellMenu(null);
@@ -1426,6 +1528,38 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     };
   }, [shellMenu]);
 
+  useEffect(() => {
+    if (!bottomTabContextMenu) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.terminal-pane-tab-context-menu')) {
+        return;
+      }
+      setBottomTabContextMenu(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setBottomTabContextMenu(null);
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [bottomTabContextMenu]);
+
+  useEffect(() => {
+    if (bottomTabContextMenu && !sessions.some((session) => session.id === bottomTabContextMenu.sessionId)) {
+      setBottomTabContextMenu(null);
+    }
+  }, [bottomTabContextMenu, sessions]);
+
   const renderShellMenuProfiles = (location: TerminalLocation, split?: TerminalSplitZone) => {
     const profiles = shellProfiles.length > 0 ? shellProfiles : [];
 
@@ -1446,7 +1580,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     ));
   };
 
-  const ShellActionButton = ({ location, menuId, label, disabled, title }: ShellActionButtonProps) => {
+  const renderShellActionButton = ({ location, menuId, label, disabled, title, allowSplits = true }: ShellActionButtonProps) => {
     const isMenuOpen = shellMenu?.menuId === menuId;
     const menuStyle = isMenuOpen && shellMenu ? getShellMenuOverlayStyle(shellMenu.anchorRect, shellProfiles.length) : null;
 
@@ -1504,32 +1638,179 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
             onPointerDown={(event) => event.stopPropagation()}
           >
             {renderShellMenuProfiles(location)}
-            <div className="terminal-shell-menu-separator" />
-            <div className="terminal-shell-menu-submenu">
-              <button type="button" className="terminal-shell-menu-submenu-trigger">
-                <PanelRight size={13} />
-                Split terminal
-                <ChevronRight size={13} />
-              </button>
-              <div className="terminal-shell-menu-flyout">
-                <div className="terminal-shell-menu-label" aria-hidden="true">
-                  Choose shell for right split
+            {allowSplits ? (
+              <>
+                <div className="terminal-shell-menu-separator" />
+                <div className="terminal-shell-menu-submenu">
+                  <button type="button" className="terminal-shell-menu-submenu-trigger">
+                    <PanelRight size={13} />
+                    Split terminal
+                    <ChevronRight size={13} />
+                  </button>
+                  <div className="terminal-shell-menu-flyout">
+                    <div className="terminal-shell-menu-label" aria-hidden="true">
+                      Choose shell for right split
+                    </div>
+                    {renderShellMenuProfiles(location, 'right')}
+                    <div className="terminal-shell-menu-label" aria-hidden="true">
+                      Choose shell for bottom split
+                    </div>
+                    {renderShellMenuProfiles(location, 'bottom')}
+                  </div>
                 </div>
-                {renderShellMenuProfiles(location, 'right')}
-                <div className="terminal-shell-menu-label" aria-hidden="true">
-                  Choose shell for bottom split
-                </div>
-                {renderShellMenuProfiles(location, 'bottom')}
-              </div>
-            </div>
+              </>
+            ) : null}
           </div>
         ), document.body) : null}
       </div>
     );
   };
 
+  const renderBottomTabCreateButton = () => {
+    const menuId = 'bottom-terminal-tab-create';
+    const isMenuOpen = shellMenu?.menuId === menuId;
+    const menuStyle = isMenuOpen && shellMenu ? getShellMenuOverlayStyle(shellMenu.anchorRect, shellProfiles.length) : null;
+    const disabled = !currentFolderPath;
+
+    const toggleMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      if (disabled) {
+        setNotice({ tone: 'info', message: 'Open a Project Space first.' });
+        return;
+      }
+
+      const anchor = shellMenuAnchorRefs.current.get(menuId);
+      if (!anchor) {
+        return;
+      }
+
+      setShellMenu((current) => (
+        current?.menuId === menuId
+          ? null
+          : { location: 'project', menuId, anchorRect: readMenuAnchorRect(anchor) }
+      ));
+    };
+
+    return (
+      <span
+        ref={(node) => {
+          if (node) {
+            shellMenuAnchorRefs.current.set(menuId, node);
+            return;
+          }
+
+          shellMenuAnchorRefs.current.delete(menuId);
+        }}
+        className="terminal-pane-tab-create"
+      >
+        <button
+          type="button"
+          onClick={toggleMenu}
+          disabled={disabled}
+          title={currentFolderPath ? 'New terminal' : 'Open a Project Space first'}
+          aria-label="New terminal"
+          aria-expanded={isMenuOpen}
+        >
+          <Plus size={14} />
+        </button>
+        {isMenuOpen && menuStyle ? createPortal((
+          <div
+            className="terminal-shell-menu"
+            role="menu"
+            style={menuStyle}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            {renderShellMenuProfiles('project')}
+          </div>
+        ), document.body) : null}
+      </span>
+    );
+  };
+
+  const beginRailSessionRename = (session: TerminalSessionState) => {
+    setBottomTabContextMenu(null);
+    setRailRenamingSessionId(session.id);
+    setRailRenameValue(session.title);
+  };
+
+  const cancelRailSessionRename = () => {
+    setRailRenamingSessionId(null);
+    setRailRenameValue('');
+  };
+
+  const commitRailSessionRename = (sessionId: string) => {
+    renameTerminalSession(sessionId, railRenameValue);
+    cancelRailSessionRename();
+  };
+
+  const renderBottomTabContextMenu = () => {
+    if (!bottomTabContextMenu) {
+      return null;
+    }
+
+    const session = sessions.find((entry) => entry.id === bottomTabContextMenu.sessionId) ?? null;
+    if (!session) {
+      return null;
+    }
+
+    return createPortal((
+      <div
+        className="terminal-pane-tab-context-menu"
+        style={{ left: bottomTabContextMenu.x, top: bottomTabContextMenu.y }}
+        role="menu"
+        onClick={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.preventDefault()}
+        onMouseDown={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => beginRailSessionRename(session)}
+        >
+          <SquarePen size={13} />
+          Rename
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setBottomTabContextMenu(null);
+            detachTerminalSession(session.id, 'page');
+          }}
+        >
+          <ExternalLink size={13} />
+          Move to Terminal page
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            setBottomTabContextMenu(null);
+            closeTerminalSession(session.id);
+          }}
+        >
+          <Trash2 size={13} />
+          Delete
+        </button>
+      </div>
+    ), document.body);
+  };
+
+  const handleBottomTabContextMenu = (event: ReactMouseEvent<HTMLDivElement>, session: TerminalSessionState) => {
+    if (variant !== 'bottom') {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    activateSession(session.id);
+    setBottomTabContextMenu({ sessionId: session.id, x: event.clientX, y: event.clientY });
+  };
+
   const renderTerminalTab = (pane: TerminalPaneState, session: TerminalSessionState) => {
     const selected = pane.activeSessionId === session.id;
+    const renaming = railRenamingSessionId === session.id;
     const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
       if (event.key !== 'Enter' && event.key !== ' ') {
         return;
@@ -1538,40 +1819,70 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
       event.preventDefault();
       activateSession(session.id);
     };
+    const handleRenameKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitRailSessionRename(session.id);
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelRailSessionRename();
+      }
+    };
 
     return (
       <div
         key={session.id}
-        className={`terminal-pane-tab ${selected ? 'active' : ''}`.trim()}
+        className={`terminal-pane-tab ${selected ? 'active' : ''} ${renaming ? 'renaming' : ''}`.trim()}
         role="tab"
         tabIndex={selected ? 0 : -1}
         aria-selected={selected}
         onClick={() => activateSession(session.id)}
+        onContextMenu={(event) => handleBottomTabContextMenu(event, session)}
         onKeyDown={handleKeyDown}
         title={session.cwd ? `${session.title} - ${session.cwd}` : session.title}
       >
         <span className="terminal-pane-tab-leading" aria-hidden="true">
           <TerminalSquare size={13} />
         </span>
-        <span className="terminal-pane-tab-copy">
-          <span className="terminal-pane-tab-title">{session.title}</span>
-        </span>
-        <button
-          className="terminal-pane-tab-close"
-          type="button"
-          tabIndex={-1}
-          draggable={false}
-          aria-label={`Close ${session.title}`}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            closeTerminalSession(session.id);
-          }}
-          onDragStart={(event) => event.preventDefault()}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <X size={12} />
-        </button>
+        {renaming ? (
+          <input
+            autoFocus
+            className="terminal-pane-tab-rename"
+            value={railRenameValue}
+            onBlur={() => commitRailSessionRename(session.id)}
+            onChange={(event) => setRailRenameValue(event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onFocus={(event) => event.currentTarget.select()}
+            onKeyDown={handleRenameKeyDown}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          />
+        ) : (
+          <>
+            <span className="terminal-pane-tab-copy">
+              <span className="terminal-pane-tab-title">{session.title}</span>
+            </span>
+            <button
+              className="terminal-pane-tab-close"
+              type="button"
+              tabIndex={-1}
+              draggable={false}
+              aria-label={`Close ${session.title}`}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeTerminalSession(session.id);
+              }}
+              onDragStart={(event) => event.preventDefault()}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <X size={12} />
+            </button>
+          </>
+        )}
       </div>
     );
   };
@@ -1594,6 +1905,7 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
       >
         <div className="terminal-pane-tabs" role="tablist" aria-label="Terminal sessions">
           {paneSessions.map((session) => renderTerminalTab(pane, session))}
+          {variant === 'bottom' ? renderBottomTabCreateButton() : null}
         </div>
         <div className="terminal-pane-body">
           {paneSessions.map((session) => (
@@ -1621,9 +1933,21 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
                     >
                       Close session
                     </button>
-                    <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void createTerminalSession('home')}>
-                      Home shell
-                    </button>
+                    {variant === 'bottom' ? (
+                      <button
+                        className="boards-hub-btn boards-hub-btn-primary"
+                        type="button"
+                        onClick={() => void createTerminalSession('project')}
+                        disabled={!currentFolderPath}
+                        title={currentFolderPath ?? 'Open a Project Space first'}
+                      >
+                        New terminal
+                      </button>
+                    ) : (
+                      <button className="boards-hub-btn boards-hub-btn-primary" type="button" onClick={() => void createTerminalSession('home')}>
+                        Home shell
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : null}
@@ -1650,6 +1974,40 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
     );
   };
 
+  if (variant === 'bottom') {
+    return (
+      <section className={`terminal-hub terminal-hub-bottom console-pane ${active ? 'terminal-hub-active console-pane-active' : 'console-pane-hidden'}`}>
+        {notice ? (
+          <div className={`terminal-hub-notice boards-hub-note ${notice.tone === 'error' ? 'boards-hub-note-error' : ''}`}>{notice.message}</div>
+        ) : null}
+        <div className="bottom-terminal-layout">
+          <div ref={workspaceStageRef} className="terminal-hub-stage bottom-terminal-stage">
+            {sessions.length === 0 ? (
+              <div className="terminal-hub-empty bottom-terminal-empty">
+                <TerminalSquare size={24} strokeWidth={1.5} />
+                <strong>No terminals open</strong>
+                <p>Open a terminal in the current Project Space.</p>
+                <div className="terminal-hub-empty-actions">
+                  {renderShellActionButton({
+                    location: 'project',
+                    menuId: 'bottom-terminal-empty-project',
+                    label: 'Project shell',
+                    disabled: !currentFolderPath,
+                    title: currentFolderPath ?? 'Open a Project Space first',
+                    allowSplits: false,
+                  })}
+                </div>
+              </div>
+            ) : (
+              renderLayoutNode(visibleLayout)
+            )}
+          </div>
+        </div>
+        {renderBottomTabContextMenu()}
+      </section>
+    );
+  }
+
   return (
     <section className={`terminal-hub ${active ? 'terminal-hub-active' : ''}`}>
       <header className="terminal-hub-hero">
@@ -1658,14 +2016,14 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
           <p>Run shells in your project folder or home directory.</p>
         </div>
         <div className="terminal-hub-hero-actions">
-          <ShellActionButton
-            location="project"
-            menuId="terminal-header-project"
-            label="Project shell"
-            disabled={!currentFolderPath}
-            title={currentFolderPath ?? 'Open a Project Space first'}
-          />
-          <ShellActionButton location="home" menuId="terminal-header-home" label="Home shell" />
+          {renderShellActionButton({
+            location: 'project',
+            menuId: 'terminal-header-project',
+            label: 'Project shell',
+            disabled: !currentFolderPath,
+            title: currentFolderPath ?? 'Open a Project Space first',
+          })}
+          {renderShellActionButton({ location: 'home', menuId: 'terminal-header-home', label: 'Home shell' })}
         </div>
       </header>
 
@@ -1680,14 +2038,14 @@ export function TerminalWorkspace({ active, currentFolderPath, uiPreferences, co
             <strong>No shells open</strong>
             <p>Open a project shell or start one in your home directory.</p>
             <div className="terminal-hub-empty-actions">
-              <ShellActionButton
-                location="project"
-                menuId="terminal-empty-project"
-                label="Project shell"
-                disabled={!currentFolderPath}
-                title={currentFolderPath ?? 'Open a Project Space first'}
-              />
-              <ShellActionButton location="home" menuId="terminal-empty-home" label="Home shell" />
+              {renderShellActionButton({
+                location: 'project',
+                menuId: 'terminal-empty-project',
+                label: 'Project shell',
+                disabled: !currentFolderPath,
+                title: currentFolderPath ?? 'Open a Project Space first',
+              })}
+              {renderShellActionButton({ location: 'home', menuId: 'terminal-empty-home', label: 'Home shell' })}
             </div>
           </div>
         ) : (

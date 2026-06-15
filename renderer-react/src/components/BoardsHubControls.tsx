@@ -88,9 +88,32 @@ type BoardsHubToggleProps = {
   onChange: (checked: boolean) => void;
   label: string;
   description?: string;
+  toggleOnly?: boolean;
+  disabled?: boolean;
 };
 
-export function BoardsHubToggle({ checked, onChange, label, description }: BoardsHubToggleProps) {
+export function BoardsHubToggle({ checked, onChange, label, description, toggleOnly = false, disabled = false }: BoardsHubToggleProps) {
+  if (toggleOnly) {
+    return (
+      <button
+        className={`boards-hub-toggle ${checked ? 'active' : ''}`}
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+          onChange(!checked);
+        }}
+      >
+        <span className="boards-hub-toggle-thumb" aria-hidden="true" />
+      </button>
+    );
+  }
+
   return (
     <div className="boards-hub-toggle-row">
       <div className="boards-hub-toggle-copy">
@@ -102,7 +125,13 @@ export function BoardsHubToggle({ checked, onChange, label, description }: Board
         type="button"
         role="switch"
         aria-checked={checked}
-        onClick={() => onChange(!checked)}
+        disabled={disabled}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+          onChange(!checked);
+        }}
       >
         <span className="boards-hub-toggle-thumb" aria-hidden="true" />
       </button>

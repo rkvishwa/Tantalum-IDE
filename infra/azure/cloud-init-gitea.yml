@@ -1,0 +1,121 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  - tar
+  - gzip
+  - openssl
+  - apt-transport-https
+
+write_files:
+  - path: /usr/local/sbin/tantalum-git-firstboot.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      ADMIN_USER="__ADMIN_USERNAME__"
+      DATA_MOUNT="__DATA_MOUNT__"
+      DATA_DEVICE="/dev/disk/azure/scsi1/lun0"
+
+      install -m 0755 -d /etc/apt/keyrings
+      if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      fi
+
+      . /etc/os-release
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl enable --now docker
+      usermod -aG docker "$ADMIN_USER" || true
+
+      fallocate -l 2G /swapfile || true
+      chmod 600 /swapfile || true
+      mkswap /swapfile || true
+      swapon /swapfile || true
+      grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+      mkdir -p "$DATA_MOUNT"
+      for _ in $(seq 1 60); do
+        [ -b "$DATA_DEVICE" ] && break
+        sleep 2
+      done
+
+      if [ -b "$DATA_DEVICE" ]; then
+        if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+          mkfs.ext4 -F "$DATA_DEVICE"
+        fi
+        UUID="$(blkid -s UUID -o value "$DATA_DEVICE")"
+        grep -q "$UUID" /etc/fstab || echo "UUID=$UUID $DATA_MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
+        mount "$DATA_MOUNT" || mount -a
+      fi
+
+      mkdir -p "$DATA_MOUNT/gitea" "$DATA_MOUNT/backups" "$DATA_MOUNT/bin" "$DATA_MOUNT/docker"
+      chown -R "$ADMIN_USER:$ADMIN_USER" "$DATA_MOUNT"
+
+      mkdir -p /etc/docker
+      cat >/etc/docker/daemon.json <<EOF
+      {
+        "data-root": "$DATA_MOUNT/docker",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "50m",
+          "max-file": "5"
+        }
+      }
+      EOF
+      systemctl restart docker
+
+      ufw allow 22/tcp
+      ufw allow 80/tcp
+      ufw allow 443/tcp
+      ufw allow 2222/tcp
+      ufw --force enable
+
+      cat >/etc/fail2ban/jail.d/sshd.local <<'EOF'
+      [sshd]
+      enabled = true
+      maxretry = 5
+      bantime = 1h
+      findtime = 10m
+      EOF
+      systemctl enable --now fail2ban
+
+      cat >/etc/systemd/system/tantalum-gitea-backup.service <<'EOF'
+      [Unit]
+      Description=Tantalum Gitea backup
+      Wants=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/srv/tantalum-git/bin/backup-gitea.sh
+      EOF
+
+      cat >/etc/systemd/system/tantalum-gitea-backup.timer <<'EOF'
+      [Unit]
+      Description=Daily Tantalum Gitea backup timer
+
+      [Timer]
+      OnCalendar=*-*-* 02:15:00
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now tantalum-gitea-backup.timer || true
+
+runcmd:
+  - [ bash, /usr/local/sbin/tantalum-git-firstboot.sh ]

@@ -17,7 +17,10 @@ function deriveCollections(config) {
         firmwares: tables.find((table) => table.$id === 'firmwares')?.$id || 'firmwares',
         sketches: tables.find((table) => table.$id === 'sketches')?.$id || 'sketches',
         boardSourceSnapshots: tables.find((table) => table.$id === 'board_source_snapshots')?.$id || 'board_source_snapshots',
-        agentAsyncReadResults: tables.find((table) => table.$id === 'agent_async_read_results')?.$id || 'agent_async_read_results'
+        agentAsyncReadResults: tables.find((table) => table.$id === 'agent_async_read_results')?.$id || 'agent_async_read_results',
+        cloudProjects: tables.find((table) => table.$id === 'cloud_projects')?.$id || 'cloud_projects',
+        cloudProjectDevices: tables.find((table) => table.$id === 'cloud_project_devices')?.$id || 'cloud_project_devices',
+        cloudProjectSyncEvents: tables.find((table) => table.$id === 'cloud_project_sync_events')?.$id || 'cloud_project_sync_events'
     };
 }
 
@@ -44,7 +47,7 @@ function deriveFirmwareBucketId(config) {
 // =============================================================================
 
 const APPWRITE_CONFIG = {
-    // Appwrite endpoint - use Appwrite Cloud or your self-hosted instance
+    // Cloud endpoint - use the managed cloud or your self-hosted instance
     endpoint: sharedConfig.endpoint,
 
     // Your Appwrite Project ID

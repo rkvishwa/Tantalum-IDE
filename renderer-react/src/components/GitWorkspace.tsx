@@ -223,8 +223,10 @@ function GitCommitAvatar({ commit }: { commit: GitCommit }) {
       };
     }
 
+    const resolvedAvatarUrl = avatarUrl;
+
     async function loadAvatar() {
-      const result = await window.tantalum.git.getAvatarDataUrl({ url: avatarUrl });
+      const result = await window.tantalum.git.getAvatarDataUrl({ url: resolvedAvatarUrl });
       if (canceled) {
         return;
       }
@@ -234,7 +236,7 @@ function GitCommitAvatar({ commit }: { commit: GitCommit }) {
         return;
       }
 
-      setImageSrc(avatarUrl);
+      setImageSrc(resolvedAvatarUrl);
     }
 
     void loadAvatar();
@@ -307,28 +309,54 @@ type GitCommitPointer = {
   title: string;
 };
 
-function getCommitPointers(commit: GitCommit, refs: string[], status: GitStatus, currentRemoteName: string | null): GitCommitPointer[] {
-  const branchName = status.detached ? '' : status.branch || '';
-  const upstreamName = status.upstream || (currentRemoteName && branchName ? `${currentRemoteName}/${branchName}` : '');
+function isRemoteRef(ref: string, currentRemoteName: string | null) {
+  return (
+    ref.startsWith('refs/remotes/') ||
+    (currentRemoteName ? ref.startsWith(`${currentRemoteName}/`) : false) ||
+    ref.startsWith('origin/') ||
+    ref.startsWith('upstream/')
+  );
+}
+
+function getRefLabel(ref: string) {
+  return ref
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\//, '');
+}
+
+function isVisibleBranchRef(ref: string) {
+  const normalized = ref.trim();
+  if (!normalized || normalized === 'HEAD' || normalized.endsWith('/HEAD')) {
+    return false;
+  }
+
+  return !normalized.startsWith('tag: ');
+}
+
+function getCommitPointers(commit: GitCommit, refs: string[], currentRemoteName: string | null): GitCommitPointer[] {
   const pointers: GitCommitPointer[] = [];
+  const seen = new Set<string>();
 
-  if (branchName && refs.includes(branchName)) {
-    pointers.push({
-      id: `${commit.hash}:local:${branchName}`,
-      kind: 'local',
-      label: branchName,
-      title: `Local branch ${branchName}`,
-    });
-  }
+  refs.forEach((ref) => {
+    if (!isVisibleBranchRef(ref)) {
+      return;
+    }
 
-  if (upstreamName && refs.includes(upstreamName)) {
+    const label = getRefLabel(ref);
+    const kind = isRemoteRef(ref, currentRemoteName) ? 'remote' : 'local';
+    const key = `${kind}:${label}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
     pointers.push({
-      id: `${commit.hash}:remote:${upstreamName}`,
-      kind: 'remote',
-      label: upstreamName,
-      title: `Remote branch ${upstreamName}`,
+      id: `${commit.hash}:${key}`,
+      kind,
+      label,
+      title: `${kind === 'remote' ? 'Remote' : 'Local'} branch ${label}`,
     });
-  }
+  });
 
   return pointers;
 }
@@ -1058,7 +1086,7 @@ export function GitHistoryPanel({ controller }: { controller: GitWorkspaceContro
                 const rowStyle = getGitHistoryRowStyle(rowHeight, rowTextStarts[index] ?? GRAPH_PADDING_X);
                 const refs = cleanRefs(commit.refs || '');
                 const author = getCommitAuthor(commit);
-                const pointers = getCommitPointers(commit, refs, status, currentRemoteName);
+                const pointers = getCommitPointers(commit, refs, currentRemoteName);
 
                 return (
                   <article

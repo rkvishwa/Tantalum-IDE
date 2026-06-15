@@ -96,6 +96,20 @@ function intelHexRecord(address, type, data = Buffer.alloc(0)) {
     fqbn: "arduino:avr:nano",
     profileId: "profile-a",
   }).accepted, false);
+  const staleCloudBoardValidation = boardCodeService.validateSourceSnapshotManifestForIdentity({
+    metadata: {
+      manifestVersion: 2,
+      boardType: "esp32:esp32:esp32s3",
+      cloudBoardId: "cloud-board-s3",
+      profileId: "local-profile-c3",
+    },
+  }, {
+    fqbn: "esp32:esp32:esp32c3",
+    cloudBoardId: "cloud-board-s3",
+    profileId: "local-profile-c3",
+  });
+  assert.equal(staleCloudBoardValidation.accepted, false);
+  assert.match(staleCloudBoardValidation.reason, /board type/i);
   assert.equal(boardCodeService.validateSourceSnapshotManifestForIdentity({
     metadata: {
       boardType: "arduino:avr:uno",

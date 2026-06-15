@@ -21,5 +21,12 @@ assert.match(runtimeSource, /if \(targetVersion != nullptr && strlen\(targetVers
 assert.doesNotMatch(runtimeSource, /Target OTA version:[\s\S]{0,160}"none"/);
 assert.match(runtimeSource, /pendingStatus = "failed";[\s\S]*?OTA success did not boot expected firmware/);
 assert.doesNotMatch(runtimeSource, /pendingStatus == "success" && pendingVersion != TANTALUM_FIRMWARE_VERSION\)\s*\{\s*return false;/);
+assert.match(runtimeSource, /TANTALUM_OTA_UPDATE_MODE/);
+assert.match(runtimeSource, /pendingMqttCheckUpdate = true/);
+assert.match(runtimeSource, /Ignored stale MQTT command/);
+assert.match(runtimeSource, /Ignored replayed MQTT command/);
+assert.match(runtimeSource, /#define TANTALUM_ONBOARD_LED_CONTROL 0/);
+assert.match(runtimeSource, /#if defined\(ESP32\) && TANTALUM_ONBOARD_LED_CONTROL && defined\(TANTALUM_BOOTSTRAP_BUILD\) && TANTALUM_BOOTSTRAP_BUILD/);
+assert.doesNotMatch(runtimeSource, /LED_BUILTIN/);
 
 console.log('Tantalum runtime OTA smoke test passed.');

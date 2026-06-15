@@ -20,6 +20,51 @@ const {
 
 const ARDUINO_CLI_OUTPUT_MAX_BUFFER = 50 * 1024 * 1024;
 const ESP32_NATIVE_USB_CDC_BOARD_MARKERS = ["esp32c3", "esp32s2", "esp32s3"];
+const OTA_UPDATE_MODES = new Set(["polling", "mqtt", "both"]);
+const CLOUD_RUNTIME_BASE_LIBRARIES = ["ArduinoJson"];
+const CLOUD_RUNTIME_MQTT_LIBRARIES = ["PubSubClient"];
+
+function normalizeOtaUpdateMode(value, fallback = "polling") {
+  const mode = String(value || "").trim().toLowerCase();
+  return OTA_UPDATE_MODES.has(mode) ? mode : fallback;
+}
+
+function otaUpdateModeUsesMqtt(mode) {
+  return mode === "mqtt" || mode === "both";
+}
+
+function normalizePemLiteral(value) {
+  return String(value ?? "")
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n/g, "\n");
+}
+
+function getCloudRuntimeRequiredLibraries(config = {}) {
+  const mode = normalizeOtaUpdateMode(config?.otaUpdateMode);
+  return [
+    ...CLOUD_RUNTIME_BASE_LIBRARIES,
+    ...(otaUpdateModeUsesMqtt(mode) ? CLOUD_RUNTIME_MQTT_LIBRARIES : []),
+  ];
+}
+
+function emitLibraryInstallProgress(onProgress) {
+  return (progressEvent) => {
+    if (!onProgress) {
+      return;
+    }
+
+    if (typeof progressEvent === "string") {
+      onProgress(progressEvent, "stdout");
+      return;
+    }
+
+    const message = progressEvent?.message || progressEvent?.phase || "";
+    if (message) {
+      onProgress(`${message}\n`, "stdout");
+    }
+  };
+}
 
 function formatUsbWifiSerialError(error, port) {
   const message = String(error?.message || error || "Serial port error.");
@@ -195,6 +240,7 @@ class ProvisioningService {
       mqttPassword,
       mqttCaCert,
       tlsCaCert,
+      otaUpdateMode,
       boardName,
       wifiHostname,
     } = config;
@@ -205,6 +251,8 @@ class ProvisioningService {
       const provisioningServiceName = `Tantalum-${String(boardId || "board").slice(-8)}`;
       const resolvedWifiHostname = buildTantalumWifiHostname(wifiHostname || boardName, boardId);
       const buildEpoch = Math.max(1700000000, Math.floor(Date.now() / 1000));
+      const resolvedOtaUpdateMode = normalizeOtaUpdateMode(otaUpdateMode);
+      const includeMqtt = otaUpdateModeUsesMqtt(resolvedOtaUpdateMode);
       const literal = (value) => JSON.stringify(String(value ?? ""));
       const numericLiteral = (value, fallback) => {
         const parsed = Number.parseInt(value, 10);
@@ -218,14 +266,17 @@ class ProvisioningService {
         .replace(/{{APPWRITE_PROJECT_ID_LITERAL}}/g, literal(appwriteProjectId))
         .replace(/{{DEVICE_GATEWAY_FUNCTION_ID_LITERAL}}/g, literal(deviceGatewayFunctionId))
         .replace(/{{BUILD_EPOCH_LITERAL}}/g, numericLiteral(buildEpoch, 1700000000))
-        .replace(/{{MQTT_HOST_LITERAL}}/g, literal(mqttHost))
-        .replace(/{{MQTT_PORT_LITERAL}}/g, numericLiteral(mqttPort, 8883))
-        .replace(/{{MQTT_USERNAME_LITERAL}}/g, literal(mqttUsername))
-        .replace(/{{MQTT_PASSWORD_LITERAL}}/g, literal(mqttPassword))
-        .replace(/{{MQTT_TOPIC_LITERAL}}/g, literal(mqttTopic))
+        .replace(/{{OTA_UPDATE_MODE_LITERAL}}/g, literal(resolvedOtaUpdateMode))
+        .replace(/{{MQTT_REQUIRED_LITERAL}}/g, includeMqtt ? "1" : "0")
+        .replace(/{{MQTT_INCLUDE_LINE}}/g, includeMqtt ? "#include <PubSubClient.h>" : "")
+        .replace(/{{MQTT_HOST_LITERAL}}/g, literal(includeMqtt ? mqttHost : ""))
+        .replace(/{{MQTT_PORT_LITERAL}}/g, numericLiteral(includeMqtt ? mqttPort : "", 8883))
+        .replace(/{{MQTT_USERNAME_LITERAL}}/g, literal(includeMqtt ? mqttUsername : ""))
+        .replace(/{{MQTT_PASSWORD_LITERAL}}/g, literal(includeMqtt ? mqttPassword : ""))
+        .replace(/{{MQTT_TOPIC_LITERAL}}/g, literal(includeMqtt ? mqttTopic : ""))
         .replace(/{{COMMAND_SECRET_LITERAL}}/g, literal(commandSecret))
-        .replace(/{{TLS_CA_CERT_LITERAL}}/g, literal(tlsCaCert))
-        .replace(/{{MQTT_CA_CERT_LITERAL}}/g, literal(mqttCaCert))
+        .replace(/{{TLS_CA_CERT_LITERAL}}/g, literal(normalizePemLiteral(tlsCaCert)))
+        .replace(/{{MQTT_CA_CERT_LITERAL}}/g, literal(normalizePemLiteral(includeMqtt ? mqttCaCert : "")))
         .replace(/{{PROVISIONING_POP_LITERAL}}/g, literal(provisioningPop))
         .replace(/{{PROVISIONING_SERVICE_NAME_LITERAL}}/g, literal(provisioningServiceName))
         .replace(/{{WIFI_HOSTNAME_LITERAL}}/g, literal(resolvedWifiHostname));
@@ -283,7 +334,7 @@ class ProvisioningService {
   async validatePortAvailable(port) {
     const normalizedPort = String(port || "").trim();
     if (!normalizedPort) {
-      return { success: false, error: "Select a USB port before installing Tantalum Cloud." };
+      return { success: false, error: "Select a USB port before installing runtime firmware." };
     }
 
     const portsResult = await this.listPorts();
@@ -318,7 +369,7 @@ class ProvisioningService {
       const uploadBoardType = withEsp32CloudRuntimeUploadOptions(boardType);
       const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", uploadBoardType, "--port", port, sketchDir];
       if (uploadBoardType !== String(boardType || "").trim()) {
-        onProgress?.("Erasing ESP32 flash before installing Tantalum Cloud so stale OTA slots cannot boot old firmware.\n", "stdout");
+        onProgress?.("Erasing ESP32 flash before installing runtime firmware so stale OTA slots cannot boot old firmware.\n", "stdout");
       }
 
       result = await this.runCliCommand(
@@ -343,24 +394,16 @@ class ProvisioningService {
 
     return {
       success: true,
-      message: "Tantalum Cloud runtime uploaded successfully. The bootstrap runtime should print its version on Serial Monitor after reboot.",
+      message: "Runtime firmware uploaded successfully. The bootstrap runtime should print its version on Serial Monitor after reboot.",
       output: result.output,
     };
   }
 
   async ensureCloudRuntimeDependencies(config, onProgress) {
-    onProgress?.("Ensuring ArduinoJson library is installed...\n", "stdout");
-    await installLibrary("ArduinoJson", "latest");
-
-    const hasStrictMqttConfig = Boolean(
-      String(config?.mqttHost || "").trim() &&
-      String(config?.mqttTopic || "").trim() &&
-      String(config?.mqttCaCert || "").trim()
-    );
-
-    if (hasStrictMqttConfig) {
-      onProgress?.("Ensuring PubSubClient library is installed...\n", "stdout");
-      await installLibrary("PubSubClient", "latest");
+    const installProgress = emitLibraryInstallProgress(onProgress);
+    for (const libraryName of getCloudRuntimeRequiredLibraries(config)) {
+      onProgress?.(`Ensuring ${libraryName} library is installed for Tantalum Cloud OTA...\n`, "stdout");
+      await installLibrary(libraryName, "latest", installProgress);
     }
   }
 
@@ -382,6 +425,7 @@ class ProvisioningService {
         appwriteEndpoint: appwriteConfig.endpoint,
         appwriteProjectId: appwriteConfig.projectId,
         deviceGatewayFunctionId: appwriteConfig.deviceGatewayFunctionId,
+        otaUpdateMode: normalizeOtaUpdateMode(appwriteConfig.otaUpdateMode || board.otaUpdateMode),
         mqttHost: appwriteConfig.mqttHost || process.env.TANTALUM_MQTT_HOST || "",
         mqttPort: appwriteConfig.mqttPort || process.env.TANTALUM_MQTT_PORT || 8883,
         mqttUsername: appwriteConfig.mqttUsername || process.env.TANTALUM_MQTT_DEVICE_USERNAME || "",
@@ -391,14 +435,14 @@ class ProvisioningService {
       };
 
       await this.ensureCloudRuntimeDependencies(runtimeConfig, onProgress);
-      onProgress?.("Generating Tantalum Cloud runtime sketch...\n", "stdout");
+      onProgress?.("Generating runtime firmware sketch...\n", "stdout");
       const firmwareResult = await this.generateProvisioningFirmware(runtimeConfig);
 
       if (!firmwareResult.success) {
         return firmwareResult;
       }
 
-      onProgress?.(`Uploading Tantalum Cloud runtime to ${port}...\n`, "stdout");
+      onProgress?.(`Uploading runtime firmware to ${port}...\n`, "stdout");
       const uploadResult = await this.uploadToBoard(
         firmwareResult.sketchDir,
         port,
@@ -512,7 +556,7 @@ class ProvisioningService {
       timeoutId = setTimeout(() => {
         settle({
           success: false,
-          error: "The board did not confirm WiFi provisioning over USB. Make sure the Tantalum cloud runtime is flashed, Serial Monitor is closed, and ESP32-S3/C3 boards were installed with USB CDC On Boot enabled.",
+          error: "The board did not confirm WiFi provisioning over USB. Make sure runtime firmware is flashed, Serial Monitor is closed, and ESP32-S3/C3 boards were installed with USB CDC On Boot enabled.",
         });
       }, 60000);
 

@@ -37,6 +37,7 @@ class BoardService {
                     runtimeVersion: '',
                     lastUpdateCheckAt: null,
                     otaStatus: 'idle',
+                    otaUpdateMode: 'polling',
                     provisioningStatus: 'pending',
                     provisioningRequestedAt: null,
                     provisioningMode: '',
@@ -108,7 +109,7 @@ class BoardService {
     async updateBoard(boardId, updates) {
         try {
             // Prevent updating sensitive fields
-            const allowedFields = ['name', 'status', 'lastSeen', 'firmwareVersion', 'desiredFirmwareId', 'desiredVersion', 'desiredDeploymentId', 'lastAppliedDeploymentId', 'runtimeVersion', 'lastUpdateCheckAt', 'otaStatus', 'provisioningStatus', 'provisioningRequestedAt', 'provisioningMode', 'lastOtaError', 'sourceCodeVisibility'];
+            const allowedFields = ['name', 'status', 'lastSeen', 'firmwareVersion', 'desiredFirmwareId', 'desiredVersion', 'desiredDeploymentId', 'lastAppliedDeploymentId', 'runtimeVersion', 'lastUpdateCheckAt', 'otaStatus', 'otaUpdateMode', 'provisioningStatus', 'provisioningRequestedAt', 'provisioningMode', 'lastOtaError', 'sourceCodeVisibility'];
             const safeUpdates = {};
 
             for (const key of allowedFields) {

@@ -19,7 +19,10 @@ export const GRAPH_MAX_WIDTH = 104;
 type GraphLane = {
   hash: string;
   color: string;
+  sourceKey: string | null;
 };
+
+type GraphCommitInput = Pick<GitCommit, 'hash' | 'parents'> & Partial<Pick<GitCommit, 'branch' | 'refs'>>;
 
 export type GraphEdge = {
   key: string;
@@ -50,25 +53,69 @@ function normalizeHash(hash: string) {
   return hash.trim().toLowerCase();
 }
 
+function normalizeSourceRef(ref: string | null | undefined) {
+  let normalized = String(ref ?? '').trim().replace(/^HEAD ->\s*/, '');
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith('tag: ')) {
+    return null;
+  }
+
+  normalized = normalized.replace(/^refs\/heads\//, '');
+
+  const fullRemoteMatch = normalized.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
+  if (fullRemoteMatch) {
+    normalized = fullRemoteMatch[2] ?? '';
+  } else {
+    const shortRemoteMatch = normalized.match(/^(?:remotes\/)?(?:origin|upstream)\/(.+)$/);
+    if (shortRemoteMatch) {
+      normalized = shortRemoteMatch[1] ?? '';
+    }
+  }
+
+  if (!normalized || normalized === 'HEAD' || normalized.endsWith('/HEAD')) {
+    return null;
+  }
+
+  return normalized.toLowerCase();
+}
+
+function getFirstBranchRefSourceKey(refs: string | null | undefined) {
+  return String(refs ?? '')
+    .split(',')
+    .map((ref) => normalizeSourceRef(ref))
+    .find((ref): ref is string => Boolean(ref)) ?? null;
+}
+
+function getCommitSourceKey(commit: GraphCommitInput) {
+  return normalizeSourceRef(commit.branch) ?? getFirstBranchRefSourceKey(commit.refs);
+}
+
+function getLaneColor(lane: number) {
+  return GRAPH_COLORS[lane % GRAPH_COLORS.length] ?? GRAPH_COLORS[0];
+}
+
 function findLaneByHash(lanes: Array<GraphLane | null>, hash: string) {
   const normalized = normalizeHash(hash);
   return lanes.findIndex((entry) => entry?.hash === normalized);
 }
 
-function ensureLaneCapacity(lanes: Array<GraphLane | null>, lane: number) {
-  while (lanes.length <= lane) {
-    lanes.push(null);
-  }
-}
-
-function allocateRightmostLane(lanes: Array<GraphLane | null>) {
-  for (let index = lanes.length - 1; index >= 0; index -= 1) {
+function findFreeLane(lanes: Array<GraphLane | null>, startLane = 0) {
+  for (let index = Math.max(0, startLane); index < lanes.length; index += 1) {
     if (lanes[index] === null) {
       return index;
     }
   }
 
   return lanes.length;
+}
+
+function ensureLaneCapacity(lanes: Array<GraphLane | null>, lane: number) {
+  while (lanes.length <= lane) {
+    lanes.push(null);
+  }
 }
 
 function clearHashFromOtherLanes(lanes: Array<GraphLane | null>, hash: string, keepLane: number) {
@@ -79,35 +126,6 @@ function clearHashFromOtherLanes(lanes: Array<GraphLane | null>, hash: string, k
       lanes[laneIndex] = null;
     }
   });
-}
-
-function reserveLane(
-  lanes: Array<GraphLane | null>,
-  preferredLane: number,
-  hash: string,
-  color: string,
-) {
-  const normalized = normalizeHash(hash);
-  const existingLane = findLaneByHash(lanes, normalized);
-  if (existingLane !== -1) {
-    return existingLane;
-  }
-
-  ensureLaneCapacity(lanes, preferredLane);
-
-  if (lanes[preferredLane] === null) {
-    lanes[preferredLane] = { hash: normalized, color };
-    return preferredLane;
-  }
-
-  if (lanes[preferredLane]?.hash === normalized) {
-    return preferredLane;
-  }
-
-  const allocatedLane = allocateRightmostLane(lanes);
-  ensureLaneCapacity(lanes, allocatedLane);
-  lanes[allocatedLane] = { hash: normalized, color };
-  return allocatedLane;
 }
 
 function buildRowTextStarts(nodes: GraphNode[], edges: GraphEdge[]) {
@@ -125,27 +143,106 @@ function buildRowTextStarts(nodes: GraphNode[], edges: GraphEdge[]) {
   });
 }
 
-export function buildCommitGraph(commits: Pick<GitCommit, 'hash' | 'parents'>[]): CommitGraphLayout {
+export function buildCommitGraph(commits: GraphCommitInput[]): CommitGraphLayout {
   let lanes: Array<GraphLane | null> = [];
-  let colorIdx = 0;
-  const getColor = () => GRAPH_COLORS[colorIdx++ % GRAPH_COLORS.length];
+  const sourceLanes = new Map<string, number>();
+  const sourceKeysByHash = new Map<string, string | null>();
+  const rowsByHash = new Map<string, number>();
   const edges: GraphEdge[] = [];
   const nodes: GraphNode[] = [];
   let maxLaneCount = 1;
 
+  const noteLane = (lane: number) => {
+    maxLaneCount = Math.max(maxLaneCount, lane + 1);
+  };
+
+  const rememberSourceLane = (sourceKey: string | null, lane: number) => {
+    if (!sourceKey || sourceLanes.has(sourceKey)) {
+      return;
+    }
+
+    sourceLanes.set(sourceKey, lane);
+  };
+
+  const getReusableSourceLane = (sourceKey: string | null, activeLanes: Array<GraphLane | null>, minimumLane = 0) => {
+    if (!sourceKey) {
+      return -1;
+    }
+
+    const lane = sourceLanes.get(sourceKey);
+    if (lane === undefined || lane < minimumLane || (lane < activeLanes.length && activeLanes[lane] !== null)) {
+      return -1;
+    }
+
+    return lane;
+  };
+
+  const chooseCommitLane = (activeLanes: Array<GraphLane | null>, sourceKey: string | null) => {
+    const sourceLane = getReusableSourceLane(sourceKey, activeLanes);
+    return sourceLane === -1 ? findFreeLane(activeLanes) : sourceLane;
+  };
+
+  const chooseMergeParentLane = (activeLanes: Array<GraphLane | null>, startLane: number, sourceKey: string | null) => {
+    const rightSourceLane = getReusableSourceLane(sourceKey, activeLanes, startLane);
+    if (rightSourceLane !== -1) {
+      return rightSourceLane;
+    }
+
+    const rightLane = findFreeLane(activeLanes, startLane);
+    if (rightLane < activeLanes.length || !sourceKey) {
+      return rightLane;
+    }
+
+    const anySourceLane = getReusableSourceLane(sourceKey, activeLanes);
+    return anySourceLane === -1 ? rightLane : anySourceLane;
+  };
+
+  const setActiveLane = (
+    activeLanes: Array<GraphLane | null>,
+    lane: number,
+    hash: string,
+    color: string,
+    sourceKey: string | null,
+  ) => {
+    const normalized = normalizeHash(hash);
+    ensureLaneCapacity(activeLanes, lane);
+    activeLanes[lane] = { hash: normalized, color, sourceKey };
+    rememberSourceLane(sourceKey, lane);
+    clearHashFromOtherLanes(activeLanes, normalized, lane);
+    noteLane(lane);
+    return lane;
+  };
+
+  const pushEdge = (edge: GraphEdge) => {
+    edges.push(edge);
+    noteLane(edge.startLane);
+    noteLane(edge.endLane);
+  };
+
   commits.forEach((commit, row) => {
     const commitHash = normalizeHash(commit.hash);
+    sourceKeysByHash.set(commitHash, getCommitSourceKey(commit));
+    rowsByHash.set(commitHash, row);
+  });
+
+  commits.forEach((commit, row) => {
+    const commitHash = normalizeHash(commit.hash);
+    const commitSourceKey = sourceKeysByHash.get(commitHash) ?? null;
     const previousLanes = lanes;
     const nextLanes: Array<GraphLane | null> = [...lanes];
 
     let lane = findLaneByHash(previousLanes, commitHash);
     if (lane === -1) {
-      lane = row === 0 ? 0 : previousLanes.length;
+      lane = row === 0 ? 0 : chooseCommitLane(previousLanes, commitSourceKey);
     }
 
     ensureLaneCapacity(nextLanes, lane);
+    noteLane(lane);
+    rememberSourceLane(commitSourceKey, lane);
 
-    const currentColor = previousLanes[lane]?.color ?? getColor();
+    const currentColor = previousLanes[lane]?.hash === commitHash
+      ? previousLanes[lane]!.color
+      : getLaneColor(lane);
 
     nodes.push({
       x: GRAPH_PADDING_X + lane * GRAPH_COL_WIDTH,
@@ -155,47 +252,42 @@ export function buildCommitGraph(commits: Pick<GitCommit, 'hash' | 'parents'>[])
     });
 
     nextLanes[lane] = null;
+    clearHashFromOtherLanes(nextLanes, commitHash, lane);
 
     commit.parents.forEach((parentHash, parentIndex) => {
       const normalizedParent = normalizeHash(parentHash);
+      const parentRow = rowsByHash.get(normalizedParent);
+      const parentSourceKey = sourceKeysByHash.get(normalizedParent) ?? null;
+      const existingParentLane = findLaneByHash(nextLanes, normalizedParent);
+      const existingParentColor = existingParentLane === -1 ? null : nextLanes[existingParentLane]?.color ?? null;
 
-      if (parentIndex === 0) {
-        const targetLane = lane;
-        const parentColor = currentColor;
-        reserveLane(nextLanes, targetLane, normalizedParent, parentColor);
-        clearHashFromOtherLanes(nextLanes, normalizedParent, targetLane);
-
-        edges.push({
-          key: `edge-${commitHash}-${normalizedParent}-${row}`,
-          startLane: lane,
-          startRow: row,
-          endLane: targetLane,
-          endRow: row + 1,
-          color: parentColor,
-        });
-        return;
-      }
-
-      let targetLane = findLaneByHash(nextLanes, normalizedParent);
-      let parentColor = currentColor;
-
+      let targetLane = existingParentLane;
       if (targetLane === -1) {
-        targetLane = allocateRightmostLane(nextLanes);
-        parentColor = getColor();
-        reserveLane(nextLanes, targetLane, normalizedParent, parentColor);
-      } else {
-        parentColor = nextLanes[targetLane]?.color ?? getColor();
+        targetLane = parentIndex === 0
+          ? lane
+          : chooseMergeParentLane(nextLanes, lane + 1, parentSourceKey);
       }
 
-      clearHashFromOtherLanes(nextLanes, normalizedParent, targetLane);
+      const parentColor = parentIndex === 0
+        ? currentColor
+        : existingParentColor ?? getLaneColor(targetLane);
 
-      edges.push({
-        key: `edge-${commitHash}-${normalizedParent}-${row}`,
+      if (existingParentLane === -1) {
+        setActiveLane(nextLanes, targetLane, normalizedParent, parentColor, parentSourceKey);
+      } else {
+        rememberSourceLane(parentSourceKey, existingParentLane);
+        noteLane(existingParentLane);
+      }
+
+      pushEdge({
+        key: `edge-${commitHash}-${normalizedParent}-${row}-${parentIndex}-${parentRow ?? 'tail'}`,
         startLane: lane,
         startRow: row,
         endLane: targetLane,
         endRow: row + 1,
-        color: parentColor,
+        color: parentIndex === 0
+          ? currentColor
+          : parentColor,
       });
     });
 
@@ -204,12 +296,13 @@ export function buildCommitGraph(commits: Pick<GitCommit, 'hash' | 'parents'>[])
         return;
       }
 
-      if (nextLanes[laneIndex]?.hash === entry.hash) {
-        edges.push({
+      const targetLane = findLaneByHash(nextLanes, entry.hash);
+      if (targetLane !== -1) {
+        pushEdge({
           key: `pass-${entry.hash}-${row}-${laneIndex}`,
           startLane: laneIndex,
           startRow: row,
-          endLane: laneIndex,
+          endLane: targetLane,
           endRow: row + 1,
           color: entry.color,
         });
@@ -217,7 +310,6 @@ export function buildCommitGraph(commits: Pick<GitCommit, 'hash' | 'parents'>[])
     });
 
     lanes = nextLanes;
-    maxLaneCount = Math.max(maxLaneCount, lanes.length);
   });
 
   const rowTextStarts = buildRowTextStarts(nodes, edges);

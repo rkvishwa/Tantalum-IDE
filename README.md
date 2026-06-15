@@ -27,6 +27,12 @@ To package:
 npm run dist
 ```
 
+## Web portal
+
+The Next.js website is self-contained under `sites/home` only as a staging copy. It is intended to be moved to a separate Git repository and connected to the Appwrite Site `home` (`69c40c1e001f39d53e15`) with provider root directory `.`.
+
+Do not deploy the website from this IDE repo after it is moved. The root `appwrite.config.json` intentionally has no local `sites` entry; use `sites/home/README.md` and `sites/home/scripts/configure-appwrite-site.mjs` from the website repo to configure Appwrite Site build settings and variables.
+
 ## Renderer env
 
 `renderer-react/.env` is configured for this Appwrite project. The checked-in example file matches the live IDs:
@@ -110,6 +116,40 @@ Function variables:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 ```
 
+MQTT OTA VPS setup:
+
+1. Create DNS: `mqtt.yourdomain.com` pointing to the VPS public IP.
+2. Install Mosquitto:
+
+```bash
+sudo apt update
+sudo apt install -y mosquitto mosquitto-clients openssl
+sudo systemctl enable --now mosquitto
+sudo ufw allow 8883/tcp
+```
+
+3. Create a TLS CA and server certificate for `mqtt.yourdomain.com`, then configure Mosquitto listener `8883` with `allow_anonymous false`, `password_file /etc/mosquitto/passwd`, `acl_file /etc/mosquitto/acl`, `cafile`, `certfile`, `keyfile`, and `tls_version tlsv1.2`.
+4. Create users:
+
+```bash
+sudo mosquitto_passwd -b -c /etc/mosquitto/passwd tantalum_publisher '<publisher-password>'
+sudo mosquitto_passwd -b /etc/mosquitto/passwd tantalum_device '<device-password>'
+```
+
+5. Set `/etc/mosquitto/acl`:
+
+```text
+user tantalum_publisher
+topic write tantalum/boards/+/+/cmd
+
+user tantalum_device
+topic read tantalum/boards/+/+/cmd
+```
+
+6. Set Appwrite `board-admin` variables: `TANTALUM_BOARD_SECRET_KEK_V1`, `TANTALUM_MQTT_URL=mqtts://mqtt.yourdomain.com:8883`, `TANTALUM_MQTT_PUBLISHER_USERNAME=tantalum_publisher`, `TANTALUM_MQTT_PUBLISHER_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
+7. Set desktop/runtime build variables: `TANTALUM_MQTT_HOST=mqtt.yourdomain.com`, `TANTALUM_MQTT_PORT=8883`, `TANTALUM_MQTT_DEVICE_USERNAME=tantalum_device`, `TANTALUM_MQTT_DEVICE_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
+8. Restart Mosquitto, redeploy Appwrite functions, then reinstall Tantalum Cloud runtime on existing boards and choose `MQTT` or `Both`.
+
 Optional AI key variables:
 
 - `TANTALUM_SECRET_ACTIVE_KEK_VERSION`: defaults to `v1`
@@ -162,6 +202,7 @@ Expected `boards` attributes:
 - `runtimeVersion` string
 - `lastUpdateCheckAt` string or datetime
 - `otaStatus` string
+- `otaUpdateMode` string (`polling`, `mqtt`, or `both`)
 - `provisioningStatus` string
 - `provisioningRequestedAt` string or datetime
 - `provisioningMode` string

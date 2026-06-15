@@ -1,21 +1,27 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import type { FormEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { CircleStop, Link2, LoaderCircle, RefreshCcw, Send, Trash2 } from 'lucide-react';
-import { Terminal } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
 
-import { SYSTEM_FONT_FAMILY, type UiPreferences } from '@/lib/uiPreferences';
+import type { UiPreferences } from '@/lib/uiPreferences';
 import type { PortInfo, SerialMonitorCloseEvent, SerialMonitorDataEvent, SerialMonitorErrorEvent } from '@/types/electron';
 
 import { SerialPortBlockerDialog } from './SerialPortBlockerDialog';
 
 type SerialLineEnding = 'none' | 'lf' | 'cr' | 'crlf';
 
+export type SerialMonitorSessionState = {
+  sessionId: string | null;
+  connected: boolean;
+  port: string;
+  baudRate: number;
+};
+
 type SerialMonitorProps = {
   active: boolean;
   selectedPort: string | null;
   selectedBoardName: string | null;
   uiPreferences: UiPreferences;
+  onSessionChange?: (state: SerialMonitorSessionState) => void;
 };
 
 const COMMON_BAUD_RATES = [9600, 19200, 38400, 57600, 74880, 115200, 230400, 460800, 921600];
@@ -27,12 +33,16 @@ const LINE_ENDING_SUFFIX: Record<SerialLineEnding, string> = {
   crlf: '\r\n',
 };
 
+function stripAnsi(text: string) {
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 function portLabel(port: PortInfo) {
   const detail = port.manufacturer && port.manufacturer !== 'Unknown' ? ` - ${port.manufacturer}` : '';
   return `${port.path}${detail}`;
 }
 
-export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPreferences }: SerialMonitorProps) {
+export function SerialMonitor({ active, selectedPort, selectedBoardName, onSessionChange }: SerialMonitorProps) {
   const [ports, setPorts] = useState<PortInfo[]>([]);
   const [port, setPort] = useState(selectedPort ?? '');
   const [baudRate, setBaudRate] = useState(115200);
@@ -46,13 +56,22 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
   const [blockerDialogOpen, setBlockerDialogOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
-  const bufferedOutputRef = useRef('');
+  const outputRef = useRef<HTMLPreElement | null>(null);
+  const outputTextRef = useRef('');
   const sessionIdRef = useRef<string | null>(null);
   const selectedPortRef = useRef(selectedPort ?? '');
-  const initialUiPreferencesRef = useRef(uiPreferences);
+
+  const emitSessionChange = useCallback(
+    (next: Partial<SerialMonitorSessionState> & Pick<SerialMonitorSessionState, 'sessionId' | 'connected'>) => {
+      onSessionChange?.({
+        sessionId: next.sessionId,
+        connected: next.connected,
+        port: next.port ?? port,
+        baudRate: next.baudRate ?? baudRate,
+      });
+    },
+    [baudRate, onSessionChange, port],
+  );
 
   const portOptions = useMemo(() => {
     const byPath = new Map<string, PortInfo>();
@@ -73,15 +92,48 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
     return Array.from(byPath.values());
   }, [port, ports, selectedPort]);
 
-  const writeSystemLine = useCallback((message: string) => {
-    const terminal = terminalRef.current;
-    if (terminal) {
-      terminal.writeln(`\x1b[90m[serial] ${message}\x1b[0m`);
+  const scrollOutputToBottom = useCallback(() => {
+    const output = outputRef.current;
+    if (!output) {
+      return;
+    }
+
+    output.scrollTop = output.scrollHeight;
+  }, []);
+
+  const appendOutput = useCallback(
+    (text: string) => {
+      const normalized = stripAnsi(text);
+      if (!normalized) {
+        return;
+      }
+
+      outputTextRef.current += normalized;
+      const output = outputRef.current;
+      if (output) {
+        output.textContent = outputTextRef.current;
+        scrollOutputToBottom();
+      }
+    },
+    [scrollOutputToBottom],
+  );
+
+  const writeSystemLine = useCallback(
+    (message: string) => {
+      appendOutput(`[serial] ${message}\n`);
+    },
+    [appendOutput],
+  );
+
+  const clearOutput = useCallback(() => {
+    outputTextRef.current = '';
+    if (outputRef.current) {
+      outputRef.current.textContent = '';
     }
   }, []);
 
   const copySelectedOutput = useCallback(async () => {
-    const selection = terminalRef.current?.getSelection() ?? '';
+    const selection = window.getSelection()?.toString() ?? '';
     if (!selection) {
       setContextMenu(null);
       return;
@@ -96,27 +148,15 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
     }
   }, []);
 
-  const handleTerminalContextMenu = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-    const terminal = terminalRef.current;
-    if (!terminal?.hasSelection()) {
+  const handleOutputContextMenu = useCallback((event: ReactMouseEvent<HTMLPreElement>) => {
+    const selection = window.getSelection()?.toString() ?? '';
+    if (!selection) {
       return;
     }
 
     event.preventDefault();
     setContextMenu({ x: event.clientX, y: event.clientY });
   }, []);
-
-  const fitTerminal = useCallback(() => {
-    const fitAddon = fitAddonRef.current;
-    if (!fitAddon) {
-      return;
-    }
-
-    fitAddon.fit();
-    if (active) {
-      terminalRef.current?.focus();
-    }
-  }, [active]);
 
   const refreshPorts = useCallback(async () => {
     setLoadingPorts(true);
@@ -155,8 +195,14 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
     sessionIdRef.current = result.sessionId;
     setSessionId(result.sessionId);
     setConnected(true);
+    emitSessionChange({
+      sessionId: result.sessionId,
+      connected: true,
+      port: result.port,
+      baudRate: result.baudRate,
+    });
     writeSystemLine(`Connected to ${result.port} at ${result.baudRate} baud.`);
-  }, [baudRate, port, writeSystemLine]);
+  }, [baudRate, emitSessionChange, port, writeSystemLine]);
 
   const closeMonitor = useCallback(async () => {
     const activeSessionId = sessionIdRef.current;
@@ -190,13 +236,7 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
       return;
     }
 
-    const terminal = terminalRef.current;
-    if (terminal) {
-      terminal.write(event.data);
-      return;
-    }
-
-    bufferedOutputRef.current += event.data;
+    appendOutput(event.data);
   });
 
   const handleMonitorError = useEffectEvent((event: SerialMonitorErrorEvent) => {
@@ -217,71 +257,14 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
     setSessionId(null);
     setConnected(false);
     setConnecting(false);
+    emitSessionChange({
+      sessionId: null,
+      connected: false,
+    });
 
     const message = event.reason === 'disconnected' ? 'Serial port disconnected.' : 'Serial monitor closed.';
     writeSystemLine(message);
   });
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container || terminalRef.current) {
-      return;
-    }
-
-    const terminal = new Terminal({
-      convertEol: true,
-      cursorBlink: false,
-      disableStdin: true,
-      fontFamily: SYSTEM_FONT_FAMILY,
-      fontSize: initialUiPreferencesRef.current.fontSize,
-      theme: {
-        background: '#0b1117',
-        foreground: '#e3eaf2',
-        cursor: '#6ca6ff',
-        selectionBackground: '#182434',
-      },
-    });
-    const fitAddon = new FitAddon();
-
-    terminal.loadAddon(fitAddon);
-    terminal.open(container);
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
-    terminal.attachCustomKeyEventHandler((event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && terminal.hasSelection()) {
-        if (event.type === 'keydown') {
-          void copySelectedOutput();
-        }
-        return false;
-      }
-
-      return true;
-    });
-
-    if (bufferedOutputRef.current) {
-      terminal.write(bufferedOutputRef.current);
-      bufferedOutputRef.current = '';
-    }
-
-    window.setTimeout(() => fitAddon.fit(), 0);
-
-    return () => {
-      terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
-    };
-  }, [copySelectedOutput]);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) {
-      return;
-    }
-
-    terminal.options.fontFamily = SYSTEM_FONT_FAMILY;
-    terminal.options.fontSize = uiPreferences.fontSize;
-    fitTerminal();
-  }, [fitTerminal, uiPreferences.fontSize]);
 
   useEffect(() => {
     const offData = window.tantalum.serialMonitor.onData((event) => {
@@ -315,7 +298,7 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
       const isEditableTarget =
         target instanceof HTMLElement &&
         (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
-      if (isEditableTarget || !terminalRef.current?.hasSelection()) {
+      if (isEditableTarget || !window.getSelection()?.toString()) {
         return;
       }
 
@@ -350,35 +333,11 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
   }, [connected, selectedPort]);
 
   useEffect(() => {
-    if (!active) {
-      return;
-    }
-
-    const handle = window.setTimeout(() => fitTerminal(), 0);
-    return () => {
-      window.clearTimeout(handle);
-    };
-  }, [active, fitTerminal]);
-
-  useEffect(() => {
-    if (!active || typeof ResizeObserver === 'undefined') {
-      return;
-    }
-
-    const container = containerRef.current;
-    if (!container) {
-      return;
-    }
-
-    const observer = new ResizeObserver(() => {
-      fitTerminal();
+    emitSessionChange({
+      sessionId: sessionIdRef.current,
+      connected: Boolean(sessionIdRef.current),
     });
-
-    observer.observe(container);
-    return () => {
-      observer.disconnect();
-    };
-  }, [active, fitTerminal]);
+  }, [baudRate, emitSessionChange, port]);
 
   useEffect(() => {
     return () => {
@@ -386,8 +345,12 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
       if (activeSessionId) {
         void window.tantalum.serialMonitor.close(activeSessionId);
       }
+      emitSessionChange({
+        sessionId: null,
+        connected: false,
+      });
     };
-  }, []);
+  }, [emitSessionChange]);
 
   const hasWritableSession = Boolean(sessionId && connected);
   const statusText = connected
@@ -426,28 +389,28 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
             ))}
           </select>
         </label>
-        <button className={connected ? 'secondary-button compact' : 'primary-button compact'} type="button" onClick={() => (connected ? void closeMonitor() : void openMonitor())} disabled={connecting || (!connected && !port.trim())}>
+        <button className={connected ? 'boards-hub-btn' : 'boards-hub-btn boards-hub-btn-primary'} type="button" onClick={() => (connected ? void closeMonitor() : void openMonitor())} disabled={connecting || (!connected && !port.trim())}>
           {connecting ? <LoaderCircle size={14} className="spin" /> : connected ? <CircleStop size={14} /> : <Link2 size={14} />}
           {connecting ? 'Connecting...' : connected ? 'Disconnect' : 'Connect'}
         </button>
-        <button className="icon-button" type="button" onClick={() => terminalRef.current?.clear()} title="Clear serial output">
+        <button className="icon-button" type="button" onClick={clearOutput} title="Clear serial output">
           <Trash2 size={15} />
         </button>
-        <span className={`serial-monitor-status ${connected ? 'connected' : ''}`}>{statusText}</span>
+        <span className={`serial-monitor-status ${connected ? 'status-pill status-online' : ''}`}>{statusText}</span>
       </div>
 
       {notice ? (
-        <div className="serial-monitor-notice">
+        <div className="inline-banner inline-banner-warning serial-monitor-notice">
           <span>{notice}</span>
           {port.trim() ? (
-            <button className="secondary-button compact" type="button" onClick={() => setBlockerDialogOpen(true)}>
+            <button className="boards-hub-btn" type="button" onClick={() => setBlockerDialogOpen(true)}>
               Find blockers
             </button>
           ) : null}
         </div>
       ) : null}
 
-      <div ref={containerRef} className="serial-monitor-terminal-shell" onContextMenu={handleTerminalContextMenu} />
+      <pre ref={outputRef} className="serial-monitor-output" onContextMenu={handleOutputContextMenu} />
 
       {contextMenu ? (
         <div className="serial-monitor-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
@@ -465,7 +428,7 @@ export function SerialMonitor({ active, selectedPort, selectedBoardName, uiPrefe
           <option value="cr">Carriage return</option>
           <option value="crlf">Both NL + CR</option>
         </select>
-        <button className="secondary-button compact" type="submit" disabled={!hasWritableSession || (!input && lineEnding === 'none')}>
+        <button className="boards-hub-btn" type="submit" disabled={!hasWritableSession || (!input && lineEnding === 'none')}>
           <Send size={14} />
           Send
         </button>

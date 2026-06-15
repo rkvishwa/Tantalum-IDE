@@ -1,5 +1,7 @@
 import type { Models } from 'appwrite';
 
+export type OtaUpdateMode = 'polling' | 'mqtt' | 'both';
+
 export type BoardDocument = Models.Document & {
   userId: string;
   name: string;
@@ -19,6 +21,8 @@ export type BoardDocument = Models.Document & {
   provisioningMode?: string;
   provisioningPop?: string;
   mqttTopicSuffix?: string;
+  commandSecretEnvelope?: string;
+  otaUpdateMode?: OtaUpdateMode | string;
   lastOtaError?: string;
   sourceCodeVisibility?: 'private' | 'public' | string;
   firmwareVersion: string;
@@ -50,6 +54,7 @@ export type BoardInput = {
   name: string;
   boardType: string;
   sourceCodeVisibility?: 'private' | 'public';
+  otaUpdateMode?: OtaUpdateMode;
 };
 
 export type BoardSecret = {

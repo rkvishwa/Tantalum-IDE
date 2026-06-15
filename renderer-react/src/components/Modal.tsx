@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 type ModalProps = {
@@ -43,8 +44,8 @@ export function Modal({
                 <h2>{title}</h2>
                 {subtitle ? <p>{subtitle}</p> : null}
               </div>
-              <button className="ghost-button" type="button" onClick={onClose} aria-label={`Close ${title}`}>
-                Close
+              <button className="icon-button" type="button" onClick={onClose} aria-label={`Close ${title}`}>
+                <X size={16} />
               </button>
             </div>
             <div className="modal-body">{children}</div>

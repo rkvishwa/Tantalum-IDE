@@ -6,7 +6,6 @@ import {
   ArrowRight,
   Bell,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   CheckCircle2,
   Copy,
@@ -24,15 +23,18 @@ import {
 } from 'lucide-react';
 
 import { signOut } from '@/lib/auth';
+import tantalumIcon from '@/assets/tantalum-icon.svg';
+import tantalumIconDark from '@/assets/tantalum-icon-dark.svg';
 import type { MenuAction, ToolchainNotification } from '@/types/electron';
 import {
   DEFAULT_UI_PREFERENCES,
   loadUiPreferences,
   normalizeUiPreferences,
-  resolveThemePreference,
   saveUiPreferences,
   type UiPreferences,
 } from '@/lib/uiPreferences';
+import { useDocumentTheme } from '@/lib/useDocumentTheme';
+import { formatMenuShortcut, getRevealInFolderLabel, isMacPlatform } from '@/lib/platformUi';
 
 import { IDEWorkspace, type SidebarView } from './IDEWorkspace';
 import { ConfirmProvider } from './ConfirmProvider';
@@ -179,20 +181,6 @@ function savePanelVisibilityState(panelVisibility: PanelVisibilityState) {
   }
 }
 
-function getAccentContrastColor(accentColor: string) {
-  const hex = accentColor.replace('#', '');
-  if (!/^[0-9a-f]{6}$/i.test(hex)) {
-    return '#ffffff';
-  }
-
-  const red = Number.parseInt(hex.slice(0, 2), 16);
-  const green = Number.parseInt(hex.slice(2, 4), 16);
-  const blue = Number.parseInt(hex.slice(4, 6), 16);
-  const yiq = (red * 299 + green * 587 + blue * 114) / 1000;
-
-  return yiq >= 150 ? '#081018' : '#ffffff';
-}
-
 function isToolchainNotificationActive(notification: ToolchainNotification) {
   return notification.status === 'queued' || notification.status === 'running';
 }
@@ -281,7 +269,7 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
   const [workspaceTitle, setWorkspaceTitle] = useState('');
   const [workspaceSearchOpen, setWorkspaceSearchOpen] = useState(false);
   const [uiPreferences, setUiPreferences] = useState<UiPreferences>(() => loadUiPreferences());
-  const [resolvedTheme, setResolvedTheme] = useState<'dark' | 'light'>(() => resolveThemePreference(uiPreferences.theme));
+  const resolvedTheme = useDocumentTheme(uiPreferences);
   const [toolchainNotifications, setToolchainNotifications] = useState<ToolchainNotification[]>([]);
   const [notificationHistoryOpen, setNotificationHistoryOpen] = useState(false);
   const [restoreNotificationRequest, setRestoreNotificationRequest] = useState<ToolchainNotificationRestoreRequest | null>(null);
@@ -337,28 +325,6 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
 
   useEffect(() => {
     saveUiPreferences(uiPreferences);
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
-
-    const applyPreferences = () => {
-      const nextTheme = resolveThemePreference(uiPreferences.theme);
-      setResolvedTheme(nextTheme);
-
-      const root = document.documentElement;
-      root.dataset.theme = nextTheme;
-      root.dataset.themePreference = uiPreferences.theme;
-      root.style.setProperty('--app-font-family', uiPreferences.fontFamily);
-      root.style.setProperty('--app-font-size', `${uiPreferences.fontSize}px`);
-      root.style.setProperty('--accent', uiPreferences.accentColor);
-      root.style.setProperty('--accent-contrast', getAccentContrastColor(uiPreferences.accentColor));
-      root.style.setProperty('--color-accent', uiPreferences.accentColor);
-    };
-
-    applyPreferences();
-    mediaQuery.addEventListener('change', applyPreferences);
-
-    return () => {
-      mediaQuery.removeEventListener('change', applyPreferences);
-    };
   }, [uiPreferences]);
 
   useEffect(() => {
@@ -507,10 +473,12 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
 
   return (
     <ConfirmProvider>
-    <div className="app-shell-container no-global-sidebar">
+    <div className={`app-shell-container no-global-sidebar${isMacPlatform(platform) ? ' platform-mac' : ''}`}>
       <AppTitleBar
         appName={appName}
+        resolvedTheme={resolvedTheme}
         version={version}
+        platform={platform}
         titleText={currentView === 'settings' ? 'Settings' : workspaceTitle || 'No Project Space open'}
         user={user}
         view={currentView}
@@ -525,7 +493,6 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
         canNavigateForward={canNavigateForward}
         onNavigateBack={navigateBack}
         onNavigateForward={navigateForward}
-        onBackToWorkspace={navigateToLastWorkspace}
         onOpenSettings={navigateToSettings}
         onOpenToolchainNotificationHistory={() => setNotificationHistoryOpen(true)}
         onRestoreToolchainNotification={restoreToolchainNotification}
@@ -576,6 +543,7 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
               onActiveTabChange={navigateToSettingsTab}
               onPreferencesChange={handlePreferenceChange}
               onResetPreferences={() => handlePreferenceChange(DEFAULT_UI_PREFERENCES)}
+              onBackToWorkspace={navigateToLastWorkspace}
             />
           </div>
         )}
@@ -644,7 +612,10 @@ export function AppShell({ appName, version, platform, user, onSignedOut }: AppS
 }
 
 function AppTitleBar({
+  appName,
+  resolvedTheme,
   titleText,
+  platform,
   user,
   view,
   leftPanelOpen,
@@ -658,7 +629,6 @@ function AppTitleBar({
   canNavigateForward,
   onNavigateBack,
   onNavigateForward,
-  onBackToWorkspace,
   onOpenSettings,
   onOpenToolchainNotificationHistory,
   onRestoreToolchainNotification,
@@ -669,7 +639,9 @@ function AppTitleBar({
   onSignedOut,
 }: {
   appName: string;
+  resolvedTheme: 'dark' | 'light';
   version: string;
+  platform: string;
   titleText: string;
   user: Models.User<Models.Preferences>;
   view: View;
@@ -684,7 +656,6 @@ function AppTitleBar({
   canNavigateForward: boolean;
   onNavigateBack: () => void;
   onNavigateForward: () => void;
-  onBackToWorkspace: () => void;
   onOpenSettings: () => void;
   onOpenToolchainNotificationHistory: () => void;
   onRestoreToolchainNotification: (notification: ToolchainNotification) => void;
@@ -705,6 +676,9 @@ function AppTitleBar({
   const displayName = user.name || user.email || 'Account';
   const initial = useMemo(() => displayName.trim().charAt(0).toUpperCase() || 'T', [displayName]);
   const recentToolchainNotifications = useMemo(() => toolchainNotifications.slice(0, 3), [toolchainNotifications]);
+  const isMac = isMacPlatform(platform);
+  const formatShortcut = (shortcut: string) => formatMenuShortcut(shortcut, platform);
+  const workspaceSearchShortcut = formatShortcut('Ctrl Shift F');
 
   useEffect(() => {
     if (!accountMenuOpen) {
@@ -905,7 +879,7 @@ void loop() {
         { id: 'save-file', label: 'Save', shortcut: 'Ctrl S', action: { type: 'save-file' } },
         { id: 'save-file-as', label: 'Save As...', shortcut: 'Ctrl Shift S', action: { type: 'save-file-as' } },
         { id: 'file-location-separator', type: 'separator' },
-        { id: 'show-sketch-folder', label: 'Reveal in File Explorer', shortcut: 'Ctrl K', action: { type: 'show-sketch-folder' } },
+        { id: 'show-sketch-folder', label: getRevealInFolderLabel(platform), shortcut: 'Ctrl K', action: { type: 'show-sketch-folder' } },
         { id: 'file-exit-separator', type: 'separator' },
         { id: 'exit', label: 'Exit', onSelect: () => controlWindow('close') },
       ],
@@ -915,7 +889,7 @@ void loop() {
       label: 'Edit',
       items: [
         { id: 'undo', label: 'Undo', shortcut: 'Ctrl Z', action: { type: 'undo' } },
-        { id: 'redo', label: 'Redo', shortcut: 'Ctrl Y', action: { type: 'redo' } },
+        { id: 'redo', label: 'Redo', shortcut: isMac ? 'Ctrl Shift Z' : 'Ctrl Y', action: { type: 'redo' } },
         { id: 'edit-clipboard-separator', type: 'separator' },
         { id: 'cut', label: 'Cut', shortcut: 'Ctrl X', action: { type: 'cut' } },
         { id: 'copy', label: 'Copy', shortcut: 'Ctrl C', action: { type: 'copy' } },
@@ -1008,7 +982,7 @@ void loop() {
             }}
           >
             <span className="titlebar-menu-label">{item.label}</span>
-            {item.shortcut ? <span className="titlebar-menu-shortcut">{item.shortcut}</span> : <span />}
+            {item.shortcut ? <span className="titlebar-menu-shortcut">{formatShortcut(item.shortcut)}</span> : <span />}
             {hasSubmenu ? <ChevronRight size={13} /> : null}
           </button>
           {hasSubmenu ? (
@@ -1021,8 +995,10 @@ void loop() {
     });
 
   return (
-    <header className="app-titlebar flex h-[44px] items-center border-b">
+    <header className={`app-titlebar flex h-[44px] items-center border-b${isMac ? ' platform-mac' : ''}`}>
+      {isMac ? <div className="titlebar-traffic-light-spacer" aria-hidden="true" /> : null}
       <div className="titlebar-left">
+        <img className="titlebar-app-icon" src={resolvedTheme === 'dark' ? tantalumIconDark : tantalumIcon} alt="" title={appName} />
         <button
           className={`titlebar-icon-button ${leftPanelOpen ? 'active' : ''}`}
           type="button"
@@ -1052,12 +1028,6 @@ void loop() {
         >
           <ArrowRight size={16} />
         </button>
-        {view === 'settings' ? (
-          <button className="titlebar-menu-item" type="button" onClick={onBackToWorkspace}>
-            <ChevronLeft size={14} />
-            Back to app
-          </button>
-        ) : null}
         <nav className="titlebar-menu" ref={titlebarMenuRef} aria-label="Application menu" role="menubar">
           {menuGroups.map((menu) => (
             <div key={menu.id} className="titlebar-menu-group" role="none" onPointerEnter={() => switchOpenMenu(menu.id)}>
@@ -1094,7 +1064,7 @@ void loop() {
           >
             <Search size={14} />
             <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open Project Space to search'}</span>
-            <kbd>Ctrl Shift F</kbd>
+            <kbd>{workspaceSearchShortcut}</kbd>
           </button>
         ) : (
           <span>{titleText}</span>
@@ -1233,6 +1203,7 @@ void loop() {
           ) : null}
         </div>
 
+        {!isMac ? (
         <div className="window-controls" aria-label="Window controls">
           <button className="window-control-button" type="button" onClick={() => controlWindow('minimize')} title="Minimize">
             <Minus size={14} />
@@ -1244,6 +1215,7 @@ void loop() {
             <X size={15} />
           </button>
         </div>
+        ) : null}
       </div>
     </header>
   );

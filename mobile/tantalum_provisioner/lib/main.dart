@@ -79,7 +79,7 @@ class _ProvisionerHomeState extends State<ProvisionerHome> {
 
   Future<void> _loadSession() async {
     if (appwriteEndpoint.isEmpty || appwriteProjectId.isEmpty) {
-      setState(() => message = 'Appwrite configuration is missing.');
+      setState(() => message = 'Cloud configuration is missing.');
       return;
     }
 
