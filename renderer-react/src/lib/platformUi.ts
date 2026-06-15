@@ -11,6 +11,14 @@ export function applyPlatformDocumentClass(platform: string) {
   document.documentElement.classList.toggle('platform-mac', isMacPlatform(platform));
 }
 
+export function applyFullscreenDocumentClass(isFullscreen: boolean) {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  document.documentElement.classList.toggle('is-fullscreen', isFullscreen);
+}
+
 export function formatMenuShortcut(shortcut: string, platform: string) {
   if (!isMacPlatform(platform)) {
     return shortcut;

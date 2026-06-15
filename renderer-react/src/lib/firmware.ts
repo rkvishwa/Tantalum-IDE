@@ -47,7 +47,7 @@ const FIRMWARE_SELECT_FIELDS = [
   'sourceSnapshotCreatedAt',
 ];
 
-export async function listFirmwareHistory(boardId: string) {
+export async function listFirmwareHistory(boardId: string, options: { bypassCache?: boolean } = {}) {
   const response = await databases.listDocuments<FirmwareDocument>(
     appwriteConfig.databaseId,
     appwriteConfig.firmwareCollectionId,
@@ -60,6 +60,7 @@ export async function listFirmwareHistory(boardId: string) {
     {
       cacheTtlMs: FIRMWARE_HISTORY_CACHE_TTL_MS,
       cacheKey: `firmware:history:${boardId}`,
+      bypassCache: options.bypassCache,
     },
   );
 

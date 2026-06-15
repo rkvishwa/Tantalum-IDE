@@ -9,6 +9,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
 const { Permission, Query, Role } = require("appwrite");
+const WebSocket = require("ws");
 
 function isBrokenPipeError(error) {
   return error?.code === "EPIPE" || /EPIPE|broken pipe/i.test(String(error?.message || ""));
@@ -79,6 +80,8 @@ const appwriteManifest = require("./appwrite.config.json");
 const APP_NAME = "Tantalum IDE";
 const APPWRITE_ENDPOINT = String(appwriteManifest.endpoint || "").replace(/\/$/, "");
 const APPWRITE_PROJECT_ID = String(appwriteManifest.projectId || "");
+const APPWRITE_REALTIME_MAX_CHANNELS = 40;
+const APPWRITE_REALTIME_MAX_RECONNECT_DELAY_MS = 30 * 1000;
 const TANTALUM_WEB_APP_URL = String(process.env.TANTALUM_WEB_APP_URL || appwriteManifest.webAppUrl || "https://tantalum.knurdz.org").replace(/\/+$/, "");
 const TANTALUM_DESKTOP_CALLBACK_SCHEME = String(process.env.TANTALUM_DESKTOP_CALLBACK_SCHEME || "tantalum").trim().toLowerCase() || "tantalum";
 const REACT_DIST_ENTRY = path.join(__dirname, "renderer-react", "dist", "index.html");
@@ -159,7 +162,7 @@ const agentToolExecutor = new AgentToolExecutor({
     });
   },
   unregisterLibraryInstall: (installId) => activeLibraryInstallOperations.delete(installId),
-  registerBoardPackageInstall: (installId, controller) => activeBoardPackageInstalls.set(installId, controller),
+  registerBoardPackageInstall: (installId, controller) => activeBoardPackageInstalls.set(installId, { controller }),
   unregisterBoardPackageInstall: (installId) => activeBoardPackageInstalls.delete(installId),
   emitToolchainEvent: (channel, payload) => sendRendererEvent(channel, payload),
   emitProgress: (event) => sendRendererEvent("agent:tool-progress", event),
@@ -200,10 +203,56 @@ const agentRestorePointStore = new AgentRestorePointStore({
 
 let pty = null;
 let cachedRipgrepPath = null;
+let nodePtySpawnHelperChecked = false;
 try {
   pty = require("node-pty");
 } catch (error) {
   console.warn("node-pty is unavailable:", error.message);
+}
+
+function getNodePtySpawnHelperCandidates() {
+  if (process.platform === "win32") {
+    return [];
+  }
+
+  try {
+    const nodePtyRoot = path.dirname(require.resolve("node-pty/package.json"));
+    return uniqueTruthyStrings([
+      path.join(nodePtyRoot, "build", "Release", "spawn-helper"),
+      path.join(nodePtyRoot, "build", "Debug", "spawn-helper"),
+      path.join(nodePtyRoot, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper"),
+    ].flatMap((candidate) => [
+      candidate,
+      candidate.replace("app.asar", "app.asar.unpacked").replace("node_modules.asar", "node_modules.asar.unpacked"),
+    ]));
+  } catch {
+    return [];
+  }
+}
+
+function ensureNodePtySpawnHelperExecutable() {
+  if (nodePtySpawnHelperChecked || process.platform === "win32") {
+    return;
+  }
+
+  nodePtySpawnHelperChecked = true;
+
+  for (const helperPath of getNodePtySpawnHelperCandidates()) {
+    try {
+      const stats = fs.statSync(helperPath);
+      if (!stats.isFile()) {
+        continue;
+      }
+
+      if ((stats.mode & 0o111) === 0) {
+        fs.chmodSync(helperPath, stats.mode | 0o755);
+      }
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes(error?.code)) {
+        console.warn(`Unable to repair node-pty spawn helper permissions at ${helperPath}:`, error.message);
+      }
+    }
+  }
 }
 
 async function getRipgrepPath() {
@@ -263,6 +312,11 @@ function addRecentWorkspace(workspacePath) {
 function isActiveToolchainNotificationStatus(status) {
   return status === "queued" || status === "running";
 }
+
+const LIBRARY_INSTALL_NOTIFICATION_KINDS = new Set(["library-install", "library-update"]);
+const BOARD_PACKAGE_INSTALL_NOTIFICATION_KINDS = new Set(["platform-install", "platform-update"]);
+const INTERRUPTED_INSTALL_DETAIL = "Install was interrupted because Tantalum IDE closed before it finished. Start the install again to resume.";
+const STOPPED_INSTALL_DETAIL = "Install is no longer running.";
 
 function normalizeToolchainNotificationStatus(status) {
   return ["queued", "running", "success", "error", "canceled", "interrupted"].includes(status) ? status : "running";
@@ -359,17 +413,76 @@ function sortToolchainNotifications(notifications) {
   return [...notifications].sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
 }
 
+function getToolchainNotificationInstallId(notification) {
+  const metadata = notification?.metadata && typeof notification.metadata === "object" ? notification.metadata : {};
+  const metadataInstallId = typeof metadata.installId === "string" ? metadata.installId.trim() : "";
+  return metadataInstallId || normalizeNotificationText(notification?.id);
+}
+
+function getBoardPackageInstallOperation(installId) {
+  const operation = activeBoardPackageInstalls.get(installId);
+  if (!operation) {
+    return null;
+  }
+
+  if (operation.controller) {
+    return operation;
+  }
+
+  return { controller: operation };
+}
+
+function hasLiveInstallOperationForNotification(notification) {
+  const kind = normalizeToolchainNotificationKind(notification?.kind);
+  const installId = getToolchainNotificationInstallId(notification);
+  if (!installId) {
+    return false;
+  }
+
+  if (LIBRARY_INSTALL_NOTIFICATION_KINDS.has(kind)) {
+    return activeLibraryInstallOperations.has(installId);
+  }
+
+  if (BOARD_PACKAGE_INSTALL_NOTIFICATION_KINDS.has(kind)) {
+    return activeBoardPackageInstalls.has(installId);
+  }
+
+  return true;
+}
+
+function reconcileStaleInstallNotifications(notifications) {
+  const now = Date.now();
+  return notifications.map((notification) => {
+    const kind = normalizeToolchainNotificationKind(notification.kind);
+    const isInstallNotification = LIBRARY_INSTALL_NOTIFICATION_KINDS.has(kind) || BOARD_PACKAGE_INSTALL_NOTIFICATION_KINDS.has(kind);
+    if (!isInstallNotification || !isActiveToolchainNotificationStatus(notification.status) || hasLiveInstallOperationForNotification(notification)) {
+      return notification;
+    }
+
+    return {
+      ...notification,
+      status: "interrupted",
+      phase: "interrupted",
+      detail: INTERRUPTED_INSTALL_DETAIL,
+      progress: notification.progress ?? null,
+      updatedAt: now,
+    };
+  });
+}
+
 function getToolchainNotifications() {
   const stored = preferenceStore?.get(TOOLCHAIN_NOTIFICATIONS_KEY);
   const normalized = Array.isArray(stored)
     ? sortToolchainNotifications(stored.map((entry) => normalizeToolchainNotification(entry))).slice(0, TOOLCHAIN_NOTIFICATIONS_LIMIT)
     : [];
+  const reconciled = reconcileStaleInstallNotifications(normalized);
+  const nextNotifications = sortToolchainNotifications(reconciled).slice(0, TOOLCHAIN_NOTIFICATIONS_LIMIT);
 
-  if (preferenceStore && JSON.stringify(stored || []) !== JSON.stringify(normalized)) {
-    preferenceStore.set(TOOLCHAIN_NOTIFICATIONS_KEY, normalized);
+  if (preferenceStore && JSON.stringify(stored || []) !== JSON.stringify(nextNotifications)) {
+    preferenceStore.set(TOOLCHAIN_NOTIFICATIONS_KEY, nextNotifications);
   }
 
-  return normalized;
+  return nextNotifications;
 }
 
 function persistToolchainNotifications(notifications) {
@@ -392,6 +505,69 @@ function upsertToolchainNotification(notification) {
     notification: nextNotifications.find((entry) => entry.id === nextNotification.id) || nextNotification,
     notifications: nextNotifications,
   };
+}
+
+function updateInstallNotificationStatus(installId, status, detail) {
+  if (!installId) {
+    return;
+  }
+
+  upsertToolchainNotification({
+    id: installId,
+    status,
+    phase: status,
+    detail: detail || (status === "canceled" ? "Install stopped." : INTERRUPTED_INSTALL_DETAIL),
+  });
+}
+
+function abortInstallController(controller) {
+  if (!controller || controller.signal?.aborted) {
+    return;
+  }
+
+  try {
+    controller.abort();
+  } catch (error) {
+    console.warn("Unable to abort install operation:", error instanceof Error ? error.message : error);
+  }
+}
+
+function interruptInstallOperationsForSender(sender, detail = INTERRUPTED_INSTALL_DETAIL) {
+  if (!sender) {
+    return;
+  }
+
+  for (const [installId, operation] of activeLibraryInstallOperations.entries()) {
+    if (operation?.sender !== sender) {
+      continue;
+    }
+
+    updateInstallNotificationStatus(installId, "interrupted", detail);
+    abortInstallController(operation.controller);
+  }
+
+  for (const [installId] of activeBoardPackageInstalls.entries()) {
+    const normalizedOperation = getBoardPackageInstallOperation(installId);
+    if (normalizedOperation?.sender !== sender) {
+      continue;
+    }
+
+    updateInstallNotificationStatus(installId, "interrupted", detail);
+    abortInstallController(normalizedOperation.controller);
+  }
+}
+
+function interruptAllInstallOperations(detail = INTERRUPTED_INSTALL_DETAIL) {
+  for (const [installId, operation] of activeLibraryInstallOperations.entries()) {
+    updateInstallNotificationStatus(installId, "interrupted", detail);
+    abortInstallController(operation?.controller);
+  }
+
+  for (const [installId] of activeBoardPackageInstalls.entries()) {
+    const operation = getBoardPackageInstallOperation(installId);
+    updateInstallNotificationStatus(installId, "interrupted", detail);
+    abortInstallController(operation?.controller);
+  }
 }
 
 function clearToolchainNotifications() {
@@ -434,7 +610,7 @@ function updateAgentToolSettings(patch = {}) {
   return response;
 }
 
-function interruptActiveToolchainNotifications() {
+function interruptActiveToolchainNotifications(detail = "Task was interrupted because Tantalum IDE restarted.") {
   const current = getToolchainNotifications();
   let changed = false;
   const now = Date.now();
@@ -448,7 +624,7 @@ function interruptActiveToolchainNotifications() {
       ...notification,
       status: "interrupted",
       phase: "interrupted",
-      detail: notification.detail || "Task was interrupted because Tantalum IDE restarted.",
+      detail,
       progress: notification.progress ?? null,
       updatedAt: now,
     };
@@ -3382,8 +3558,26 @@ function serializeApproval(approval) {
   };
 }
 
+function sendIpcEvent(target, channel, payload) {
+  if (!target || typeof target.send !== "function") {
+    return false;
+  }
+
+  if (typeof target.isDestroyed === "function" && target.isDestroyed()) {
+    return false;
+  }
+
+  try {
+    target.send(channel, payload);
+    return true;
+  } catch (error) {
+    console.warn(`Unable to send renderer event '${channel}':`, error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
 function sendRendererEvent(channel, payload) {
-  mainWindow?.webContents.send(channel, payload);
+  sendIpcEvent(mainWindow?.webContents, channel, payload);
 }
 
 function sendMenuAction(action) {
@@ -3423,6 +3617,7 @@ function clearAppwriteSession() {
   secretStore?.delete("appwrite.sessionCookie");
   clearAppwriteJwtCache();
   clearAppwriteReadCache();
+  resetAppwriteRealtimeConnection("session-cleared");
 }
 
 function storeAppwriteSession(response) {
@@ -3705,6 +3900,48 @@ function clearAppwriteReadCache() {
   appwriteInflightReadCache.clear();
 }
 
+function invalidateAppwriteReadCacheByCacheKey(predicate) {
+  for (const key of [...appwriteReadCache.keys()]) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(key);
+    } catch {
+      parsed = null;
+    }
+
+    if (parsed && predicate(String(parsed.cacheKey || ""))) {
+      appwriteReadCache.delete(key);
+    }
+  }
+
+  for (const key of [...appwriteInflightReadCache.keys()]) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(key);
+    } catch {
+      parsed = null;
+    }
+
+    if (parsed && predicate(String(parsed.cacheKey || ""))) {
+      appwriteInflightReadCache.delete(key);
+    }
+  }
+}
+
+function invalidateAppwriteReadCacheForRealtimeEvent(event) {
+  const cloudConfig = getRendererCloudConfig();
+  const channels = Array.isArray(event?.channels) ? event.channels.map((channel) => String(channel || "")) : [];
+  const matchesCollection = (collectionId) => Boolean(collectionId && channels.some((channel) => channel.includes(`collections.${collectionId}`)));
+
+  if (matchesCollection(cloudConfig.boardsCollectionId)) {
+    invalidateAppwriteReadCacheByCacheKey((cacheKey) => cacheKey === "boards:list");
+  }
+
+  if (matchesCollection(cloudConfig.firmwareCollectionId)) {
+    invalidateAppwriteReadCacheByCacheKey((cacheKey) => cacheKey.startsWith("firmware:"));
+  }
+}
+
 async function cachedAppwriteRequest(
   request,
   { ttlMs = 0, cacheKey = "", bypassCache = false, requestExecutor = appwriteRequest, shouldCachePayload = () => true } = {},
@@ -3848,6 +4085,381 @@ async function appwriteRequest({ method = "GET", pathName, queries = [], body, f
   }
 
   return payload;
+}
+
+const appwriteRealtimeSubscriptions = new Map();
+let appwriteRealtimeSocket = null;
+let appwriteRealtimeSocketGeneration = 0;
+let appwriteRealtimeReconnectTimer = null;
+let appwriteRealtimeReconnectAttempts = 0;
+let appwriteRealtimeChannelKey = "";
+let appwriteRealtimeStatus = {
+  state: "idle",
+  connected: false,
+  channels: [],
+  subscriptionCount: 0,
+  reconnectAttempt: 0,
+  updatedAt: new Date(0).toISOString(),
+};
+
+function normalizeAppwriteRealtimeChannels(channels) {
+  const normalized = (Array.isArray(channels) ? channels : [channels])
+    .map((channel) => String(channel || "").trim())
+    .filter(Boolean);
+  return [...new Set(normalized)].slice(0, APPWRITE_REALTIME_MAX_CHANNELS);
+}
+
+function getAppwriteRealtimeChannels() {
+  const channels = new Set();
+  for (const subscription of appwriteRealtimeSubscriptions.values()) {
+    for (const channel of subscription.channels) {
+      channels.add(channel);
+    }
+  }
+  return [...channels].sort();
+}
+
+function getAppwriteRealtimeChannelKey(channels = getAppwriteRealtimeChannels()) {
+  return channels.join("\n");
+}
+
+function appwriteRealtimeEndpoint() {
+  return APPWRITE_ENDPOINT.replace(/^https:\/\//i, "wss://").replace(/^http:\/\//i, "ws://");
+}
+
+function parseAppwriteFallbackSession(rawValue) {
+  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+    return "";
+  }
+
+  const sessionKey = `a_session_${APPWRITE_PROJECT_ID}`;
+  try {
+    const parsed = JSON.parse(rawValue);
+    const value = parsed?.[sessionKey];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  } catch {
+    // Older Appwrite fallback values can be cookie-like strings.
+  }
+
+  return parseCookieHeaderValue(rawValue, sessionKey);
+}
+
+function parseCookieHeaderValue(cookieHeader, name) {
+  if (typeof cookieHeader !== "string" || !name) {
+    return "";
+  }
+
+  const prefix = `${name}=`;
+  const match = cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+  if (!match) {
+    return "";
+  }
+
+  const value = match.slice(prefix.length);
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getAppwriteRealtimeSessionSecret() {
+  const sessionKey = `a_session_${APPWRITE_PROJECT_ID}`;
+  return (
+    parseAppwriteFallbackSession(secretStore?.get("appwrite.sessionFallback")) ||
+    parseCookieHeaderValue(secretStore?.get("appwrite.sessionCookie"), sessionKey)
+  );
+}
+
+function buildAppwriteRealtimeUrl(channels) {
+  const url = new URL(`${appwriteRealtimeEndpoint()}/realtime`);
+  url.searchParams.set("project", APPWRITE_PROJECT_ID);
+  channels.forEach((channel) => url.searchParams.append("channels[]", channel));
+  return url.toString();
+}
+
+function setAppwriteRealtimeStatus(state, patch = {}) {
+  appwriteRealtimeStatus = {
+    state,
+    connected: state === "connected",
+    channels: getAppwriteRealtimeChannels(),
+    subscriptionCount: appwriteRealtimeSubscriptions.size,
+    reconnectAttempt: appwriteRealtimeReconnectAttempts,
+    updatedAt: new Date().toISOString(),
+    ...patch,
+  };
+  sendRendererEvent("cloud:realtime:status", appwriteRealtimeStatus);
+  return appwriteRealtimeStatus;
+}
+
+function sendAppwriteRealtimeStatus(target) {
+  sendIpcEvent(target, "cloud:realtime:status", appwriteRealtimeStatus);
+}
+
+function clearAppwriteRealtimeReconnectTimer() {
+  if (appwriteRealtimeReconnectTimer) {
+    clearTimeout(appwriteRealtimeReconnectTimer);
+    appwriteRealtimeReconnectTimer = null;
+  }
+}
+
+function closeAppwriteRealtimeSocket(options = {}) {
+  const { statusState = "idle", statusPatch = {}, emitStatus = true } = options;
+  clearAppwriteRealtimeReconnectTimer();
+  appwriteRealtimeSocketGeneration += 1;
+  appwriteRealtimeChannelKey = "";
+
+  const socket = appwriteRealtimeSocket;
+  appwriteRealtimeSocket = null;
+  if (socket && socket.readyState < WebSocket.CLOSING) {
+    try {
+      socket.close(1000, "Tantalum realtime reset");
+    } catch {
+      socket.terminate();
+    }
+  }
+
+  if (emitStatus) {
+    setAppwriteRealtimeStatus(statusState, statusPatch);
+  }
+}
+
+function appwriteRealtimeReconnectDelay() {
+  const attempt = Math.max(1, appwriteRealtimeReconnectAttempts);
+  return Math.min(APPWRITE_REALTIME_MAX_RECONNECT_DELAY_MS, 1000 * 2 ** Math.min(attempt - 1, 5));
+}
+
+function scheduleAppwriteRealtimeReconnect(reason = "disconnected") {
+  if (appwriteRealtimeSubscriptions.size === 0) {
+    closeAppwriteRealtimeSocket({ statusState: "idle" });
+    return;
+  }
+
+  if (!getAppwriteRealtimeSessionSecret()) {
+    closeAppwriteRealtimeSocket({ statusState: "unauthenticated", statusPatch: { reason } });
+    return;
+  }
+
+  clearAppwriteRealtimeReconnectTimer();
+  appwriteRealtimeReconnectAttempts += 1;
+  const delayMs = appwriteRealtimeReconnectDelay();
+  setAppwriteRealtimeStatus("reconnecting", { reason, delayMs });
+  appwriteRealtimeReconnectTimer = setTimeout(() => {
+    appwriteRealtimeReconnectTimer = null;
+    connectAppwriteRealtimeSocket();
+  }, delayMs);
+}
+
+function dispatchAppwriteRealtimeEvent(event) {
+  invalidateAppwriteReadCacheForRealtimeEvent(event);
+
+  for (const subscription of [...appwriteRealtimeSubscriptions.values()]) {
+    if (!event.channels.some((channel) => subscription.channels.includes(channel))) {
+      continue;
+    }
+
+    const sent = sendIpcEvent(subscription.sender, "cloud:realtime:event", {
+      subscriptionId: subscription.id,
+      event,
+    });
+    if (!sent) {
+      appwriteRealtimeSubscriptions.delete(subscription.id);
+    }
+  }
+}
+
+function handleAppwriteRealtimeMessage(rawData, socketContext) {
+  let message = null;
+  try {
+    const text = Buffer.isBuffer(rawData) ? rawData.toString("utf8") : String(rawData || "");
+    message = JSON.parse(text);
+  } catch (error) {
+    console.warn("Unable to parse Appwrite realtime message:", error instanceof Error ? error.message : error);
+    return;
+  }
+
+  if (message?.type === "connected") {
+    const session = getAppwriteRealtimeSessionSecret();
+    const user = message?.data?.user;
+    if (session && !user) {
+      try {
+        socketContext.socket.send(JSON.stringify({ type: "authentication", data: { session } }));
+        setAppwriteRealtimeStatus("authenticating");
+      } catch (error) {
+        setAppwriteRealtimeStatus("error", { error: error instanceof Error ? error.message : "Realtime authentication failed." });
+      }
+      return;
+    }
+
+    appwriteRealtimeReconnectAttempts = 0;
+    setAppwriteRealtimeStatus("connected");
+    return;
+  }
+
+  if (message?.type === "response") {
+    if (message?.data?.success === false) {
+      setAppwriteRealtimeStatus("error", { error: message.data.message || "Realtime authentication failed." });
+      return;
+    }
+    appwriteRealtimeReconnectAttempts = 0;
+    setAppwriteRealtimeStatus("connected");
+    return;
+  }
+
+  if (message?.type === "event" && Array.isArray(message?.data?.channels)) {
+    appwriteRealtimeReconnectAttempts = 0;
+    if (appwriteRealtimeStatus.state !== "connected") {
+      setAppwriteRealtimeStatus("connected");
+    }
+    dispatchAppwriteRealtimeEvent(message.data);
+    return;
+  }
+
+  if (message?.type === "error") {
+    const errorMessage = message?.data?.message || "Appwrite realtime returned an error.";
+    console.warn("Appwrite realtime error:", errorMessage);
+    setAppwriteRealtimeStatus("error", { error: errorMessage, code: message?.data?.code });
+    if (Number(message?.data?.code) === 1008) {
+      socketContext.shouldReconnect = false;
+      try {
+        socketContext.socket.close(1008, errorMessage);
+      } catch {
+        socketContext.socket.terminate();
+      }
+    }
+  }
+}
+
+function connectAppwriteRealtimeSocket() {
+  clearAppwriteRealtimeReconnectTimer();
+
+  const channels = getAppwriteRealtimeChannels();
+  const channelKey = getAppwriteRealtimeChannelKey(channels);
+  if (channels.length === 0) {
+    closeAppwriteRealtimeSocket({ statusState: "idle" });
+    return;
+  }
+
+  if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
+    closeAppwriteRealtimeSocket({ statusState: "error", statusPatch: { error: "Cloud endpoint or project ID is missing." } });
+    return;
+  }
+
+  if (!getAppwriteRealtimeSessionSecret()) {
+    closeAppwriteRealtimeSocket({ statusState: "unauthenticated" });
+    return;
+  }
+
+  if (
+    appwriteRealtimeSocket &&
+    appwriteRealtimeChannelKey === channelKey &&
+    appwriteRealtimeSocket.readyState <= WebSocket.OPEN
+  ) {
+    return;
+  }
+
+  closeAppwriteRealtimeSocket({ emitStatus: false });
+  appwriteRealtimeChannelKey = channelKey;
+
+  const generation = ++appwriteRealtimeSocketGeneration;
+  const socket = new WebSocket(buildAppwriteRealtimeUrl(channels), {
+    headers: getAppwriteSessionHeaders(),
+  });
+  const socketContext = {
+    socket,
+    shouldReconnect: true,
+  };
+
+  appwriteRealtimeSocket = socket;
+  setAppwriteRealtimeStatus("connecting");
+
+  socket.on("open", () => {
+    if (generation !== appwriteRealtimeSocketGeneration) {
+      return;
+    }
+    setAppwriteRealtimeStatus("connecting");
+  });
+
+  socket.on("message", (data) => {
+    if (generation !== appwriteRealtimeSocketGeneration) {
+      return;
+    }
+    handleAppwriteRealtimeMessage(data, socketContext);
+  });
+
+  socket.on("error", (error) => {
+    if (generation !== appwriteRealtimeSocketGeneration) {
+      return;
+    }
+    setAppwriteRealtimeStatus("error", { error: error instanceof Error ? error.message : "Realtime socket failed." });
+  });
+
+  socket.on("close", (_code, reasonBuffer) => {
+    if (generation !== appwriteRealtimeSocketGeneration) {
+      return;
+    }
+
+    appwriteRealtimeSocket = null;
+    appwriteRealtimeChannelKey = "";
+    if (!socketContext.shouldReconnect) {
+      setAppwriteRealtimeStatus("error", {
+        error: reasonBuffer?.toString?.() || "Realtime subscription was rejected.",
+      });
+      return;
+    }
+
+    scheduleAppwriteRealtimeReconnect(reasonBuffer?.toString?.() || "socket-closed");
+  });
+}
+
+function resetAppwriteRealtimeConnection(reason = "reset") {
+  appwriteRealtimeReconnectAttempts = 0;
+  closeAppwriteRealtimeSocket({
+    statusState: appwriteRealtimeSubscriptions.size > 0 ? "reconnecting" : "idle",
+    statusPatch: appwriteRealtimeSubscriptions.size > 0 ? { reason } : {},
+  });
+  if (appwriteRealtimeSubscriptions.size > 0) {
+    connectAppwriteRealtimeSocket();
+  }
+}
+
+function registerAppwriteRealtimeSubscription(sender, payload = {}) {
+  const channels = normalizeAppwriteRealtimeChannels(payload.channels);
+  if (channels.length === 0) {
+    throw new Error("At least one realtime channel is required.");
+  }
+
+  const id = crypto.randomUUID();
+  appwriteRealtimeSubscriptions.set(id, {
+    id,
+    sender,
+    label: String(payload.label || ""),
+    channels,
+  });
+
+  if (typeof sender?.once === "function") {
+    sender.once("destroyed", () => {
+      appwriteRealtimeSubscriptions.delete(id);
+      connectAppwriteRealtimeSocket();
+    });
+  }
+
+  connectAppwriteRealtimeSocket();
+  return id;
+}
+
+function unregisterAppwriteRealtimeSubscription(subscriptionId) {
+  const id = String(subscriptionId || "");
+  const deleted = appwriteRealtimeSubscriptions.delete(id);
+  if (deleted) {
+    connectAppwriteRealtimeSocket();
+  }
+  return deleted;
 }
 
 function base64Url(buffer) {
@@ -3997,6 +4609,7 @@ async function handleDesktopAuthCallback(rawUrl) {
     });
     clearAppwriteReadCache();
     prewarmCurrentAppwriteJwt();
+    resetAppwriteRealtimeConnection("auth-changed");
     const user = await appwriteRequest({ pathName: "account" });
     pendingDesktopWebLogin = null;
     sendRendererEvent("cloud:auth:web-login-result", { success: true, user });
@@ -7342,6 +7955,49 @@ function pathIsExecutable(candidatePath) {
   }
 }
 
+const POSIX_TERMINAL_PATH_FALLBACKS = [
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+];
+
+function uniqueTruthyStrings(values) {
+  const seen = new Set();
+  const result = [];
+
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(normalized);
+  }
+
+  return result;
+}
+
+function getTerminalPathEntries() {
+  const pathEntries = String(process.env.PATH || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (process.platform === "win32") {
+    return uniqueTruthyStrings(pathEntries);
+  }
+
+  return uniqueTruthyStrings([...pathEntries, ...POSIX_TERMINAL_PATH_FALLBACKS]);
+}
+
+function getTerminalPathValue() {
+  return getTerminalPathEntries().join(path.delimiter);
+}
+
 function findExecutableOnPath(commandName) {
   const command = String(commandName || "").trim();
   if (!command) {
@@ -7352,10 +8008,7 @@ function findExecutableOnPath(commandName) {
     return command;
   }
 
-  const pathEntries = String(process.env.PATH || "")
-    .split(path.delimiter)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
+  const pathEntries = getTerminalPathEntries();
   const extensions = process.platform === "win32"
     ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
       .split(";")
@@ -7377,6 +8030,24 @@ function findExecutableOnPath(commandName) {
   }
 
   return null;
+}
+
+function resolveTerminalShellExecutable(shell) {
+  const shellPath = String(shell || "").trim();
+  if (!shellPath) {
+    return null;
+  }
+
+  if (path.isAbsolute(shellPath)) {
+    return pathIsExecutable(shellPath) ? shellPath : null;
+  }
+
+  if (shellPath.includes("/") || shellPath.includes("\\")) {
+    const resolvedPath = path.resolve(shellPath);
+    return pathIsExecutable(resolvedPath) ? resolvedPath : null;
+  }
+
+  return findExecutableOnPath(shellPath);
 }
 
 function firstExistingExecutable(candidates) {
@@ -7401,11 +8072,17 @@ function createTerminalShellProfile(profile) {
 
 function addUniqueTerminalProfile(profiles, seen, profile) {
   const normalized = createTerminalShellProfile(profile);
+  const resolvedShell = resolveTerminalShellExecutable(normalized.shell);
   const key = normalized.id.toLowerCase();
   if (seen.has(key) || !normalized.shell) {
     return;
   }
 
+  if (!resolvedShell) {
+    return;
+  }
+
+  normalized.shell = resolvedShell;
   seen.add(key);
   profiles.push(normalized);
 }
@@ -7510,10 +8187,10 @@ function detectTerminalShellProfiles() {
   }
 
   if (profiles.length === 0) {
-    const fallbackShell = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "/bin/sh");
+    const fallbackShell = resolveTerminalShellExecutable(process.env.SHELL) || resolveTerminalShellExecutable(process.platform === "win32" ? "powershell.exe" : "/bin/sh");
     addUniqueTerminalProfile(profiles, seen, {
       id: "default",
-      label: process.platform === "win32" ? "PowerShell" : path.basename(fallbackShell),
+      label: process.platform === "win32" ? "PowerShell" : path.basename(fallbackShell || "sh"),
       shell: fallbackShell,
       kind: process.platform === "win32" ? "powershell" : "posix",
     });
@@ -7575,7 +8252,10 @@ function resolveTerminalShell(options = {}) {
   }
 
   if (typeof options.shell === "string" && options.shell.trim().length > 0) {
-    const shell = options.shell.trim();
+    const shell = resolveTerminalShellExecutable(options.shell.trim());
+    if (!shell) {
+      throw new Error("The requested shell executable was not found or is not executable.");
+    }
     return createTerminalShellProfile({
       id: "custom",
       label: path.basename(shell),
@@ -7585,7 +8265,89 @@ function resolveTerminalShell(options = {}) {
     });
   }
 
+  if (!discovered.profiles[0]) {
+    throw new Error("No terminal shell is available on this system.");
+  }
+
   return discovered.profiles[0];
+}
+
+function createTerminalEnvironment(shellProfile) {
+  const env = {
+    ...process.env,
+    TERM: "xterm-256color",
+  };
+
+  if (process.platform !== "win32") {
+    env.PATH = getTerminalPathValue();
+    if (shellProfile?.kind === "posix" && shellProfile.shell) {
+      env.SHELL = shellProfile.shell;
+    }
+  }
+
+  return env;
+}
+
+function sameTerminalShellProfile(left, right) {
+  return Boolean(left && right) &&
+    left.shell === right.shell &&
+    JSON.stringify(left.args || []) === JSON.stringify(right.args || []);
+}
+
+function buildTerminalSpawnProfiles(primaryProfile) {
+  const profiles = [];
+  const addProfile = (profile) => {
+    if (!profile?.shell || profiles.some((entry) => sameTerminalShellProfile(entry, profile))) {
+      return;
+    }
+    profiles.push(profile);
+  };
+
+  addProfile(primaryProfile);
+  for (const profile of detectTerminalShellProfiles().profiles) {
+    addProfile(profile);
+  }
+
+  if (process.platform !== "win32") {
+    addProfile(createTerminalShellProfile({ id: "zsh-fallback", label: "zsh", shell: "/bin/zsh", kind: "posix" }));
+    addProfile(createTerminalShellProfile({ id: "bash-fallback", label: "bash", shell: "/bin/bash", kind: "posix" }));
+    addProfile(createTerminalShellProfile({ id: "sh-fallback", label: "sh", shell: "/bin/sh", kind: "posix" }));
+  }
+
+  return profiles.filter((profile) => pathIsExecutable(profile.shell));
+}
+
+function formatTerminalSpawnError(error, failures = []) {
+  const originalMessage = error instanceof Error ? error.message : String(error || "Unexpected error");
+  if (!/posix_spawnp|spawn|ENOENT|EACCES|not found|executable/i.test(originalMessage)) {
+    return originalMessage;
+  }
+
+  const details = failures.length > 0 ? ` Tried: ${failures.join("; ")}.` : "";
+  return `Unable to start a terminal shell. The configured shell could not be launched.${details}`;
+}
+
+function spawnTerminalPty(shellProfile, spawnOptions) {
+  ensureNodePtySpawnHelperExecutable();
+
+  const profiles = buildTerminalSpawnProfiles(shellProfile);
+  const failures = [];
+  let lastError = null;
+
+  for (const profile of profiles) {
+    try {
+      const ptyProcess = pty.spawn(profile.shell, profile.args, {
+        ...spawnOptions,
+        env: createTerminalEnvironment(profile),
+      });
+      return { ptyProcess, shellProfile: profile };
+    } catch (error) {
+      lastError = error;
+      failures.push(`${profile.label} (${profile.shell})`);
+    }
+  }
+
+  throw new Error(formatTerminalSpawnError(lastError, failures));
 }
 
 function createTerminalSessionId() {
@@ -8008,6 +8770,7 @@ function createMainWindow() {
       preload: path.join(__dirname, "preload.js")
     }
   });
+  const windowWebContents = mainWindow.webContents;
 
   mainWindow.webContents.on("did-finish-load", () => {
     console.log("[renderer] did-finish-load");
@@ -8047,6 +8810,14 @@ function createMainWindow() {
     console.error("[renderer] window became unresponsive");
   });
 
+  mainWindow.on("enter-full-screen", () => {
+    mainWindow.webContents.send("app:fullscreen-changed", true);
+  });
+
+  mainWindow.on("leave-full-screen", () => {
+    mainWindow.webContents.send("app:fullscreen-changed", false);
+  });
+
   void loadRenderer(mainWindow);
 
   mainWindow.once("ready-to-show", () => {
@@ -8058,6 +8829,7 @@ function createMainWindow() {
   });
 
   mainWindow.on("closed", () => {
+    interruptInstallOperationsForSender(windowWebContents, INTERRUPTED_INSTALL_DETAIL);
     disposeAllTerminalSessions();
     disposeAllSerialMonitorSessions();
     mainWindow = null;
@@ -8070,7 +8842,8 @@ ipcMain.handle("app:get-info", async () => ({
   success: true,
   appName: APP_NAME,
   version: app.getVersion(),
-  platform: process.platform
+  platform: process.platform,
+  fullscreen: BrowserWindow.getFocusedWindow()?.isFullScreen() ?? mainWindow?.isFullScreen() ?? false
 }));
 
 ipcMain.handle("app:window-control", async (event, action) => {
@@ -8293,6 +9066,7 @@ ipcMain.handle("cloud:auth:sign-in", async (_event, payload) => {
 
     clearAppwriteReadCache();
     prewarmCurrentAppwriteJwt();
+    resetAppwriteRealtimeConnection("auth-changed");
     return { success: true, session };
   } catch (error) {
     return toErrorResult(error);
@@ -8360,6 +9134,29 @@ ipcMain.handle("cloud:auth:sign-out", async () => {
   clearAppwriteSession();
   clearAppwriteReadCache();
   return { success: true };
+});
+
+ipcMain.handle("cloud:realtime:subscribe", async (event, payload = {}) => {
+  try {
+    const subscriptionId = registerAppwriteRealtimeSubscription(event.sender, payload);
+    return { success: true, subscriptionId, status: appwriteRealtimeStatus };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud:realtime:unsubscribe", async (_event, payload = {}) => {
+  try {
+    unregisterAppwriteRealtimeSubscription(payload.subscriptionId);
+    return { success: true };
+  } catch (error) {
+    return toErrorResult(error);
+  }
+});
+
+ipcMain.handle("cloud:realtime:get-status", async (event) => {
+  sendAppwriteRealtimeStatus(event.sender);
+  return { success: true, status: appwriteRealtimeStatus };
 });
 
 ipcMain.handle("cloud:databases:list-documents", async (_event, payload) => {
@@ -9684,11 +10481,27 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
 ipcMain.handle("toolchain:install-board-package", async (event, payload = {}) => {
   const installId = payload.installId || crypto.randomUUID();
   const controller = new AbortController();
-  activeBoardPackageInstalls.set(installId, controller);
+  const operation = {
+    controller,
+    sender: event.sender,
+    packageName: payload.packageName,
+    packageUrl: payload.packageUrl,
+  };
+  const abortOnSenderDestroyed = () => {
+    const currentOperation = getBoardPackageInstallOperation(installId);
+    if (currentOperation?.controller !== controller) {
+      return;
+    }
+
+    updateInstallNotificationStatus(installId, "interrupted", INTERRUPTED_INSTALL_DETAIL);
+    abortInstallController(controller);
+  };
+  activeBoardPackageInstalls.set(installId, operation);
+  event.sender.once("destroyed", abortOnSenderDestroyed);
 
   try {
     const result = await installBoardPackage(payload.packageUrl, payload.packageName, (chunk) => {
-      event.sender.send("toolchain:install-progress", chunk);
+      sendIpcEvent(event.sender, "toolchain:install-progress", chunk);
     }, {
       signal: controller.signal
     });
@@ -9697,6 +10510,7 @@ ipcMain.handle("toolchain:install-board-package", async (event, payload = {}) =>
   } catch (error) {
     return { ...toErrorResult(error), installId };
   } finally {
+    event.sender.removeListener("destroyed", abortOnSenderDestroyed);
     activeBoardPackageInstalls.delete(installId);
   }
 });
@@ -9707,12 +10521,14 @@ ipcMain.handle("toolchain:cancel-board-package-install", async (_event, payload 
     return { success: false, error: "installId is required." };
   }
 
-  const controller = activeBoardPackageInstalls.get(installId);
-  if (!controller) {
+  const operation = getBoardPackageInstallOperation(installId);
+  if (!operation?.controller) {
+    updateInstallNotificationStatus(installId, "interrupted", STOPPED_INSTALL_DETAIL);
     return { success: true, alreadyStopped: true };
   }
 
-  controller.abort();
+  updateInstallNotificationStatus(installId, "canceled", "Board core install stopped.");
+  abortInstallController(operation.controller);
   return { success: true };
 });
 
@@ -9859,7 +10675,7 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
   const version = payload.version;
   const controller = new AbortController();
   const emitLibraryProgress = (status, patch = {}) => {
-    event.sender.send("toolchain:library-install-progress", {
+    sendIpcEvent(event.sender, "toolchain:library-install-progress", {
       installId,
       name,
       version,
@@ -9869,6 +10685,15 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
       progress: typeof patch.progress === "number" ? patch.progress : null
     });
   };
+  const abortOnSenderDestroyed = () => {
+    const operation = activeLibraryInstallOperations.get(installId);
+    if (operation?.controller !== controller) {
+      return;
+    }
+
+    updateInstallNotificationStatus(installId, "interrupted", INTERRUPTED_INSTALL_DETAIL);
+    abortInstallController(controller);
+  };
 
   activeLibraryInstallOperations.set(installId, {
     controller,
@@ -9876,6 +10701,7 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
     name,
     version
   });
+  event.sender.once("destroyed", abortOnSenderDestroyed);
 
   try {
     emitLibraryProgress("queued", {
@@ -9885,7 +10711,7 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
 
     const result = await installLibrary(name, version, (progressEvent) => {
       if (typeof progressEvent === "string") {
-        event.sender.send("toolchain:install-progress", progressEvent);
+        sendIpcEvent(event.sender, "toolchain:install-progress", progressEvent);
         emitLibraryProgress("running", {
           phase: classifyLibraryInstallPhase(progressEvent),
           message: formatLibraryInstallMessage(progressEvent),
@@ -9896,7 +10722,7 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
 
       const message = progressEvent?.message || "";
       if (message) {
-        event.sender.send("toolchain:install-progress", `${message}\n`);
+        sendIpcEvent(event.sender, "toolchain:install-progress", `${message}\n`);
       }
       emitLibraryProgress("running", {
         phase: progressEvent?.phase || "running",
@@ -9929,6 +10755,7 @@ ipcMain.handle("toolchain:install-library", async (event, payload = {}) => {
     }
     return { ...errorResult, installId };
   } finally {
+    event.sender.removeListener("destroyed", abortOnSenderDestroyed);
     activeLibraryInstallOperations.delete(installId);
   }
 });
@@ -9941,11 +10768,13 @@ ipcMain.handle("toolchain:cancel-library-install", async (_event, payload = {}) 
 
   const operation = activeLibraryInstallOperations.get(installId);
   if (!operation) {
+    updateInstallNotificationStatus(installId, "interrupted", STOPPED_INSTALL_DETAIL);
     return { success: true, alreadyStopped: true };
   }
 
-  operation.controller.abort();
-  operation.sender.send("toolchain:library-install-progress", {
+  updateInstallNotificationStatus(installId, "canceled", `${operation.name} install stopped.`);
+  abortInstallController(operation.controller);
+  sendIpcEvent(operation.sender, "toolchain:library-install-progress", {
     installId,
     name: operation.name,
     version: operation.version,
@@ -10081,20 +10910,16 @@ ipcMain.handle("terminal:create", async (_event, options = {}) => {
     }
 
     const desiredCwd = resolveTerminalWorkingDirectory(options.cwd);
-    const shellProfile = resolveTerminalShell(options);
-    const shellBinary = shellProfile.shell;
+    const requestedShellProfile = resolveTerminalShell(options);
     const sessionId = createTerminalSessionId();
 
-    const terminalPty = pty.spawn(shellBinary, shellProfile.args, {
+    const { ptyProcess: terminalPty, shellProfile } = spawnTerminalPty(requestedShellProfile, {
       name: "xterm-color",
       cols: Number.isInteger(options.cols) ? options.cols : 100,
       rows: Number.isInteger(options.rows) ? options.rows : 28,
       cwd: desiredCwd,
-      env: {
-        ...process.env,
-        TERM: "xterm-256color"
-      }
     });
+    const shellBinary = shellProfile.shell;
 
     terminalSessions.set(sessionId, {
       ptyProcess: terminalPty,
@@ -10353,8 +11178,10 @@ if (!gotSingleInstanceLock) {
 }
 
 app.on("before-quit", () => {
+  interruptAllInstallOperations("Install was interrupted because Tantalum IDE quit before it finished. Start the install again to resume.");
   disposeAllTerminalSessions();
   disposeAllSerialMonitorSessions();
+  closeAppwriteRealtimeSocket({ statusState: "idle", emitStatus: false });
   if (agentSettingsWarmTimer) {
     clearInterval(agentSettingsWarmTimer);
     agentSettingsWarmTimer = null;

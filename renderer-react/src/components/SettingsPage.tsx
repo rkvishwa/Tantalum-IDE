@@ -1,13 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { Models } from 'appwrite';
 import { AlertTriangle, ChevronLeft, ChevronRight, Code2, Cpu, Download, FolderInput, FolderOpen, GitBranch, KeyRound, LoaderCircle, Monitor, Moon, Palette, RefreshCcw, RotateCcw, Save, Sun, Type, X } from 'lucide-react';
 
 import { deleteBoard, listBoards } from '@/lib/boards';
-import { hasRequiredCloudConfiguration } from '@/lib/config';
+import { appwriteConfig, hasRequiredCloudConfiguration } from '@/lib/config';
 import type { BoardDocument } from '@/lib/models';
+import {
+  boardRealtimeChannels,
+  createRealtimeEventDeduper,
+  isBoardRealtimeDocument,
+  realtimeEventAction,
+  realtimeEventMatchesCollection,
+  sortBoardsByCreatedAt,
+} from '@/lib/realtime';
 import { ACCENT_PRESETS, FONT_FAMILY_OPTIONS, type ThemePreference, type UiPreferences } from '@/lib/uiPreferences';
 import { calculateBoardStatus } from '@/lib/utils';
-import type { ArduinoLibraryDirectoryInfo, ArduinoStorageInfo, GitConfiguration, GitProvider, LibraryMigrationProgressEvent, LibraryMigrationResult } from '@/types/electron';
+import type { ArduinoLibraryDirectoryInfo, ArduinoStorageInfo, CloudRealtimeEvent, GitConfiguration, GitProvider, LibraryMigrationProgressEvent, LibraryMigrationResult } from '@/types/electron';
 
 import { AgentPanel } from './AgentPanel';
 import { BoardsHubToggle } from './BoardsHubControls';
@@ -61,6 +69,8 @@ export function SettingsPage({
   const [boardsLoading, setBoardsLoading] = useState(false);
   const [boardsError, setBoardsError] = useState('');
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
+  const boardsRealtimeFallbackTimerRef = useRef<number | null>(null);
+  const shouldApplyBoardsRealtimeEventRef = useRef(createRealtimeEventDeduper());
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [gitConfiguration, setGitConfiguration] = useState<GitConfiguration>(EMPTY_GIT_CONFIGURATION);
   const [gitConfigMessage, setGitConfigMessage] = useState('');
@@ -137,6 +147,52 @@ export function SettingsPage({
     }
   }
 
+  const scheduleBoardsRealtimeFallbackRefresh = useEffectEvent(() => {
+    if (boardsRealtimeFallbackTimerRef.current !== null) {
+      return;
+    }
+
+    boardsRealtimeFallbackTimerRef.current = window.setTimeout(() => {
+      boardsRealtimeFallbackTimerRef.current = null;
+      void refreshBoardsList();
+    }, 500);
+  });
+
+  const handleBoardsRealtimeEvent = useEffectEvent((event: CloudRealtimeEvent<unknown>) => {
+    if (!realtimeEventMatchesCollection(event, appwriteConfig.boardsCollectionId) || !shouldApplyBoardsRealtimeEventRef.current(event)) {
+      return;
+    }
+
+    const action = realtimeEventAction(event);
+    if (action === 'unknown' || !isBoardRealtimeDocument(event.payload)) {
+      scheduleBoardsRealtimeFallbackRefresh();
+      return;
+    }
+
+    const board = event.payload;
+    setBoards((current) => {
+      const nextBoards = action === 'delete'
+        ? current.filter((entry) => entry.$id !== board.$id)
+        : sortBoardsByCreatedAt([
+            ...current.filter((entry) => entry.$id !== board.$id),
+            board,
+          ]);
+
+      setSelectedBoardId((currentSelectedBoardId) => {
+        if (currentSelectedBoardId === board.$id && action === 'delete') {
+          return nextBoards[0]?.$id ?? '';
+        }
+        if (!currentSelectedBoardId && nextBoards.length > 0) {
+          return nextBoards[0].$id;
+        }
+        return currentSelectedBoardId;
+      });
+
+      return nextBoards;
+    });
+    setBoardsError('');
+  });
+
   useEffect(() => {
     if (activeTab !== 'boards') {
       return;
@@ -144,6 +200,40 @@ export function SettingsPage({
 
     void refreshBoardsList();
   }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab !== 'boards' || !hasRequiredCloudConfiguration()) {
+      return undefined;
+    }
+
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    void window.tantalum.cloud.realtime
+      .subscribe({ channels: boardRealtimeChannels(), label: 'settings-boards' }, handleBoardsRealtimeEvent)
+      .then((nextUnsubscribe) => {
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((error) => {
+        console.warn(error instanceof Error ? error.message : 'Unable to subscribe to board updates.');
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [activeTab]);
+
+  useEffect(() => {
+    return () => {
+      if (boardsRealtimeFallbackTimerRef.current !== null) {
+        window.clearTimeout(boardsRealtimeFallbackTimerRef.current);
+      }
+    };
+  }, []);
 
   async function refreshGitConfiguration() {
     const result = await window.tantalum.git.getConfiguration();

@@ -4,6 +4,31 @@ export type Result<T = Record<string, never>> =
   | ({ success: true } & T)
   | ({ success: false; error: string; canceled?: boolean });
 
+export type CloudRealtimeSubscribeRequest = {
+  channels: string[];
+  label?: string;
+};
+
+export type CloudRealtimeStatus = {
+  state: 'idle' | 'connecting' | 'authenticating' | 'connected' | 'reconnecting' | 'unauthenticated' | 'error' | string;
+  connected: boolean;
+  channels: string[];
+  subscriptionCount: number;
+  reconnectAttempt: number;
+  updatedAt: string;
+  delayMs?: number;
+  reason?: string;
+  error?: string;
+  code?: number | string;
+};
+
+export type CloudRealtimeEvent<T = unknown> = {
+  events: string[];
+  channels: string[];
+  timestamp: number | string;
+  payload: T;
+};
+
 export type LibraryInstallProgressEvent = {
   installId: string;
   name: string;
@@ -1040,10 +1065,11 @@ export type AgentRunPayload = {
 export type DesktopApi = {
   app: {
     cloudConfig?: CloudConfig;
-    getInfo: () => Promise<Result<{ appName: string; version: string; platform: string }>>;
+    getInfo: () => Promise<Result<{ appName: string; version: string; platform: string; fullscreen: boolean }>>;
     controlWindow: (action: 'minimize' | 'maximize' | 'close') => Promise<Result>;
     dispatchMenuAction: (action: MenuAction) => Promise<Result>;
     onMenuAction: (callback: (action: MenuAction) => void) => () => void;
+    onFullscreenChanged: (callback: (value: boolean) => void) => () => void;
   };
   notifications: {
     list: () => Promise<Result<{ notifications: ToolchainNotification[] }>>;
@@ -1156,6 +1182,11 @@ export type DesktopApi = {
         pollMs?: number;
         retryOnSyncTimeout?: boolean;
       }) => Promise<Result<{ execution: Record<string, unknown> }>>;
+    };
+    realtime: {
+      subscribe: <T = unknown>(payload: CloudRealtimeSubscribeRequest, callback: (event: CloudRealtimeEvent<T>) => void) => Promise<() => void>;
+      onStatus: (callback: (status: CloudRealtimeStatus) => void) => () => void;
+      getStatus: () => Promise<Result<{ status: CloudRealtimeStatus }>>;
     };
   };
   shell: {

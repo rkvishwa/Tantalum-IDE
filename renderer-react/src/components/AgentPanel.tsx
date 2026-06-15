@@ -2388,7 +2388,7 @@ export function AgentPanel({
       : null;
   const canUseCustom = Boolean(selectedCredential && selectedModel);
   const loadingInitialAgentData = loadingSettings && !settingsBootstrapped && !hasLastKnownAgentData;
-  const showingCloudConnectionState = hasCloudAgent && loadingSettings && !settingsCloudDataLoaded && !settingsLoadError;
+  const showingCloudConnectionState = hasCloudAgent && loadingInitialAgentData && !settingsLoadError;
   const showManagedUnavailableMessage = settingsCloudDataLoaded && preferences.selectedSource === 'managed' && managedUnavailableMessage;
   const canSend =
     Boolean(workspacePath) &&

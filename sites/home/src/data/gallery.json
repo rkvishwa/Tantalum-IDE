@@ -1,0 +1,328 @@
+{
+  "events": [
+    {
+      "id": "event-1",
+      "title": "Sherlock 3.0",
+      "description": "Organized by IEEE WIE, SHErlock 3.0 is an immersive, team-based challenge centered on logic, intuition, and investigative thinking. Participants must step away from the digital world to solve a series of interactive tasks and complex puzzles in a race against the clock",
+      "src": "/gallery/event-1.jpeg",
+      "alt": "Event 1",
+      "date": "2026-02-07",
+      "category": "Event",
+      "tags": ["workshop", "technology", "community"]
+    },
+    {
+      "id": "event-2",
+      "title": "Sherlock 3.0",
+      "description": "Organized by IEEE WIE, SHErlock 3.0 is an immersive, team-based challenge centered on logic, intuition, and investigative thinking. Participants must step away from the digital world to solve a series of interactive tasks and complex puzzles in a race against the clock",
+      "src": "/gallery/event-2.jpeg",
+      "alt": "Event 2",
+      "date": "2026-02-07",
+      "category": "Competition",
+      "tags": ["meetup", "networking", "community"]
+    },
+    {
+      "id": "event-2b",
+      "title": "Xeynergy Awareness Session",
+      "description": "Organized by Xeynergy, this awareness session provided a deep dive into advanced AI optimization techniques. The session focused on the practical application of Fine-tuning and LLM Distillation, offering a clear roadmap for developing specialized, high-performance AI models.",
+      "src": "/gallery/event-2.jpg",
+      "alt": "Event 2B",
+      "date": "2026-03-06",
+      "category": "Awareness Session",
+      "tags": ["meetup", "networking", "community"]
+    },
+    {
+      "id": "event-3",
+      "title": "Cursor Cafe",
+      "description": "A high-energy meetup focused on builder culture and developer productivity. This session brought together local creators to dive deep into the Cursor IDE, sharing advanced strategies for optimizing coding workflows and AI-assisted development.",
+      "src": "/gallery/event-3.jpg",
+      "alt": "Event 3",
+      "date": "2026-01-24",
+      "category": "Workshop",
+      "tags": ["hackathon", "coding", "competition"]
+    },
+    {
+      "id": "event-20",
+      "title": "Cursor Cafe",
+      "description": "A high-energy meetup focused on builder culture and developer productivity. This session brought together local creators to dive deep into the Cursor IDE, sharing advanced strategies for optimizing coding workflows and AI-assisted development.",
+      "src": "/gallery/event-20.jpg",
+      "alt": "Event 4",
+      "date": "2026-01-24",
+      "category": "Workshop",
+      "tags": ["workshop", "learning", "skills"]
+    },
+    {
+      "id": "event-4",
+      "title": "Cursor Cafe",
+      "description": "A high-energy meetup focused on builder culture and developer productivity. This session brought together local creators to dive deep into the Cursor IDE, sharing advanced strategies for optimizing coding workflows and AI-assisted development.",
+      "src": "/gallery/event-4.jpg",
+      "alt": "Event 4",
+      "date": "2026-01-24",
+      "category": "Workshop",
+      "tags": ["workshop", "learning", "skills"]
+    },
+    {
+      "id": "event-21",
+      "title": "Road Legacy 2.0",
+      "description": "Designed specifically for IT-focused undergraduates, this inspiring event serves as a strategic roadmap for navigating the next 3–4 years of university life. It provides a unique space to bridge the gap between different academic institutions and foster a unified community of future tech leaders.",
+      "src": "/gallery/event-21.jpg",
+      "alt": "Event 5",
+      "date": "2025-05-31",
+      "category": "Conference",
+      "tags": ["conference", "tech", "innovation"]
+    },
+    {
+      "id": "event-5",
+      "title": "Road Legacy 2.0",
+      "description": "Designed specifically for IT-focused undergraduates, this inspiring event serves as a strategic roadmap for navigating the next 3–4 years of university life. It provides a unique space to bridge the gap between different academic institutions and foster a unified community of future tech leaders.",
+      "src": "/gallery/event-5.jpg",
+      "alt": "Event 5",
+      "date": "2025-05-31",
+      "category": "Conference",
+      "tags": ["conference", "tech", "innovation"]
+    },
+    {
+      "id": "event-6",
+      "title": "Google I/O Extended Sri Lanka 2025",
+      "description": "Hosted by GDG Sri Lanka, this event brings together developers, tech enthusiasts, and industry leaders to explore the latest innovations in AI, web, and cloud technologies. Held at Waters Edge, it offers insightful sessions, hands-on learning, and valuable networking opportunities within Sri Lanka’s vibrant tech community.",
+      "src": "/gallery/event-6.jpg",
+      "alt": "Google I/O Extended Sri Lanka 2025",
+      "date": "2026-02-15",
+      "category": "Workshop",
+      "tags": ["workshop", "learning", "development"]
+    },
+    {
+      "id": "event-7",
+      "title": "Vibeflow AI Hackathon",
+      "description": "A snapshot of the intense 6-hour sprint at vibeflow.stemlink.online. Our team dove headfirst into the future of development, leveraging LLMs, autonomous agents, and advanced automation to build a functional full-stack solution under immense time pressure. Beyond the code, it was a deep dive into how AI is fundamentally reshaping modern workflows—turning rapid prototyping into real-time execution. An unforgettable experience of speed, synergy, and pushing the boundaries of what’s possible",
+      "src": "/gallery/event-7.jpg",
+      "alt": "Event 7",
+      "date": "2025-07-19",
+      "category": "Hackathon",
+      "tags": ["hackathon", "coding", "innovation"]
+    },
+    {
+      "id": "event-8",
+      "title": "Vibeflow AI Hackathon",
+      "description": "A snapshot of the intense 6-hour sprint at vibeflow.stemlink.online. Our team dove headfirst into the future of development, leveraging LLMs, autonomous agents, and advanced automation to build a functional full-stack solution under immense time pressure. Beyond the code, it was a deep dive into how AI is fundamentally reshaping modern workflows—turning rapid prototyping into real-time execution. An unforgettable experience of speed, synergy, and pushing the boundaries of what’s possible",
+      "src": "/gallery/event-8.jpg",
+      "alt": "Event 8",
+      "date": "2025-07-19",
+      "category": "Meetup",
+      "tags": ["meetup", "community", "networking"]
+    },
+    {
+      "id": "event-9",
+      "title": "The AI Revolution: Live at the National AI Expo 2025",
+      "description": "A reflective look back at an incredible day at Monarch Imperial for the National AI Expo. From witnessing cutting-edge AI-driven solutions to connecting with the brilliant minds—students and industry veterans alike—shaping Sri Lanka’s tech landscape, the energy was undeniable. This wasn't just an exhibition; it was a testament to the fact that AI is no longer a 'future' concept—it is the operating system of the present. As innovators, the responsibility is ours to steer this technology toward meaningful impact",
+      "src": "/gallery/event-9.jpg",
+      "alt": "Event 9",
+      "date": "2025-09-29",
+      "category": "Conference",
+      "tags": ["conference", "technology", "keynote"]
+    },
+    {
+      "id": "event-10",
+      "title": "J’pura Expedition 2.0",
+      "description": "University of Sri Jayewardenepura. J’pura Expedition 2.0 provided a deep dive into the practical side of innovation—from mastering advanced prompting techniques to identifying actionable business opportunities in the age of robotics and automation. A massive thank you to the speakers, including Dr. Ruchira Wijesena and Malinda Alahakoon, for moving beyond theory and sparking a vision for how we can shape modern lifestyles. Events like these, organized by the IEEE IES Student Branch, are the catalysts for the next wave of Sri Lankan entrepreneurs.",
+      "src": "/gallery/event-10.jpg",
+      "alt": "Event 10",
+      "date": "2025-05-03",
+      "category": "Workshop",
+      "tags": ["workshop", "hands-on", "learning"]
+    },
+    {
+      "id": "event-11",
+      "title": "Microsoft Student Champs",
+      "description": "A day of deep technical immersion at the Microsoft Sri Lanka office for the Student Champs Seasonal Special. From architecting high-performance PySpark ETL pipelines in Azure Synapse to orchestrating containerized solutions with Azure Kubernetes Service (AKS), the sessions were a masterclass in modern cloud infrastructure. Witnessing Azure AI Studio in action—specifically the live build of a RAG chatbot—bridged the gap between theoretical AI and real-world execution. Beyond the demos, the true value lay in the high-level networking with fellow innovators, all driven by the transformative power of the Azure ecosystem.",
+      "src": "/gallery/event-11.jpg",
+      "alt": "Event 11",
+      "date": "2026-01-20",
+      "category": "Hackathon",
+      "tags": ["hackathon", "competition", "coding"]
+    },
+    {
+      "id": "event-12",
+      "title": "Earth summit by planet protectors 2025",
+      "description": "A landmark moment for conservation in Sri Lanka at the Earth Summit 2025, organized by Planet Protectors in partnership with the Government of Sri Lanka. This summit is a call to action, centering on the preservation of our nation's rich biodiversity and the critical resolution of the human-elephant conflict. By bridging the gap between the Aboriginal community of Dambana and contemporary scientific strategies, we are proving that the path to sustainability is paved with both traditional wisdom and modern innovation. Together, we are building a future where wildlife protection and human progress coexist in harmony.",
+      "src": "/gallery/event-12.jpg",
+      "alt": "Event 12",
+      "date": "2025-02-11",
+      "category": "Meetup",
+      "tags": ["meetup", "discussion", "community"]
+    },
+    {
+      "id": "event-13",
+      "title": "National AI Expo-2025",
+      "description": "A reflective look back at an incredible day at Monarch Imperial for the National AI Expo. From witnessing cutting-edge AI-driven solutions to connecting with the brilliant minds—students and industry veterans alike—shaping Sri Lanka’s tech landscape, the energy was undeniable. This wasn't just an exhibition; it was a testament to the fact that AI is no longer a 'future' concept—it is the operating system of the present. As innovators, the responsibility is ours to steer this technology toward meaningful impact.",
+      "src": "/gallery/event-13.jpg",
+      "alt": "Event 13",
+      "date": "2025-09-29",
+      "category": "Conference",
+      "tags": ["conference", "presentation", "tech"]
+    },
+    {
+      "id": "event-19",
+      "title": "FInnC'25",
+      "description": "The FInnC'25 On-Site Workshop successfully wrapped up at the University of Moratuwa, bringing a high-energy, hands-on approach to the future of the Internet of Things. In collaboration with RoboticGen, participants moved beyond the screen to prototype real-world IoT devices using OBOPLAY—a cutting-edge innovation designed for seamless integration. Under the expert guidance of Odil Janandith and Sahas Eashan, the session bridged the gap between raw hardware and intelligent automation, proving that the next generation of Sri Lankan engineers is ready to build the physical backbone of the digital world.",
+      "src": "/gallery/event-19.jpg",
+      "alt": "Event 14",
+      "date": "2025-09-29",
+      "category": "Workshop",
+      "tags": ["workshop", "tutorial", "skills"]
+    },
+    {
+      "id": "event-14",
+      "title": "FInnC'25",
+      "description": "The FInnC'25 On-Site Workshop successfully wrapped up at the University of Moratuwa, bringing a high-energy, hands-on approach to the future of the Internet of Things. In collaboration with RoboticGen, participants moved beyond the screen to prototype real-world IoT devices using OBOPLAY—a cutting-edge innovation designed for seamless integration. Under the expert guidance of Odil Janandith and Sahas Eashan, the session bridged the gap between raw hardware and intelligent automation, proving that the next generation of Sri Lankan engineers is ready to build the physical backbone of the digital world.",
+      "src": "/gallery/event-14.jpg",
+      "alt": "Event 14",
+      "date": "2026-01-05",
+      "category": "Workshop",
+      "tags": ["workshop", "tutorial", "skills"]
+    },
+    {
+      "id": "event-15",
+      "title": "Design with Purpose: Team Probex at Industry Minds",
+      "description": "A defining milestone for Team Probex at the Industry Minds PRE-LAUNCH. After an intense sprint of sleepless nights and relentless iteration, our vision for 'WE CARE' earned the award for Best UI in the final presentation. Beyond the aesthetics, this project was a challenge in engineering empathy and user-centric logic under pressure. A massive thank you to my dedicated teammates and the academic panel for their guidance—together, we proved that great design is the bridge between a complex problem and a meaningful solution.",
+      "src": "/gallery/event-15.jpg",
+      "alt": "Event 15",
+      "date": "2025-12-30",
+      "category": "Meetup",
+      "tags": ["meetup", "year-end", "celebration"]
+    },
+    {
+      "id": "event-16",
+      "title": "Design with Purpose: Team Probex at Industry Minds",
+      "description": "A defining milestone for Team Probex at the Industry Minds PRE-LAUNCH. After an intense sprint of sleepless nights and relentless iteration, our vision for 'WE CARE' earned the award for Best UI in the final presentation. Beyond the aesthetics, this project was a challenge in engineering empathy and user-centric logic under pressure. A massive thank you to my dedicated teammates and the academic panel for their guidance—together, we proved that great design is the bridge between a complex problem and a meaningful solution.",
+      "src": "/gallery/event-16.jpg",
+      "alt": "Event 16",
+      "date": "2025-12-25",
+      "category": "Conference",
+      "tags": ["conference", "innovation", "future"]
+    },
+    {
+      "id": "event-17",
+      "title": "Ballerina",
+      "description": "A celebration of creativity and code at Innovate with Ballerina, organized by the IEEE Student Branch and IEEE CS Chapter at the University of Moratuwa. Proudly powered by WSO2, this hackathon challenged undergraduates across Sri Lanka to bridge the gap between abstract ideas and cloud-native execution. By leveraging the unique capabilities of the Ballerina programming language, participants are redefining how we integrate services and automate complex workflows. It’s inspiring to see the next generation of engineers building the future of integration, one sequence diagram at a time.",
+      "src": "/gallery/event-17.jpg",
+      "alt": "Event 17",
+      "date": "2025-07-21",
+      "category": "Hackathon",
+      "tags": ["hackathon", "final", "showcase"]
+    },
+    {
+      "id": "event-18",
+      "title": "Ballerina",
+      "description": "A celebration of creativity and code at Innovate with Ballerina, organized by the IEEE Student Branch and IEEE CS Chapter at the University of Moratuwa. Proudly powered by WSO2, this hackathon challenged undergraduates across Sri Lanka to bridge the gap between abstract ideas and cloud-native execution. By leveraging the unique capabilities of the Ballerina programming language, participants are redefining how we integrate services and automate complex workflows. It’s inspiring to see the next generation of engineers building the future of integration, one sequence diagram at a time.",
+      "src": "/gallery/event-18.jpg",
+      "alt": "Event 18",
+      "date": "2025-12-15",
+      "category": "Workshop",
+      "tags": ["workshop", "closing", "review"]
+    },
+    {
+      "id": "event-22",
+      "title": "STEM education Awareness Session at Hendiyagala Maha Vidyalaya",
+      "description": "On March 5, 2025, Hendiyagala Maha Vidyalaya hosted an engaging *STEM Education Awareness Session*. The event aimed to inspire students by demystifying science, technology, engineering, and mathematics. Through interactive discussions, participants explored future career paths and the vital role of innovation in solving real-world challenges within their community.",
+      "src": "/gallery/event-22.jpg",
+      "alt": "Event 22",
+      "date": "2025-03-05",
+      "category": "Awareness Session",
+      "tags": ["meetup", "community", "networking"]
+    },
+    {
+      "id": "event-23",
+      "title": "Workshop on Systems Thinking by Prof. Zuern",
+      "description": "On February 10, 2025, Prof. Zuern conducted an insightful Workshop on Systems Thinking. The session introduced participants to viewing complex problems through a holistic lens rather than in isolation. Attendees explored interconnected loops, feedback dynamics, and practical tools to analyze and solve organizational and structural challenges effectively.",
+      "src": "/gallery/event-23.jpg",
+      "alt": "Event 23",
+      "date": "2025-02-10",
+      "category": "Workshop",
+      "tags": ["meetup", "community", "networking"]
+    }
+  ],
+  "projects": [
+    {
+      "id": "project-gallery-1",
+      "title": "Sonar Code Editor Launch",
+      "description": "A new chapter for code quality at UoM. Capturing the moment Sonar made its official debut at the Faculty of Information Technology, University of Moratuwa. From a vision of building a more secure, proctored, and collaborative coding environment to seeing it live in the hands of our fellow undergraduates—this initial launch is just the beginning.",
+      "src": "/gallery/project-1.jpeg",
+      "alt": "Project showcase 1",
+      "date": "2026-03-11",
+      "category": "Development",
+      "tags": ["workshop", "learning", "development"]
+    }
+  ],
+  "team": [
+    {
+      "id": "team-gallery-1",
+      "title": "Pre-Launch Prep at UoM IT",
+      "description": "A glimpse into the final hours before Sonar hits the Faculty of IT at UoM. There’s something special about these sessions—the intense focus, the sound of mechanical keyboards, and the shared mission of building something from scratch. From debugging the last few edge cases to refining the proctoring logic, our team is making sure everything is mission-ready for the University of Moratuwa.",
+      "src": "/gallery/team-1.jpeg",
+      "alt": "Team working together",
+      "date": "2026-03-10",
+      "category": "Team Culture",
+      "tags": ["team", "collaboration"]
+    },
+    {
+      "id": "team-gallery-2",
+      "title": "The Sonar Development Sessions",
+      "description": "Another session, another milestone. We’re constantly iterating on Sonar to make sure the initial launch at UoM is nothing short of excellent. From refining the installer to optimizing the editor's performance—the grind never stops. We can’t wait to show the IT Faculty what we’ve been building",
+      "src": "/gallery/team-2.jpeg",
+      "alt": "Team event",
+      "date": "2026-03-05",
+      "category": "Team Culture",
+      "tags": ["team", "event"]
+    },
+    {
+      "id": "team-gallery-3",
+      "title": "The Sonar Development Sessions",
+      "description": "This session was all about the 'bug hunt'—tracking down those elusive glitches in the proctoring engine and ensuring the Electron core is rock solid. It’s a cycle of break, fix, and repeat until Sonar is as resilient as the students who will use it. We're refining every detail at the UoM IT Faculty to ensure a seamless experience on day one.",
+      "src": "/gallery/team-3.jpeg",
+      "alt": "Team workspace",
+      "date": "2026-02-28",
+      "category": "Team Culture",
+      "tags": ["team", "workspace"]
+    },
+    {
+      "id": "team-gallery-4",
+      "title": "The Sonar Development Sessions",
+      "description": "Sleepless nights have become our team's signature as we race toward the Sonar initial release. Between the endless cups of coffee and the rhythmic click of mechanical keyboards, we are pushing the limits of what a student-led project can achieve at the Faculty of IT. Fatigue is temporary, but the impact of a secure, proctored editor is permanent",
+      "src": "/gallery/team-4.jpeg",
+      "alt": "Team collaboration",
+      "date": "2026-02-20",
+      "category": "Team Culture",
+      "tags": ["team", "collaboration"]
+    },
+    {
+      "id": "team-gallery-5",
+      "title": "The Sonar Development Sessions",
+      "description": "In this session, our team was buried in the backend logic, optimizing real-time activity tracking and offline data sync. It’s not just about making it look good; it’s about ensuring the integrity of every coding exam. Seeing these complex systems finally talk to each other makes the long hours at the University of Moratuwa worth every second.",
+      "src": "/gallery/team-5.jpeg",
+      "alt": "Team activity",
+      "date": "2026-02-10",
+      "category": "Team Culture",
+      "tags": ["team", "activity"]
+    },
+    {
+      "id": "team-gallery-6",
+      "title": "The Sonar-Web-App Development Sessions",
+      "description": "Development today focused on the bridge between the Sonar desktop app and our web services. We’re implementing real-time data streaming to ensure that every 'proctoring event' is logged instantly on the web dashboard. Using modern web technologies to handle thousands of concurrent events, we’re making sure that academic integrity at UoM is backed by a rock-solid, low-latency web architecture.",
+      "src": "/gallery/team-6.jpeg",
+      "alt": "Team moment",
+      "date": "2026-01-25",
+      "category": "Team Culture",
+      "tags": ["team", "culture"]
+    },
+    {
+      "id": "team-gallery-7",
+      "title": "The Sonar Development Sessions",
+      "description": "One person is fine-tuning the UI, another is hardening the security protocols, and someone else is documenting the CLI. This isn't just development; it's a shared obsession with excellence. We’re putting in the work now so that the Sonar launch at the University of Moratuwa sets a new standard for academic integrity and developer tools.",
+      "src": "/gallery/team-7.jpeg",
+      "alt": "Team gathering",
+      "date": "2026-01-10",
+      "category": "Team Culture",
+      "tags": ["team", "gathering"]
+    }
+  ]
+}

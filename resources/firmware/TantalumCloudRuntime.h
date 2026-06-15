@@ -84,7 +84,7 @@
 #endif
 
 #ifndef TANTALUM_RUNTIME_VERSION
-#define TANTALUM_RUNTIME_VERSION "1.1.9"
+#define TANTALUM_RUNTIME_VERSION "1.1.10"
 #endif
 
 #ifndef TANTALUM_BUILD_EPOCH
@@ -446,23 +446,21 @@ private:
 
     if (WiFi.status() == WL_CONNECTED) {
       maintainMqtt();
+      serviceMqttLoop();
       reportPendingOtaResult(false);
+      serviceMqttLoop();
     }
-
-#if TANTALUM_HAS_PUBSUBCLIENT
-    if (mqttClient.connected()) {
-      mqttClient.loop();
-    }
-#endif
 
     if (WiFi.status() == WL_CONNECTED && pendingMqttStartProvisioning) {
       pendingMqttStartProvisioning = false;
       startProvisioning("mqtt");
+      serviceMqttLoop();
     }
 
     if (WiFi.status() == WL_CONNECTED && pendingMqttCheckUpdate && !otaInProgress) {
       pendingMqttCheckUpdate = false;
       checkForUpdates();
+      serviceMqttLoop();
     }
 
     unsigned long now = millis();
@@ -510,6 +508,7 @@ private:
   unsigned long lastPendingOtaResultAt = 0;
   unsigned long lastFailedOtaAt = 0;
   unsigned long lastFailedOtaSkipLogAt = 0;
+  unsigned long lastMqttLoopAt = 0;
   unsigned long updateCheckIntervalMs = TANTALUM_DEFAULT_UPDATE_CHECK_MS;
   unsigned long provisioningStartedAt = 0;
   bool provisioningActive = false;
@@ -1151,6 +1150,7 @@ private:
     }
 
     if (mqttClient.connected()) {
+      serviceMqttLoop();
       return;
     }
 
@@ -1169,6 +1169,16 @@ private:
     String clientId = String("tantalum-") + TANTALUM_BOARD_ID;
     bool connected = false;
 
+    mqttClient.disconnect();
+    mqttSecureClient.stop();
+
+    Serial.print("MQTT connecting to ");
+    Serial.print(TANTALUM_MQTT_HOST);
+    Serial.print(":");
+    Serial.print(TANTALUM_MQTT_PORT);
+    Serial.print(" as ");
+    Serial.println(clientId);
+
     if (strlen(TANTALUM_MQTT_USERNAME) > 0 || strlen(TANTALUM_MQTT_PASSWORD) > 0) {
       connected = mqttClient.connect(clientId.c_str(), TANTALUM_MQTT_USERNAME, TANTALUM_MQTT_PASSWORD);
     } else {
@@ -1176,10 +1186,18 @@ private:
     }
 
     if (connected) {
-      mqttClient.subscribe(TANTALUM_MQTT_TOPIC);
-      pendingMqttCheckUpdate = true;
-      Serial.print("MQTT subscribed: ");
-      Serial.println(TANTALUM_MQTT_TOPIC);
+      bool subscribed = mqttClient.subscribe(TANTALUM_MQTT_TOPIC, 1);
+      if (subscribed) {
+        pendingMqttCheckUpdate = true;
+        Serial.print("MQTT subscribed: ");
+        Serial.println(TANTALUM_MQTT_TOPIC);
+      } else {
+        Serial.print("MQTT subscribe failed, state ");
+        Serial.println(mqttClient.state());
+        printSecureClientError(mqttSecureClient);
+        mqttClient.disconnect();
+        mqttSecureClient.stop();
+      }
     } else {
       Serial.print("MQTT connect failed, state ");
       Serial.println(mqttClient.state());
@@ -1420,6 +1438,34 @@ private:
     return buildOrigin(current) + directory + target;
   }
 
+  bool serviceMqttLoop() {
+#if TANTALUM_HAS_PUBSUBCLIENT
+    if (!mqttClient.connected()) {
+      return false;
+    }
+
+    bool ok = mqttClient.loop();
+    lastMqttLoopAt = millis();
+    if (!ok) {
+      Serial.print("MQTT loop failed, state ");
+      Serial.println(mqttClient.state());
+      printSecureClientError(mqttSecureClient);
+      mqttSecureClient.stop();
+    }
+    return ok;
+#else
+    return false;
+#endif
+  }
+
+  void backgroundNetworkTick(unsigned long delayMs = 1) {
+    serviceMqttLoop();
+    if (delayMs > 0) {
+      delay(delayMs);
+    }
+    yield();
+  }
+
   bool readHttpLine(Client& client, String& line, unsigned long timeoutMs = TANTALUM_HTTP_TIMEOUT_MS) {
     line = "";
     unsigned long lastDataAt = millis();
@@ -1441,8 +1487,7 @@ private:
       if (!client.connected() && client.available() <= 0) {
         return line.length() > 0;
       }
-      delay(1);
-      yield();
+      backgroundNetworkTick();
     }
     return false;
   }
@@ -1465,8 +1510,7 @@ private:
       if (!client.connected()) {
         break;
       }
-      delay(1);
-      yield();
+      backgroundNetworkTick();
     }
     return readTotal;
   }
@@ -1621,8 +1665,7 @@ private:
         Serial.println("Timed out waiting for HTTP body.");
         return false;
       }
-      delay(1);
-      yield();
+      backgroundNetworkTick();
     }
 
     return true;
@@ -2186,6 +2229,7 @@ private:
 
       uint8_t crlf[2];
       readBytesWithTimeout(client, crlf, sizeof(crlf), 2000UL);
+      backgroundNetworkTick(0);
     }
   }
 
@@ -2205,7 +2249,7 @@ private:
         return false;
       }
       remaining -= readNow;
-      yield();
+      backgroundNetworkTick(0);
     }
 
     return true;
@@ -2232,8 +2276,7 @@ private:
         errorMessage = "Timed out waiting for OTA download bytes.";
         return false;
       }
-      delay(1);
-      yield();
+      backgroundNetworkTick();
     }
 
     return true;

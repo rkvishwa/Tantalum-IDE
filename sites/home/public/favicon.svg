@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <style>
+      .primary { fill: #000000; }
+      .accent { fill: #22c55e; }
+
+      @media (prefers-color-scheme: dark) {
+        .primary { fill: #ffffff; }
+        .accent { fill: #22c55e; }
+      }
+    </style>
+  </defs>
+
+  <g transform="translate(128, 128) scale(0.25)">
+    <!-- Simplified owl for favicon -->
+    <path class="primary" d="
+      M 258 272 Q 512 160 766 272 Q 720 298 694 336 Q 792 270 878 238 Q 979 198 1008 68 Q 1026 220 953 306 Q 998 294 1020 268 Q 980 365 846 431 Q 690 507 557 611 Q 523 635 512 621 Q 501 635 467 611 Q 334 507 178 431 Q 44 365 4 268 Q 26 294 71 306 Q -2 220 16 68 Q 45 198 146 238 Q 232 270 330 336 Q 304 298 258 272 Z
+    " transform="translate(-512, -450)"/>
+
+    <path class="primary" d="
+      M 76 404 Q 31 481 31 576 Q 31 708 118 795 Q 220 896 430 847 Q 297 847 204 783 Q 93 707 93 576 Q 93 496 129 437 Z
+    " transform="translate(-512, -450)"/>
+
+    <path class="primary" d="
+      M 948 404 Q 993 481 993 576 Q 993 708 906 795 Q 804 896 594 847 Q 727 847 820 783 Q 931 707 931 576 Q 931 496 895 437 Z
+    " transform="translate(-512, -450)"/>
+
+    <path class="primary" d="
+      M 171 463 Q 147 505 147 556 Q 147 636 202 691 Q 267 756 388 706 Q 315 706 267 670 Q 217 633 217 556 Q 217 515 241 478 Z
+    " transform="translate(-512, -450)"/>
+
+    <path class="primary" d="
+      M 853 463 Q 877 505 877 556 Q 877 636 822 691 Q 757 756 636 706 Q 709 706 757 670 Q 807 633 807 556 Q 807 515 783 478 Z
+    " transform="translate(-512, -450)"/>
+
+    <g class="accent">
+      <path d="M 266 512 Q 222 556 262 607 Q 306 648 359 619 Q 392 599 376 582 Q 343 554 266 512 Z" transform="translate(-512, -450)"/>
+      <path d="M 758 512 Q 802 556 762 607 Q 718 648 665 619 Q 632 599 648 582 Q 681 554 758 512 Z" transform="translate(-512, -450)"/>
+    </g>
+
+    <path class="primary" d="
+      M 512 657 Q 472 688 452 769 Q 472 862 512 920 Q 552 862 572 769 Q 552 688 512 657 Z
+    " transform="translate(-512, -450)"/>
+  </g>
+</svg>

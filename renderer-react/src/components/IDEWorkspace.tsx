@@ -87,6 +87,17 @@ import {
 } from '@/lib/cppLanguageSupport';
 import { deleteFirmwareRelease, listFirmwareHistory, markFirmwareAsCurrent, uploadFirmwareRelease } from '@/lib/firmware';
 import type { BoardDocument, BoardInput, BoardSecret, FirmwareDocument, OtaUpdateMode } from '@/lib/models';
+import {
+  boardRealtimeChannels,
+  createRealtimeEventDeduper,
+  firmwareRealtimeChannels,
+  isBoardRealtimeDocument,
+  isFirmwareRealtimeDocument,
+  realtimeEventAction,
+  realtimeEventMatchesCollection,
+  sortBoardsByCreatedAt,
+  sortFirmwareByUploadedAt,
+} from '@/lib/realtime';
 import type { UiPreferences } from '@/lib/uiPreferences';
 import {
   calculateBoardStatus,
@@ -128,6 +139,7 @@ import type {
   BoardCodeViewResult,
   CloudSyncProject,
   SourceRestoreMarker,
+  CloudRealtimeEvent,
 } from '@/types/electron';
 import type { AgentChangePreview, AgentRestoredFile, AgentRestorePointSummary } from '@/types/electron';
 
@@ -3092,6 +3104,10 @@ export function IDEWorkspace({
   const localBoardUploadProgressRef = useRef<UsbUploadProgressTask | null>(null);
   const invalidCloudLinkRepairRef = useRef(false);
   const firmwareReleaseUploadInProgressRef = useRef(false);
+  const boardsRealtimeFallbackTimerRef = useRef<number | null>(null);
+  const firmwareRealtimeFallbackTimerRef = useRef<number | null>(null);
+  const shouldApplyBoardsRealtimeEventRef = useRef(createRealtimeEventDeduper());
+  const shouldApplyFirmwareRealtimeEventRef = useRef(createRealtimeEventDeduper());
   const serialPreflightResolveRef = useRef<((ready: boolean) => void) | null>(null);
   const verifyInProgressRef = useRef(false);
 
@@ -5051,6 +5067,98 @@ export function IDEWorkspace({
       pushConsole(error instanceof Error ? error.message : 'Unable to load firmware history.', 'error');
     }
   }
+
+  const scheduleBoardsRealtimeFallbackRefresh = useEffectEvent(() => {
+    if (boardsRealtimeFallbackTimerRef.current !== null) {
+      return;
+    }
+
+    boardsRealtimeFallbackTimerRef.current = window.setTimeout(() => {
+      boardsRealtimeFallbackTimerRef.current = null;
+      void refreshBoardsList({ silent: true, bypassCache: true });
+    }, 500);
+  });
+
+  const scheduleFirmwareRealtimeFallbackRefresh = useEffectEvent(() => {
+    if (!selectedBoard || firmwareRealtimeFallbackTimerRef.current !== null) {
+      return;
+    }
+
+    firmwareRealtimeFallbackTimerRef.current = window.setTimeout(() => {
+      firmwareRealtimeFallbackTimerRef.current = null;
+      void listFirmwareHistory(selectedBoard.$id, { bypassCache: true })
+        .then((history) => {
+          setFirmwareHistory(history);
+          setReleaseVersion(nextSemver(selectedBoard.desiredVersion || selectedBoard.firmwareVersion || history[0]?.version || '1.0.0'));
+        })
+        .catch((error) => {
+          pushConsole(error instanceof Error ? error.message : 'Unable to load firmware history.', 'error');
+        });
+    }, 500);
+  });
+
+  const handleBoardsRealtimeEvent = useEffectEvent((event: CloudRealtimeEvent<unknown>) => {
+    if (!realtimeEventMatchesCollection(event, appwriteConfig.boardsCollectionId) || !shouldApplyBoardsRealtimeEventRef.current(event)) {
+      return;
+    }
+
+    const action = realtimeEventAction(event);
+    if (action === 'unknown' || !isBoardRealtimeDocument(event.payload)) {
+      scheduleBoardsRealtimeFallbackRefresh();
+      return;
+    }
+
+    const board = event.payload;
+    setBoards((current) => {
+      const nextBoards = action === 'delete'
+        ? current.filter((entry) => entry.$id !== board.$id)
+        : sortBoardsByCreatedAt([
+            ...current.filter((entry) => entry.$id !== board.$id),
+            board,
+          ]);
+
+      if (selectedBoardId === board.$id && action === 'delete') {
+        setSelectedBoardId(nextBoards[0]?.$id ?? '');
+      } else if (!selectedBoardId && nextBoards.length > 0) {
+        setSelectedBoardId(nextBoards[0].$id);
+      }
+
+      return nextBoards;
+    });
+
+    setBoardsError(null);
+    if (boardsHubInspectorTarget?.kind === 'cloud' && boardsHubInspectorTarget.boardId === board.$id && action === 'delete') {
+      setBoardsHubInspectorTarget(null);
+    }
+  });
+
+  const handleFirmwareRealtimeEvent = useEffectEvent((event: CloudRealtimeEvent<unknown>) => {
+    if (!selectedBoardId || !realtimeEventMatchesCollection(event, appwriteConfig.firmwareCollectionId) || !shouldApplyFirmwareRealtimeEventRef.current(event)) {
+      return;
+    }
+
+    const action = realtimeEventAction(event);
+    if (action === 'unknown' || !isFirmwareRealtimeDocument(event.payload)) {
+      scheduleFirmwareRealtimeFallbackRefresh();
+      return;
+    }
+
+    const firmware = event.payload;
+    if (firmware.boardId !== selectedBoardId) {
+      return;
+    }
+
+    setFirmwareHistory((current) => {
+      const nextHistory = action === 'delete'
+        ? current.filter((entry) => entry.$id !== firmware.$id)
+        : sortFirmwareByUploadedAt([
+            ...current.filter((entry) => entry.$id !== firmware.$id),
+            firmware,
+          ]);
+      setReleaseVersion(nextSemver(selectedBoard?.desiredVersion || selectedBoard?.firmwareVersion || nextHistory[0]?.version || '1.0.0'));
+      return nextHistory;
+    });
+  });
 
   async function refreshLocalBoardProfiles(options: { apply?: boolean } = {}) {
     const result = await window.tantalum.toolchain.listLocalBoardProfiles();
@@ -9519,7 +9627,50 @@ export function IDEWorkspace({
     });
   }
 
-  async function handleCancelLibraryInstallById(installId: string, name: string) {
+  function finishRestoredToolchainNotification(
+    notification: ToolchainNotification,
+    options: { title: string; detail: string; status: ToolchainNotificationInput['status'] },
+  ) {
+    const installId = typeof notification.metadata.installId === 'string' ? notification.metadata.installId : notification.id;
+    const nextNotification: ToolchainNotificationInput = {
+      id: notification.id,
+      kind: notification.kind,
+      title: options.title,
+      detail: options.detail,
+      status: options.status,
+      phase: options.status,
+      progress: notification.progress,
+      name: notification.name,
+      version: notification.version,
+      target: notification.target,
+      metadata: notification.metadata,
+    };
+
+    persistToolchainNotification(nextNotification);
+    const toastId =
+      toolchainNotificationToastIdsRef.current.get(notification.id) ??
+      libraryInstallToastIdsRef.current.get(installId) ??
+      (platformInstallProgressRef.current?.installId === installId ? platformInstallProgressRef.current.toastId : undefined);
+
+    if (toastId) {
+      finishToast(toastId, {
+        message: options.title,
+        detail: options.detail,
+        tone: 'info',
+        progress: undefined,
+        progressLabel: undefined,
+        actions: [],
+      });
+    }
+
+    toolchainNotificationToastIdsRef.current.delete(notification.id);
+    libraryInstallToastIdsRef.current.delete(installId);
+    if (platformInstallProgressRef.current?.installId === installId) {
+      platformInstallProgressRef.current = null;
+    }
+  }
+
+  async function handleCancelLibraryInstallById(installId: string, name: string, notification?: ToolchainNotification) {
     if (!installId || stoppingInstallIds[installId]) {
       return;
     }
@@ -9558,6 +9709,26 @@ export function IDEWorkspace({
       } else {
         pushToast(result.error, 'error');
       }
+      return;
+    }
+
+    if (notification) {
+      clearStoppingInstall(installId);
+      finishRestoredToolchainNotification(notification, {
+        title: result.alreadyStopped ? `Interrupted installing ${name}` : `Stopped installing ${name}`,
+        detail: result.alreadyStopped ? `${name} install is no longer running.` : `${name} install stopped.`,
+        status: result.alreadyStopped ? 'interrupted' : 'canceled',
+      });
+    } else if (result.alreadyStopped) {
+      clearStoppingInstall(installId);
+      updateLibraryInstallToast({
+        installId,
+        name,
+        status: 'canceled',
+        phase: 'canceled',
+        message: `${name} install is no longer running.`,
+        progress: null,
+      });
     }
   }
 
@@ -9807,7 +9978,7 @@ export function IDEWorkspace({
     }
   }
 
-  async function handleCancelPlatformInstallById(installId: string, name: string) {
+  async function handleCancelPlatformInstallById(installId: string, name: string, notification?: ToolchainNotification) {
     if (!installId || stoppingInstallIds[installId]) {
       return;
     }
@@ -9852,6 +10023,27 @@ export function IDEWorkspace({
       } else {
         pushToast(result.error, 'error');
       }
+      return;
+    }
+
+    if (notification) {
+      clearStoppingInstall(installId);
+      finishRestoredToolchainNotification(notification, {
+        title: result.alreadyStopped ? `Interrupted installing ${name}` : `Stopped installing ${name}`,
+        detail: result.alreadyStopped ? `${name} install is no longer running.` : `${name} install stopped.`,
+        status: result.alreadyStopped ? 'interrupted' : 'canceled',
+      });
+    } else if (result.alreadyStopped && task) {
+      clearStoppingInstall(installId);
+      platformInstallProgressRef.current = null;
+      finishToast(task.toastId, {
+        message: `Stopped installing ${name}`,
+        detail: `${name} install is no longer running.`,
+        tone: 'info',
+        progress: undefined,
+        progressLabel: undefined,
+        actions: [],
+      });
     }
   }
 
@@ -9871,7 +10063,7 @@ export function IDEWorkspace({
       return [{
         label: 'Stop',
         dismissOnSelect: false,
-        onSelect: () => void handleCancelLibraryInstallById(installId, name),
+        onSelect: () => void handleCancelLibraryInstallById(installId, name, notification),
       }];
     }
 
@@ -9879,7 +10071,7 @@ export function IDEWorkspace({
       return [{
         label: 'Stop',
         dismissOnSelect: false,
-        onSelect: () => void handleCancelPlatformInstallById(installId, name),
+        onSelect: () => void handleCancelPlatformInstallById(installId, name, notification),
       }];
     }
 
@@ -10612,6 +10804,69 @@ export function IDEWorkspace({
   const refreshRemoteBoardsSilently = useEffectEvent(() => {
     void refreshBoardsList({ silent: true });
   });
+
+  useEffect(() => {
+    if (!hasRequiredCloudConfiguration()) {
+      return undefined;
+    }
+
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    void window.tantalum.cloud.realtime
+      .subscribe({ channels: boardRealtimeChannels(), label: 'workspace-boards' }, handleBoardsRealtimeEvent)
+      .then((nextUnsubscribe) => {
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((error) => {
+        console.warn(error instanceof Error ? error.message : 'Unable to subscribe to board updates.');
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasRequiredCloudConfiguration() || !selectedBoardId) {
+      return undefined;
+    }
+
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    void window.tantalum.cloud.realtime
+      .subscribe({ channels: firmwareRealtimeChannels(), label: 'workspace-firmware' }, handleFirmwareRealtimeEvent)
+      .then((nextUnsubscribe) => {
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribe = nextUnsubscribe;
+      })
+      .catch((error) => {
+        console.warn(error instanceof Error ? error.message : 'Unable to subscribe to firmware updates.');
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [selectedBoardId]);
+
+  useEffect(() => {
+    return () => {
+      if (boardsRealtimeFallbackTimerRef.current !== null) {
+        window.clearTimeout(boardsRealtimeFallbackTimerRef.current);
+      }
+      if (firmwareRealtimeFallbackTimerRef.current !== null) {
+        window.clearTimeout(firmwareRealtimeFallbackTimerRef.current);
+      }
+    };
+  }, []);
 
   const clearInvalidLocalCloudLinks = useEffectEvent(async () => {
     if (!cloudBoardLinksResolved || invalidCloudLinkRepairRef.current) {
@@ -11722,7 +11977,7 @@ export function IDEWorkspace({
 
   useEffect(() => {
     handleSelectedBoardChange(selectedBoard);
-  }, [selectedBoardId, selectedBoard]);
+  }, [selectedBoardId]);
 
   useEffect(() => {
     writeStoredSelectedLocalBoardId(selectedLocalBoardId);
@@ -15975,19 +16230,13 @@ export function IDEWorkspace({
         >
           <div className="inspector-tabs" style={{ display: 'none' }}></div>
           <div className="inspector-body">
-            {sidebar === 'git' ? (
-              <GitSourceControlPanel controller={gitController} />
-            ) : sidebar === 'my-projects' ? (
-              renderProjectsInspectorPanel()
-            ) : sidebar === 'libraries' ? (
-              renderLibraryDetailsPanel(selectedLibrary)
-            ) : sidebar === 'platforms' ? (
-              renderPlatformDetailsPanel(selectedPlatform)
-            ) : sidebar === 'boards' ? (
-              renderBoardsInspectorPanel()
-            ) : sidebar === 'terminal' ? (
-              renderTerminalSessionsPanel()
-            ) : (
+            {sidebar === 'git' ? <GitSourceControlPanel controller={gitController} /> : null}
+            {sidebar === 'my-projects' ? renderProjectsInspectorPanel() : null}
+            {sidebar === 'libraries' ? renderLibraryDetailsPanel(selectedLibrary) : null}
+            {sidebar === 'platforms' ? renderPlatformDetailsPanel(selectedPlatform) : null}
+            {sidebar === 'boards' ? renderBoardsInspectorPanel() : null}
+            {sidebar === 'terminal' ? renderTerminalSessionsPanel() : null}
+            <div className="persistent-agent-panel-host" hidden={sidebar !== 'explorer'} aria-hidden={sidebar !== 'explorer'}>
               <AgentPanel
                 user={user}
                 workspacePath={workspacePath}
@@ -16032,7 +16281,7 @@ export function IDEWorkspace({
                 onClosePanel={() => onRightPanelOpenChange(false)}
                 onSignedOut={onSignedOut}
               />
-            )}
+            </div>
           </div>
         </aside>
       </main>

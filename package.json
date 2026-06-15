@@ -53,6 +53,7 @@
     "opencode-ai": "^1.15.6",
     "serialport": "^12.0.0",
     "uuid": "^9.0.0",
+    "ws": "^8.21.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0",
     "yauzl": "^2.10.0",
@@ -63,7 +64,9 @@
     "productName": "Tantalum IDE",
     "asarUnpack": [
       "node_modules/opencode-ai/bin/**",
-      "node_modules/opencode-*/**"
+      "node_modules/opencode-*/**",
+      "node_modules/node-pty/prebuilds/**",
+      "node_modules/node-pty/build/Release/**"
     ],
     "directories": {
       "output": "dist"

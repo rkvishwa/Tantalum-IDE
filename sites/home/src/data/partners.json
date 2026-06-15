@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Brainvave Software Studios (PVT) LTD.",
+    "logo": "/partner-logos/brainvave.webp",
+    "website": "https://brainvave.com",
+    "description": "Brainvave Software Studios is a project-based development firm dedicated to building high-performance web and mobile applications. We specialize in taking products from initial concept to full-scale deployment",
+    "projects": [
+      {
+        "name": "Ayzack Global Education (PVT) LTD",
+        "slug": "ayzack",
+        "url": "https://ayzack.com",
+        "status": "live"
+      },
+      {
+        "name": "Prime Edu",
+        "slug": "prime-edu",
+        "url": "https://primeedu.lk",
+        "status": "live"
+      },
+      {
+        "name": "ItProLearners",
+        "slug": "itprolearner",
+        "url": "https://itprolearner.brainvave.com",
+        "status": "beta"
+      },
+      {
+        "name": "Pumpkin Tours (PVT) LTD",
+        "slug": "pumpkintours",
+        "url": "https://pumpkintours.com",
+        "status": "live"
+      },
+      {
+        "name": "Portal (PVT) LTD",
+        "slug": "portal",
+        "url": "https://portal.lk",
+        "status": "development"
+      },
+      {
+        "name": "IIPE.uk",
+        "slug": "iipe",
+        "url": "https://iipe.uk",
+        "status": "upcoming"
+      },
+      {
+        "name": "Uplect.com",
+        "slug": "uplect",
+        "url": "https://uplect.com",
+        "status": "upcoming"
+      }
+    ]
+  }
+]

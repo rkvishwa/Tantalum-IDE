@@ -231,6 +231,36 @@ function signCommand(secret, action, deploymentId, nonce, issuedAt) {
     .digest('hex');
 }
 
+function sanitizedMqttUrlForLog() {
+  const url = mqttConnectionUrl();
+  if (!url) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return 'invalid-url';
+  }
+}
+
+function logMqttCommandResult(board, action, deploymentId, result) {
+  console.log(JSON.stringify({
+    event: 'mqtt-command',
+    boardId: board?.$id || '',
+    action,
+    deploymentId: deploymentId || '',
+    otaUpdateMode: normalizeOtaUpdateMode(board?.otaUpdateMode),
+    broker: sanitizedMqttUrlForLog(),
+    status: result?.status || '',
+    published: Boolean(result?.published),
+    reason: result?.reason || '',
+  }));
+}
+
 async function publishBoardCommand(board, action, deploymentId = '') {
   const url = mqttConnectionUrl();
   const commandSecret = decryptSecret(board.commandSecretEnvelope);
@@ -469,6 +499,7 @@ async function deployFirmware(req, res) {
       };
     }
   }
+  logMqttCommandResult(board, 'check-update', payload.deploymentId, mqttResult);
 
   return ok(res, { board, firmware, mqtt: mqttResult });
 }
@@ -514,6 +545,7 @@ async function startProvisioning(req, res) {
       };
     }
   }
+  logMqttCommandResult(board, 'start-provisioning', '', mqttResult);
 
   return ok(res, {
     board,

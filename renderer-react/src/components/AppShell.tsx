@@ -1063,7 +1063,7 @@ void loop() {
             aria-expanded={workspaceSearchOpen}
           >
             <Search size={14} />
-            <span>{workspaceSearchAvailable ? `Search ${titleText}` : 'Open Project Space to search'}</span>
+            <span>{workspaceSearchAvailable ? 'Search files, symbols, and text' : 'Open Project Space to search'}</span>
             <kbd>{workspaceSearchShortcut}</kbd>
           </button>
         ) : (

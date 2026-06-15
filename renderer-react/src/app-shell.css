@@ -21,6 +21,10 @@ html.platform-mac {
   --titlebar-traffic-light-inset: 78px;
 }
 
+html.platform-mac.is-fullscreen {
+  --titlebar-traffic-light-inset: 0px;
+}
+
 .titlebar-traffic-light-spacer {
   flex: 0 0 var(--titlebar-traffic-light-inset);
   height: 100%;

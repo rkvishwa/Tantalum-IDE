@@ -1,0 +1,673 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-grid: var(--grid-color);
+  --color-faded: var(--faded);
+  --color-background-alt: var(--background-alt);
+}
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+  --muted: #9ca3af;
+  --faded: #4b5563;
+  --background-alt: #030712; /* gray-950 */
+  --border: rgba(255, 255, 255, 0.1);
+  --card: rgba(255, 255, 255, 0.05);
+  --card-hover: rgba(255, 255, 255, 0.1);
+  --grid-color: rgba(255, 255, 255, 0.1);
+}
+
+body.light {
+  --background: #faf7f2;          /* warm ivory */
+  --foreground: #1a1a2e;          /* deep dark */
+  --muted: #475569;               /* slate-600 */
+  --faded: #64748b;               /* slate-500 */
+  --background-alt: #f3ede4;      /* warm parchment */
+  --border: rgba(15, 23, 42, 0.12);
+  --card: rgba(255, 252, 247, 0.92);
+  --card-hover: rgba(255, 252, 247, 1);
+  --grid-color: rgba(15, 23, 42, 0.05);
+}
+
+@keyframes slide-up {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+@keyframes draw-line {
+    from { stroke-dashoffset: 1000; }
+    to { stroke-dashoffset: 0; }
+}
+@keyframes drawLine {
+    from { stroke-dashoffset: 100; }
+    to { stroke-dashoffset: 0; }
+}
+@keyframes scaleUpSmooth {
+    from {
+        transform: scale(0.8);
+        opacity: 0;
+    }
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+@keyframes slideUpSmooth {
+    from {
+        transform: translateY(30px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.9); }
+}
+@keyframes blink-cursor {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+}
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.animate-slide-up { animation: slide-up 0.6s ease-out forwards; }
+.group:hover .group-hover\:scale-110 { transform: scale(1.1); }
+.group:hover .group-hover\:scale-105 { transform: scale(1.05); }
+.git-branch-line {
+    stroke: #333333;
+    stroke-dasharray: 1000;
+    animation: draw-line 2s ease-in-out forwards;
+}
+.git-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+.blinking-cursor {
+    animation: blink-cursor 1s step-end infinite;
+    color: #22c55e;
+}
+.terminal-input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #ffffff;
+    caret-color: transparent;
+    font-family: 'JetBrains Mono', monospace;
+}
+.suggestion-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    backdrop-filter: blur(10px);
+}
+
+/* Hide default scrollbar */
+::-webkit-scrollbar {
+    display: none;
+}
+* {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+/* Custom scrollbar for team timeline */
+.custom-scrollbar::-webkit-scrollbar {
+    display: block;
+    height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(34, 197, 94, 0.3);
+    border-radius: 4px;
+    transition: background 0.3s;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(34, 197, 94, 0.5);
+}
+.custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(34, 197, 94, 0.3) rgba(255, 255, 255, 0.05);
+}
+
+/* Monochrome theme */
+body {
+    font-family: 'Space Grotesk', sans-serif;
+}
+a, button {
+    cursor: pointer;
+}
+.mono-font { font-family: 'JetBrains Mono', monospace; }
+
+/* ── Light theme base ──────────────────────────────────── */
+body.light {
+    background-color: #faf7f2;
+    color: #1a1a2e;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+}
+
+/* ── Direct utility class overrides for light mode ──────── */
+/* Force correct foreground/background colors regardless of CSS variable chain */
+body.light .text-foreground {
+    color: #1a1a2e !important;
+}
+body.light .text-faded {
+    color: #64748b !important;
+}
+body.light .text-muted {
+    color: #475569 !important;
+}
+body.light .text-background {
+    color: #faf7f2 !important;
+}
+body.light .text-background\/60 {
+    color: rgba(250, 247, 242, 0.6) !important;
+}
+body.light .bg-foreground {
+    background-color: #1a1a2e !important;
+}
+body.light .bg-background {
+    background-color: #faf7f2 !important;
+}
+body.light .bg-background-alt {
+    background-color: #f3ede4 !important;
+}
+body.light .bg-background\/95 {
+    background-color: rgba(250, 247, 242, 0.95) !important;
+}
+body.light .bg-background\/80 {
+    background-color: rgba(250, 247, 242, 0.80) !important;
+}
+body.light .bg-card {
+    background-color: rgba(255, 252, 247, 0.92) !important;
+}
+body.light .bg-card\/90 {
+    background-color: rgba(255, 252, 247, 0.90) !important;
+}
+body.light .bg-card\/10 {
+    background-color: rgba(255, 252, 247, 0.10) !important;
+}
+body.light .border-border {
+    border-color: rgba(15, 23, 42, 0.12) !important;
+}
+body.light .border-foreground {
+    border-color: #1a1a2e !important;
+}
+body.light .border-foreground\/30 {
+    border-color: rgba(26, 26, 46, 0.30) !important;
+}
+body.light .hover\:bg-foreground:hover {
+    background-color: #1a1a2e !important;
+}
+body.light .hover\:text-background:hover {
+    color: #faf7f2 !important;
+}
+body.light .hover\:text-foreground:hover {
+    color: #1a1a2e !important;
+}
+body.light .hover\:border-foreground:hover {
+    border-color: #1a1a2e !important;
+}
+body.light .group-hover\:text-foreground:is(:where(.group):hover *) {
+    color: #1a1a2e !important;
+}
+body.light .bg-foreground\/10 {
+    background-color: rgba(26, 26, 46, 0.10) !important;
+}
+body.light .border-foreground\/20 {
+    border-color: rgba(26, 26, 46, 0.20) !important;
+}
+body.light .border-foreground\/10 {
+    border-color: rgba(26, 26, 46, 0.10) !important;
+}
+/* The background/foreground Tailwind utility → CSS var → custom var chain fix */
+body.light {
+    --color-foreground: #1a1a2e;
+    --color-background: #faf7f2;
+    --color-muted: #475569;
+    --color-faded: #64748b;
+    --color-background-alt: #f3ede4;
+    --color-border: rgba(15, 23, 42, 0.12);
+    --color-card: rgba(255, 252, 247, 0.92);
+}
+
+/* Navigation */
+body.light nav {
+    background: rgba(250, 247, 242, 0.88);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 1px 0 rgba(15, 23, 42, 0.08);
+}
+
+/* Cards */
+body.light [class*="bg-card"] {
+    box-shadow: 0 2px 12px rgba(15, 23, 42, 0.07), 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+body.light [class*="bg-card"]:hover {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12), 0 3px 8px rgba(15, 23, 42, 0.07);
+}
+
+/* SVG connector lines */
+body.light .branch-svg line {
+    stroke: rgba(15, 23, 42, 0.18);
+}
+
+/* Scrollbar */
+body.light .custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.06);
+}
+body.light .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(22, 163, 74, 0.45);
+}
+body.light .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(22, 163, 74, 0.7);
+}
+body.light .custom-scrollbar {
+    scrollbar-color: rgba(22, 163, 74, 0.45) rgba(15, 23, 42, 0.06);
+}
+
+/* Terminal */
+body.light .terminal-input {
+    color: #1a1a2e;
+}
+body.light .suggestion-box {
+    background: rgba(255, 252, 247, 0.97);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+}
+
+/* Focus states */
+body.light input:focus,
+body.light textarea:focus,
+body.light select:focus {
+    outline: none;
+    border-color: rgba(22, 163, 74, 0.6);
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15);
+}
+
+/* Hover states */
+body.light a:hover,
+body.light button:hover {
+    opacity: 0.88;
+}
+
+/* Text selection */
+body.light ::selection {
+    background: rgba(22, 163, 74, 0.22);
+    color: #1a1a2e;
+}
+
+/* Partner logos */
+body.light img[src*="/partner-logos/"] {
+    filter: brightness(0);
+}
+
+/* Fallback banner logos */
+.logo-light {
+    display: none;
+}
+body.light .logo-light {
+    display: block;
+}
+body.light .logo-dark {
+    display: none;
+}
+
+/* ── Hardcoded Tailwind colour overrides for light mode ── */
+body.light .text-white {
+    color: var(--foreground) !important;
+}
+body.light .text-gray-300 {
+    color: var(--muted) !important;
+}
+body.light .text-gray-500 {
+    color: var(--faded) !important;
+}
+body.light .text-green-400 {
+    color: #16a34a !important; /* green-600 accent */
+}
+body.light .text-red-400 {
+    color: #b91c1c !important;
+}
+body.light .text-black {
+    color: var(--background) !important;
+}
+body.light .border-white {
+    border-color: var(--foreground) !important;
+}
+body.light .border-gray-600 {
+    border-color: rgba(15, 23, 42, 0.18) !important;
+}
+body.light .border-t-green-500 {
+    border-top-color: #16a34a !important;
+}
+body.light .bg-green-500 {
+    background-color: #16a34a !important;
+}
+
+/* Gradient overrides */
+body.light .bg-gradient-to-t.from-black\/95 {
+    --tw-gradient-from: rgba(243, 237, 228, 0.97);
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to, rgba(243, 237, 228, 0));
+}
+body.light .via-black\/40 {
+    --tw-gradient-via: rgba(243, 237, 228, 0.45);
+}
+body.light .from-gray-800 {
+    --tw-gradient-from: rgba(243, 237, 228, 1);
+}
+body.light .via-gray-700 {
+    --tw-gradient-via: rgba(235, 228, 218, 1);
+}
+body.light .to-gray-800 {
+    --tw-gradient-to: rgba(243, 237, 228, 1);
+}
+body.light .from-black {
+    --tw-gradient-from: var(--background-alt);
+}
+body.light .via-black\/80 {
+    --tw-gradient-via: rgba(243, 237, 228, 0.92);
+}
+body.light .from-white\/10 {
+    --tw-gradient-from: rgba(15, 23, 42, 0.05);
+}
+
+/* Shadow overrides */
+body.light .shadow-black\/20 {
+    --tw-shadow-color: rgba(15, 23, 42, 0.12);
+    --tw-shadow: var(--tw-shadow-colored);
+}
+
+/* ── Light theme: extended contrast fixes ───────────────────────── */
+
+/* 1. Terminal cursor — swap green for indigo */
+body.light .blinking-cursor {
+    color: #16a34a;
+}
+
+/* 2. Accent green → high-contrast green across all text */
+body.light .text-green-500 {
+    color: #16a34a !important;
+}
+body.light .text-green-400 {
+    color: #16a34a !important;
+}
+
+/* 3. Green backgrounds / borders → high-contrast green tinted */
+body.light .bg-green-500 {
+    background-color: #16a34a !important;
+}
+body.light .bg-green-500\/10 {
+    background-color: rgba(22, 163, 74, 0.08) !important;
+}
+body.light .bg-green-500\/20 {
+    background-color: rgba(22, 163, 74, 0.12) !important;
+}
+body.light .bg-green-500\/30 {
+    background-color: rgba(22, 163, 74, 0.15) !important;
+}
+body.light .border-green-500 {
+    border-color: rgba(22, 163, 74, 0.5) !important;
+}
+body.light .border-green-500\/30 {
+    border-color: rgba(22, 163, 74, 0.25) !important;
+}
+body.light .border-green-500\/50 {
+    border-color: rgba(22, 163, 74, 0.4) !important;
+}
+body.light .border-t-green-500 {
+    border-top-color: #16a34a !important;
+}
+
+/* 4. Hover states: green hover → high-contrast green */
+body.light .hover\:bg-green-500:hover {
+    background-color: #16a34a !important;
+}
+body.light .hover\:border-green-500:hover {
+    border-color: rgba(22, 163, 74, 0.5) !important;
+}
+body.light .hover\:border-green-500\/50:hover {
+    border-color: rgba(22, 163, 74, 0.4) !important;
+}
+body.light .hover\:bg-green-500\/5:hover {
+    background-color: rgba(22, 163, 74, 0.05) !important;
+}
+body.light .hover\:text-green-500:hover {
+    color: #16a34a !important;
+}
+body.light .group-hover\:border-green-500 {
+    border-color: rgba(22, 163, 74, 0.5) !important;
+}
+
+/* 5. git branch dot circles (SVG fill attribute — override via CSS fill) */
+body.light circle[fill="#22c55e"] {
+    fill: #16a34a;
+}
+/* Also cover Tailwind's named green on SVGs */
+body.light .git-dot {
+    fill: #16a34a;
+}
+
+/* 6. Team timeline: horizontal line via-green → high-contrast green */
+body.light .via-green-500\/50 {
+    --tw-gradient-via: rgba(22, 163, 74, 0.35);
+}
+body.light .from-green-500\/50 {
+    --tw-gradient-from: rgba(22, 163, 74, 0.35);
+}
+
+/* 7. Team card hover glow (inline shadow is hard to override, soften with filter) */
+body.light .group-hover\:shadow-\[0_0_25px_rgba\(34\,197\,94\,0\.6\)\]:hover {
+    box-shadow: 0 0 20px rgba(22, 163, 74, 0.25) !important;
+}
+body.light .shadow-\[0_0_15px_rgba\(34\,197\,94\,0\.4\)\] {
+    box-shadow: 0 0 12px rgba(22, 163, 74, 0.2) !important;
+}
+
+/* 8. Gallery corner decorations */
+body.light .border-green-500.opacity-60,
+body.light [class*="border-green-500"] {
+    border-color: rgba(22, 163, 74, 0.45) !important;
+}
+
+/* 9. Gallery scan-line & decorative gradient (via-green-500/10) */
+body.light .via-green-500\/10 {
+    --tw-gradient-via: rgba(22, 163, 74, 0.06);
+}
+
+/* 10. Gallery tech badge: bg-green-500 text-black → green / white */
+body.light .bg-green-500.text-black {
+    background-color: #16a34a !important;
+    color: #ffffff !important;
+}
+
+/* 11. Gallery filter active button */
+body.light .border-green-500.bg-green-500\/10.text-green-500 {
+    border-color: rgba(22, 163, 74, 0.5) !important;
+    background-color: rgba(22, 163, 74, 0.08) !important;
+    color: #15803d !important;
+}
+
+/* 12. Gallery image decorative frame gradient */
+body.light .from-green-500\/20 {
+    --tw-gradient-from: rgba(22, 163, 74, 0.12);
+}
+body.light .to-blue-500\/20 {
+    --tw-gradient-to: rgba(37, 99, 235, 0.08);
+}
+
+/* 13. Partner cards: hover green → high-contrast green */
+body.light .group\/project:hover .group-hover\/project\:text-foreground {
+    color: var(--foreground) !important;
+}
+
+/* 14. Member mobile card border-green */
+body.light .border-green-500\/20 {
+    border-color: rgba(22, 163, 74, 0.18) !important;
+}
+
+/* 15. Animate-pulse dot bg-green-500 */
+body.light .bg-green-500.animate-pulse {
+    background-color: #16a34a !important;
+}
+
+/* 16. Footer version badge */
+body.light .text-green-500:not([class*="hover"]) {
+    color: #15803d !important;
+}
+
+/* 17. Scroll button hover: hover:bg-green-500 → high-contrast green */
+body.light button.hover\:bg-green-500:hover {
+    background-color: rgba(22, 163, 74, 0.15) !important;
+    color: #15803d !important;
+}
+
+/* 18. White backgrounds that show up dark */
+body.light .bg-black\/5 {
+    background-color: rgba(15, 23, 42, 0.04) !important;
+}
+body.light .bg-black\/10 {
+    background-color: rgba(15, 23, 42, 0.06) !important;
+}
+
+/* 19. hover:bg-white/5 on member links → subtle indigo tint */
+body.light .hover\:bg-white\/5:hover {
+    background-color: rgba(15, 23, 42, 0.05) !important;
+}
+
+/* 20. Decorative tech text in team cards (ID/USER) */
+body.light .text-green-500.text-right {
+    color: rgba(22, 163, 74, 0.35) !important;
+}
+
+/* 21. Gallery loading spinner border-t-green-500 */
+body.light .border-t-green-500 {
+    border-top-color: #16a34a !important;
+}
+
+/* 22. Contact form: green prompt symbol $ */
+body.light .text-green-500 span,
+body.light span.text-green-500 {
+    color: #16a34a !important;
+}
+
+/* 23. Contact form inputs — light background */
+body.light .bg-background-alt {
+    background-color: var(--background-alt);
+    color: var(--foreground);
+}
+body.light select option {
+    background-color: var(--background-alt);
+    color: var(--foreground);
+}
+
+/* 24. Contact info hover text-green-500 */
+body.light a.group:hover .group-hover\:text-green-500 {
+    color: #16a34a !important;
+}
+
+/* 25. Success / error status banners */
+body.light .text-green-400 {
+    color: #15803d !important;
+}
+body.light .border-green-500\/30 {
+    border-color: rgba(22, 163, 74, 0.25) !important;
+}
+body.light .bg-green-500\/10 {
+    background-color: rgba(22, 163, 74, 0.06) !important;
+}
+
+/* 26. Modal preview overlay image text (md:text-white → foreground) */
+body.light .md\:text-white {
+    color: var(--foreground) !important;
+}
+body.light .md\:text-gray-300 {
+    color: var(--muted) !important;
+}
+body.light .md\:text-gray-200 {
+    color: var(--muted) !important;
+}
+
+/* 27. Modal gradient overlay */
+body.light .md\:from-black\/90 {
+    --tw-gradient-from: rgba(243, 237, 228, 0.97);
+}
+body.light .md\:via-black\/50 {
+    --tw-gradient-via: rgba(243, 237, 228, 0.5);
+}
+
+/* 28. Git branch line stroke color (git-branch-line class) */
+body.light .git-branch-line {
+    stroke: rgba(15, 23, 42, 0.25);
+}
+
+/* 29. ValueCard hover: group-hover:text-green-500 → high-contrast green */
+body.light .group:hover .group-hover\:text-green-500 {
+    color: #16a34a !important;
+}
+
+/* 30. StatCard number: text-green-500 → deep green */
+body.light .text-green-500.tabular-nums,
+body.light [class*="text-green-500"][class*="tabular"] {
+    color: #14532d !important;
+}
+
+/* ── Team member beam connector animation ── */
+.beam-line-draw {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+}
+
+/* ── ScrollIndicator light mode ── */
+body.light #scrollProgress .bg-green-500 {
+    background-color: #16a34a !important;
+}
+body.light #scrollProgress .border-green-500 {
+    border-color: rgba(22, 163, 74, 0.6) !important;
+}
+body.light #scrollProgress .inset-0\.5.rounded-full.bg-green-500 {
+    background-color: #16a34a !important;
+}
+
+/* Custom smooth animations for preview overlay */
+.scale-up-smooth {
+  animation: scaleUpSmooth 0.5s ease-out forwards;
+}
+
+.slide-up-smooth {
+  animation: slideUpSmooth 0.6s ease-out forwards;
+}
+
+/* Line clamp utilities for text truncation */
+.line-clamp-1 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.line-clamp-2 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.line-clamp-3 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+

@@ -28,7 +28,8 @@ contextBridge.exposeInMainWorld("tantalum", {
     getInfo: () => ipcRenderer.invoke("app:get-info"),
     controlWindow: (action) => ipcRenderer.invoke("app:window-control", action),
     dispatchMenuAction: (action) => ipcRenderer.invoke("app:dispatch-menu-action", action),
-    onMenuAction: (callback) => subscribe("app:menu-action", callback)
+    onMenuAction: (callback) => subscribe("app:menu-action", callback),
+    onFullscreenChanged: (callback) => subscribe("app:fullscreen-changed", callback)
   },
   notifications: {
     list: () => ipcRenderer.invoke("notifications:list"),
@@ -76,6 +77,29 @@ contextBridge.exposeInMainWorld("tantalum", {
     },
     functions: {
       createExecution: (payload) => ipcRenderer.invoke("cloud:functions:create-execution", payload)
+    },
+    realtime: {
+      subscribe: async (payload, callback) => {
+        const result = await ipcRenderer.invoke("cloud:realtime:subscribe", payload);
+        if (!result?.success) {
+          throw new Error(result?.error || "Unable to subscribe to cloud realtime.");
+        }
+
+        const subscriptionId = result.subscriptionId;
+        const listener = (_event, message) => {
+          if (message?.subscriptionId === subscriptionId) {
+            callback(message.event);
+          }
+        };
+        ipcRenderer.on("cloud:realtime:event", listener);
+
+        return () => {
+          ipcRenderer.removeListener("cloud:realtime:event", listener);
+          void ipcRenderer.invoke("cloud:realtime:unsubscribe", { subscriptionId });
+        };
+      },
+      onStatus: (callback) => subscribe("cloud:realtime:status", callback),
+      getStatus: () => ipcRenderer.invoke("cloud:realtime:get-status")
     }
   },
   shell: {

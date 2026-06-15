@@ -29,9 +29,11 @@ const LEGACY_VS_CODE_FONT_FAMILY = "'Segoe WPC', 'Segoe UI', system-ui, sans-ser
 export const SYSTEM_FONT_FAMILY = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 export const VS_CODE_FONT_FAMILY = "'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif";
 export const VS_CODE_MONO_FONT_FAMILY = "Consolas, 'Courier New', monospace";
+export const SYSTEM_MONO_FONT_FAMILY = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace";
 
 export const FONT_FAMILY_OPTIONS = [
   { label: 'System default', value: SYSTEM_FONT_FAMILY },
+  { label: 'System monospace', value: SYSTEM_MONO_FONT_FAMILY },
   { label: 'Segoe UI', value: "'Segoe UI', system-ui, sans-serif" },
   { label: 'Consolas', value: VS_CODE_MONO_FONT_FAMILY },
   { label: 'Cascadia Code', value: "'Cascadia Code', Consolas, monospace" },
@@ -45,7 +47,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   fontFamily: SYSTEM_FONT_FAMILY,
   fontSize: 13,
   accentColor: '#0078d4',
-  editorFontFamily: VS_CODE_MONO_FONT_FAMILY,
+  editorFontFamily: SYSTEM_MONO_FONT_FAMILY,
   editorFontSize: 14,
   editorTabSize: 2,
   editorWordWrap: 'off',
@@ -117,7 +119,9 @@ export function normalizeUiPreferences(preferences: Partial<UiPreferences>): UiP
       ? preferences.fontFamily
       : DEFAULT_UI_PREFERENCES.fontFamily;
   const editorFontFamily =
-    typeof preferences.editorFontFamily === 'string' && preferences.editorFontFamily.trim()
+    typeof preferences.editorFontFamily === 'string' &&
+    preferences.editorFontFamily.trim() &&
+    preferences.editorFontFamily !== VS_CODE_MONO_FONT_FAMILY
       ? preferences.editorFontFamily
       : DEFAULT_UI_PREFERENCES.editorFontFamily;
   const accentColor = typeof preferences.accentColor === 'string' && /^#[0-9a-f]{6}$/i.test(preferences.accentColor)
