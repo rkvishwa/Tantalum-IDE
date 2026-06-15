@@ -133,6 +133,9 @@ const serialMonitorSessions = new Map();
 const activeSerialMonitorPorts = new Map();
 const activeBoardPackageInstalls = new Map();
 const activeLibraryInstallOperations = new Map();
+const activeToolchainCompiles = new Map();
+const activeLocalUploads = new Map();
+const activeCloudStorageUploads = new Map();
 const activeLocalUploadPorts = new Set();
 const activeBoardCodePorts = new Set();
 const workspaceScanner = new WorkspaceScanner();
@@ -532,6 +535,20 @@ function abortInstallController(controller) {
   }
 }
 
+function abortToolchainController(controller, label = "toolchain operation") {
+  if (!controller || controller.signal?.aborted) {
+    return false;
+  }
+
+  try {
+    controller.abort();
+    return true;
+  } catch (error) {
+    console.warn(`Unable to abort ${label}:`, error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
 function interruptInstallOperationsForSender(sender, detail = INTERRUPTED_INSTALL_DETAIL) {
   if (!sender) {
     return;
@@ -567,6 +584,44 @@ function interruptAllInstallOperations(detail = INTERRUPTED_INSTALL_DETAIL) {
     const operation = getBoardPackageInstallOperation(installId);
     updateInstallNotificationStatus(installId, "interrupted", detail);
     abortInstallController(operation?.controller);
+  }
+}
+
+function interruptToolchainOperationsForSender(sender) {
+  if (!sender) {
+    return;
+  }
+
+  for (const operation of activeToolchainCompiles.values()) {
+    if (operation?.sender === sender) {
+      abortToolchainController(operation.controller, "compile operation");
+    }
+  }
+
+  for (const operation of activeLocalUploads.values()) {
+    if (operation?.sender === sender) {
+      abortToolchainController(operation.controller, "USB upload");
+    }
+  }
+
+  for (const operation of activeCloudStorageUploads.values()) {
+    if (operation?.sender === sender) {
+      abortToolchainController(operation.controller, "cloud upload");
+    }
+  }
+}
+
+function interruptAllToolchainOperations() {
+  for (const operation of activeToolchainCompiles.values()) {
+    abortToolchainController(operation?.controller, "compile operation");
+  }
+
+  for (const operation of activeLocalUploads.values()) {
+    abortToolchainController(operation?.controller, "USB upload");
+  }
+
+  for (const operation of activeCloudStorageUploads.values()) {
+    abortToolchainController(operation?.controller, "cloud upload");
   }
 }
 
@@ -698,6 +753,42 @@ function localBoardProfilePortKey(profile) {
   return normalizeBoardText(profile?.port).toLowerCase();
 }
 
+function localBoardProfilePhysicalPortKey(profile) {
+  const port = localBoardProfilePortKey(profile);
+  if (process.platform === "darwin") {
+    return port.replace(/^\/dev\/(?:cu|tty)\./, "/dev/serial.");
+  }
+
+  return port;
+}
+
+function localBoardProfileHardwareKey(profile) {
+  const serialNumber = normalizeBoardText(profile?.serialNumber).toLowerCase();
+  const vendorId = normalizeBoardText(profile?.vendorId).toLowerCase();
+  if (serialNumber) {
+    return ["usb-serial", vendorId, serialNumber].filter(Boolean).join(":");
+  }
+
+  const pnpId = normalizeBoardText(profile?.pnpId).toLowerCase();
+  if (pnpId) {
+    return `pnp:${pnpId}`;
+  }
+
+  const locationId = normalizeBoardText(profile?.locationId).toLowerCase();
+  if (locationId) {
+    const productId = normalizeBoardText(profile?.productId).toLowerCase();
+    return ["usb-location", vendorId, productId, locationId].filter(Boolean).join(":");
+  }
+
+  const fingerprint = normalizeBoardText(profile?.fingerprint).toLowerCase();
+  if (fingerprint && !fingerprint.startsWith("manual:")) {
+    return `fingerprint:${fingerprint}`;
+  }
+
+  const physicalPort = localBoardProfilePhysicalPortKey(profile);
+  return physicalPort ? `port:${physicalPort}` : "";
+}
+
 function localBoardProfileFqbnMatches(left, right) {
   const leftFqbn = normalizeBoardText(left?.fqbn || left?.board || left?.boardType);
   const rightFqbn = normalizeBoardText(right?.fqbn || right?.board || right?.boardType);
@@ -717,6 +808,16 @@ function localBoardProfileTrustedIdentityMatches(left, right) {
       localBoardProfileIdentityValueMatches(left?.pnpId, right?.pnpId) ||
       localBoardProfileIdentityValueMatches(left?.locationId, right?.locationId)
   );
+}
+
+function localBoardProfilePhysicalPortMatches(left, right) {
+  const leftPort = localBoardProfilePhysicalPortKey(left);
+  const rightPort = localBoardProfilePhysicalPortKey(right);
+  return Boolean(leftPort && rightPort && leftPort === rightPort);
+}
+
+function localBoardProfilesRepresentSameHardware(left, right) {
+  return Boolean(localBoardProfileTrustedIdentityMatches(left, right) || localBoardProfilePhysicalPortMatches(left, right));
 }
 
 function normalizeLocalBoardProfile(entry) {
@@ -923,6 +1024,7 @@ function replaceLocalBoardProfiles(profiles) {
   const nextProfiles = [];
   const seen = new Set();
   const seenPorts = new Set();
+  const seenHardware = new Set();
   const usedExistingIds = new Set();
 
   for (const profile of profiles) {
@@ -947,6 +1049,15 @@ function replaceLocalBoardProfiles(profiles) {
       continue;
     }
 
+    const hardwareKey = localBoardProfileHardwareKey(nextProfile);
+    if (hardwareKey && seenHardware.has(hardwareKey)) {
+      continue;
+    }
+
+    if (nextProfiles.some((entry) => localBoardProfilesRepresentSameHardware(entry, nextProfile))) {
+      continue;
+    }
+
     if (seen.has(nextProfile.id)) {
       nextProfile = {
         ...nextProfile,
@@ -961,6 +1072,9 @@ function replaceLocalBoardProfiles(profiles) {
       if (portKey) {
         seenPorts.add(portKey);
       }
+      if (hardwareKey) {
+        seenHardware.add(hardwareKey);
+      }
       if (existingProfile) {
         usedExistingIds.add(existingProfile.id);
       }
@@ -973,7 +1087,19 @@ function replaceLocalBoardProfiles(profiles) {
       continue;
     }
 
+    const hardwareKey = localBoardProfileHardwareKey(existingProfile);
+    if (hardwareKey && seenHardware.has(hardwareKey)) {
+      continue;
+    }
+
+    if (nextProfiles.some((entry) => localBoardProfilesRepresentSameHardware(entry, existingProfile))) {
+      continue;
+    }
+
     seen.add(existingProfile.id);
+    if (hardwareKey) {
+      seenHardware.add(hardwareKey);
+    }
     nextProfiles.push({
       ...existingProfile,
       connected: false,
@@ -1272,11 +1398,23 @@ function normalizeToolchainSketchSourcePayload(source) {
   };
 }
 
+function createCanceledError(message = "Operation stopped by user.") {
+  const error = new Error(message);
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  error.canceled = true;
+  return error;
+}
+
+function isCanceledError(error) {
+  return Boolean(error?.canceled || error?.name === "AbortError" || error?.code === "ABORT_ERR");
+}
+
 function toErrorResult(error) {
   return {
     success: false,
     error: error instanceof Error ? error.message : "Unexpected error",
-    ...(error?.canceled || error?.name === "AbortError" || error?.code === "ABORT_ERR" ? { canceled: true } : {}),
+    ...(isCanceledError(error) ? { canceled: true } : {}),
     ...(error?.storage ? { storage: error.storage } : {})
   };
 }
@@ -2528,7 +2666,7 @@ async function pushGitForAgent() {
 
 async function uploadLocalSketchForAgent(code, board, port, onProgress, options = {}) {
   const portValue = String(port || "").trim();
-  const portKey = portValue.toLowerCase();
+  const portKey = serialMonitorPortKey(portValue);
   if (portKey && activeLocalUploadPorts.has(portKey)) {
     throw new Error(`A USB upload is already running on ${portValue}. Wait for it to finish before starting another upload.`);
   }
@@ -3704,7 +3842,7 @@ function parseAppwriteNodePayload(headers, buffer) {
   return { message: text };
 }
 
-async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [], rawBody, headers: requestHeaders = {}, useSession = true }, onUploadProgress) {
+async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [], rawBody, headers: requestHeaders = {}, useSession = true }, onUploadProgress, options = {}) {
   if (!APPWRITE_ENDPOINT || !APPWRITE_PROJECT_ID) {
     throw new Error("Cloud endpoint or project ID is missing from the local manifest.");
   }
@@ -3731,9 +3869,42 @@ async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [
 
   const transport = url.protocol === "https:" ? https : http;
   const totalBytes = bodyBuffer.length;
+  const signal = options?.signal;
 
   return await new Promise((resolve, reject) => {
-    const request = transport.request(url, { method, headers }, (response) => {
+    if (signal?.aborted) {
+      reject(createCanceledError("Cloud upload stopped by user."));
+      return;
+    }
+
+    let settled = false;
+    let request = null;
+    const cleanup = () => {
+      signal?.removeEventListener?.("abort", abortHandler);
+    };
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(signal?.aborted || isCanceledError(error) ? createCanceledError("Cloud upload stopped by user.") : error);
+    };
+    const succeed = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(payload);
+    };
+    const abortHandler = () => {
+      const error = createCanceledError("Cloud upload stopped by user.");
+      request?.destroy(error);
+      fail(error);
+    };
+
+    request = transport.request(url, { method, headers }, (response) => {
       const chunks = [];
 
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
@@ -3745,15 +3916,16 @@ async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [
           const error = new Error(payload?.message || `Cloud request failed with status ${response.statusCode}.`);
           error.status = response.statusCode;
           error.type = payload?.type || "appwrite_error";
-          reject(error);
+          fail(error);
           return;
         }
 
-        resolve(payload);
+        succeed(payload);
       });
     });
 
-    request.on("error", reject);
+    signal?.addEventListener?.("abort", abortHandler, { once: true });
+    request.on("error", fail);
 
     let sentBytes = 0;
     const chunkSize = 256 * 1024;
@@ -3766,6 +3938,11 @@ async function appwriteRawUploadRequest({ method = "POST", pathName, queries = [
     };
 
     const writeNextChunk = () => {
+      if (signal?.aborted) {
+        abortHandler();
+        return;
+      }
+
       if (sentBytes >= totalBytes) {
         request.end();
         emitProgress();
@@ -7076,7 +7253,7 @@ async function uploadCloudFirmwareFromAgent(payload = {}) {
       progress: progressEvent.progress >= 100 ? 90 : uploadProgress,
       filename: compileResult.filename,
     });
-  });
+  }, { signal: payload.signal });
 
   let sourceSnapshot = null;
   let sourceSnapshotWarning = "";
@@ -8379,7 +8556,12 @@ function normalizeSerialMonitorBaudRate(value) {
 }
 
 function serialMonitorPortKey(port) {
-  return String(port || "").trim().toLowerCase();
+  const normalized = String(port || "").trim().toLowerCase();
+  if (process.platform === "darwin") {
+    return normalized.replace(/^\/dev\/(?:cu|tty)\./, "/dev/serial.");
+  }
+
+  return normalized;
 }
 
 function assertSerialMonitorPortAvailable(port, actionLabel) {
@@ -8830,6 +9012,7 @@ function createMainWindow() {
 
   mainWindow.on("closed", () => {
     interruptInstallOperationsForSender(windowWebContents, INTERRUPTED_INSTALL_DETAIL);
+    interruptToolchainOperationsForSender(windowWebContents);
     disposeAllTerminalSessions();
     disposeAllSerialMonitorSessions();
     mainWindow = null;
@@ -9235,7 +9418,25 @@ ipcMain.handle("cloud:databases:delete-document", async (_event, payload) => {
 });
 
 ipcMain.handle("cloud:storage:create-file", async (event, payload) => {
+  const progressId = typeof payload.progressId === "string" && payload.progressId.trim() ? payload.progressId.trim() : "";
+  const controller = progressId ? new AbortController() : null;
+  const abortOnSenderDestroyed = () => abortToolchainController(controller, "cloud upload");
+  let registered = false;
   try {
+    if (progressId) {
+      if (activeCloudStorageUploads.has(progressId)) {
+        return { success: false, error: "A cloud upload is already running with this ID." };
+      }
+      activeCloudStorageUploads.set(progressId, {
+        controller,
+        sender: event.sender,
+        bucketId: payload.bucketId,
+        fileId: payload.fileId,
+      });
+      event.sender.once("destroyed", abortOnSenderDestroyed);
+      registered = true;
+    }
+
     const fileBuffer = Buffer.from(payload.base64, "base64");
     const multipart = buildMultipartBody({
       fields: [
@@ -9251,7 +9452,6 @@ ipcMain.handle("cloud:storage:create-file", async (event, payload) => {
         },
       ],
     });
-    const progressId = typeof payload.progressId === "string" && payload.progressId.trim() ? payload.progressId.trim() : "";
     const sendUploadProgress = progressId
       ? (progress) => {
           event.sender.send("cloud:storage-upload-progress", {
@@ -9272,7 +9472,7 @@ ipcMain.handle("cloud:storage:create-file", async (event, payload) => {
           pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files`,
           rawBody: multipart.body,
           headers: multipart.headers,
-        }, sendUploadProgress)
+        }, sendUploadProgress, { signal: controller?.signal })
       : await appwriteRequest({
           method: "POST",
           pathName: `storage/buckets/${encodeURIComponent(payload.bucketId)}/files`,
@@ -9284,7 +9484,27 @@ ipcMain.handle("cloud:storage:create-file", async (event, payload) => {
     return { success: true, file };
   } catch (error) {
     return toErrorResult(error);
+  } finally {
+    if (registered) {
+      activeCloudStorageUploads.delete(progressId);
+      event.sender.removeListener("destroyed", abortOnSenderDestroyed);
+    }
   }
+});
+
+ipcMain.handle("cloud:storage:cancel-upload", async (_event, payload = {}) => {
+  const progressId = String(payload.progressId || "").trim();
+  if (!progressId) {
+    return { success: false, error: "progressId is required." };
+  }
+
+  const operation = activeCloudStorageUploads.get(progressId);
+  if (!operation) {
+    return { success: true, canceled: false, alreadyStopped: true, progressId };
+  }
+
+  const canceled = abortToolchainController(operation.controller, "cloud upload");
+  return { success: true, canceled, progressId };
 });
 
 ipcMain.handle("cloud:storage:delete-file", async (_event, payload) => {
@@ -10244,8 +10464,28 @@ ipcMain.handle("secrets:delete-board", async (_event, boardId) => {
 });
 
 ipcMain.handle("toolchain:compile", async (_event, payload) => {
+  const compileId = typeof payload?.compileId === "string" && payload.compileId.trim() ? payload.compileId.trim() : "";
+  const controller = compileId ? new AbortController() : null;
+  const abortOnSenderDestroyed = () => abortToolchainController(controller, "compile operation");
+  let registered = false;
   try {
-    const compileId = typeof payload?.compileId === "string" && payload.compileId.trim() ? payload.compileId.trim() : "";
+    if (compileId && activeToolchainCompiles.has(compileId)) {
+      return {
+        success: false,
+        error: "A verification task is already running with this ID."
+      };
+    }
+
+    if (compileId && controller) {
+      activeToolchainCompiles.set(compileId, {
+        controller,
+        sender: _event.sender,
+        board: payload?.board,
+      });
+      _event.sender.once("destroyed", abortOnSenderDestroyed);
+      registered = true;
+    }
+
     const emitCompileProgress = compileId
       ? (progressEvent, stream = "stdout") => {
           const rawChunk = typeof progressEvent === "string" ? progressEvent : progressEvent?.message || progressEvent?.phase || "";
@@ -10265,10 +10505,31 @@ ipcMain.handle("toolchain:compile", async (_event, payload) => {
       sourceRestoreMarker: payload?.sourceRestoreMarker || null,
       sketchSource,
       onProgress: emitCompileProgress,
+      signal: controller?.signal,
     });
   } catch (error) {
     return toErrorResult(error);
+  } finally {
+    if (registered) {
+      activeToolchainCompiles.delete(compileId);
+      _event.sender.removeListener("destroyed", abortOnSenderDestroyed);
+    }
   }
+});
+
+ipcMain.handle("toolchain:cancel-compile", async (_event, payload = {}) => {
+  const compileId = String(payload.compileId || "").trim();
+  if (!compileId) {
+    return { success: false, error: "compileId is required." };
+  }
+
+  const operation = activeToolchainCompiles.get(compileId);
+  if (!operation) {
+    return { success: true, canceled: false, alreadyStopped: true, compileId };
+  }
+
+  const canceled = abortToolchainController(operation.controller, "compile operation");
+  return { success: true, canceled, compileId };
 });
 
 ipcMain.handle("toolchain:detect-local-boards", async (_event, payload = {}) => {
@@ -10406,8 +10667,10 @@ ipcMain.handle("toolchain:view-board-code", async (event, payload = {}) => {
 
 ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => {
   const port = String(payload.port || "").trim();
-  const portKey = port.toLowerCase();
+  const portKey = serialMonitorPortKey(port);
   const uploadId = String(payload.uploadId || `usb-upload:${portKey || Date.now()}`);
+  const controller = new AbortController();
+  const abortOnSenderDestroyed = () => abortToolchainController(controller, "USB upload");
   if (portKey && activeLocalUploadPorts.has(portKey)) {
     return {
       success: false,
@@ -10424,6 +10687,15 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
   if (portKey) {
     activeLocalUploadPorts.add(portKey);
   }
+  activeLocalUploads.set(uploadId, {
+    uploadId,
+    controller,
+    sender: _event.sender,
+    port,
+    portKey,
+    board: payload.board,
+  });
+  _event.sender.once("destroyed", abortOnSenderDestroyed);
 
   try {
     const sketchSource = normalizeToolchainSketchSourcePayload(payload?.sketchSource);
@@ -10442,6 +10714,7 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
       cloudRuntime: payload?.cloudRuntime || null,
       sourceRestoreMarker: payload?.sourceRestoreMarker || null,
       sketchSource,
+      signal: controller.signal,
     });
     if (result?.success && payload.sourceSnapshot) {
       try {
@@ -10472,10 +10745,27 @@ ipcMain.handle("toolchain:upload-local-sketch", async (_event, payload = {}) => 
     }
     return toErrorResult(error);
   } finally {
+    activeLocalUploads.delete(uploadId);
+    _event.sender.removeListener("destroyed", abortOnSenderDestroyed);
     if (portKey) {
       activeLocalUploadPorts.delete(portKey);
     }
   }
+});
+
+ipcMain.handle("toolchain:cancel-local-upload", async (_event, payload = {}) => {
+  const uploadId = String(payload.uploadId || "").trim();
+  const portKey = serialMonitorPortKey(String(payload.port || "").trim());
+  const operation = uploadId
+    ? activeLocalUploads.get(uploadId)
+    : [...activeLocalUploads.values()].find((entry) => entry.portKey && entry.portKey === portKey);
+
+  if (!operation) {
+    return { success: true, canceled: false, alreadyStopped: true, uploadId };
+  }
+
+  const canceled = abortToolchainController(operation.controller, "USB upload");
+  return { success: true, canceled, uploadId: uploadId || operation.uploadId || "" };
 });
 
 ipcMain.handle("toolchain:install-board-package", async (event, payload = {}) => {
@@ -11179,6 +11469,7 @@ if (!gotSingleInstanceLock) {
 
 app.on("before-quit", () => {
   interruptAllInstallOperations("Install was interrupted because Tantalum IDE quit before it finished. Start the install again to resume.");
+  interruptAllToolchainOperations();
   disposeAllTerminalSessions();
   disposeAllSerialMonitorSessions();
   closeAppwriteRealtimeSocket({ statusState: "idle", emitStatus: false });

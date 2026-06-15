@@ -27,6 +27,12 @@ function bytesToFirmwareFile(bytes: Uint8Array<ArrayBuffer>, filename: string) {
   return new File([data], filename, { type: 'application/octet-stream' });
 }
 
+function createCanceledError(message = 'Firmware upload stopped.') {
+  const error = new Error(message);
+  Object.assign(error, { canceled: true, name: 'AbortError', code: 'ABORT_ERR' });
+  return error;
+}
+
 const FIRMWARE_HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
 const FIRMWARE_HISTORY_LIMIT = 50;
 const FIRMWARE_SELECT_FIELDS = [
@@ -109,6 +115,7 @@ export async function uploadFirmwareRelease(payload: {
   };
   notes?: string;
   progressId?: string;
+  isCanceled?: () => boolean;
   sourceSnapshot?: {
     fileId: string;
     checksum: string;
@@ -119,6 +126,9 @@ export async function uploadFirmwareRelease(payload: {
   const firmwareBytes = base64ToUint8Array(payload.compileResult.binData);
   const firmwareSize = firmwareBytes.byteLength;
   const checksum = await sha256HexBytes(firmwareBytes);
+  if (payload.isCanceled?.()) {
+    throw createCanceledError();
+  }
   const file = await storage.createFile(
     appwriteConfig.firmwareBucketId,
     payload.firmwareId,
@@ -126,9 +136,17 @@ export async function uploadFirmwareRelease(payload: {
     firmwareFilePermissions(payload.user.$id),
     payload.progressId,
   );
+  if (payload.isCanceled?.()) {
+    await storage.deleteFile(appwriteConfig.firmwareBucketId, file.$id).catch(() => undefined);
+    throw createCanceledError();
+  }
 
   const now = new Date().toISOString();
   const existing = await listDeployedFirmware(payload.board.$id);
+  if (payload.isCanceled?.()) {
+    await storage.deleteFile(appwriteConfig.firmwareBucketId, file.$id).catch(() => undefined);
+    throw createCanceledError();
+  }
 
   await Promise.all(
     existing

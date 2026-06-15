@@ -10,8 +10,10 @@ import {
   normalizeAgentOutputStyle,
 } from './outputPolicy.js';
 import {
+  createMaxCompletionTokensRetryRequestBody,
   createTemperatureRetryRequestBody,
   isDefaultOnlyTemperatureError,
+  isUnsupportedMaxTokensError,
 } from './requestPolicy.js';
 import { resolveStoredApiKey } from './secretEnvelope.js';
 
@@ -528,6 +530,7 @@ async function resolveManagedProvider(databases, userId, mode, incomingModel) {
     modelAlias: mode === 'power' ? 'Power' : 'Fast',
     sourceLabel: poolKey.providerLabel || 'Managed',
     reasoningEffort: mode === 'power' ? poolKey.powerReasoningEffort || poolKey.planReasoningEffort || DEFAULT_POWER_REASONING_EFFORT : null,
+    useMaxCompletionTokens: mode === 'power',
   };
 }
 
@@ -641,15 +644,23 @@ async function postUpstream(provider, upstreamBody, endpointPath) {
 }
 
 async function callUpstream(provider, requestBody, endpointPath) {
-  const upstreamBody = {
+  const baseUpstreamBody = {
     ...requestBody,
     model: provider.model,
   };
+  const upstreamBody =
+    provider.useMaxCompletionTokens && endpointPath === '/chat/completions'
+      ? createMaxCompletionTokensRetryRequestBody(baseUpstreamBody) || baseUpstreamBody
+      : baseUpstreamBody;
 
   try {
     return await postUpstream(provider, upstreamBody, endpointPath);
   } catch (error) {
-    const retryBody = isDefaultOnlyTemperatureError(error) ? createTemperatureRetryRequestBody(upstreamBody) : null;
+    const retryBody = isDefaultOnlyTemperatureError(error)
+      ? createTemperatureRetryRequestBody(upstreamBody)
+      : isUnsupportedMaxTokensError(error)
+        ? createMaxCompletionTokensRetryRequestBody(upstreamBody)
+        : null;
     if (!retryBody) {
       throw error;
     }

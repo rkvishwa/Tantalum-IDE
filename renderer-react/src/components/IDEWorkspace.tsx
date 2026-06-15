@@ -386,6 +386,15 @@ type FirmwareReleaseProgressTask = {
   timerId: number | null;
 };
 
+type ToolchainStopOperation = {
+  kind: 'verify' | 'usb-upload' | 'firmware-upload';
+  label: string;
+  compileId?: string;
+  uploadId?: string;
+  storageProgressId?: string;
+  notificationId?: string;
+};
+
 type LibraryDependency = string | {
   name?: string;
   version?: string;
@@ -528,6 +537,21 @@ function createToolchainTaskId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+function createToolchainCanceledError(message = 'Operation stopped by user.') {
+  const error = new Error(message);
+  Object.assign(error, { canceled: true, name: 'AbortError', code: 'ABORT_ERR' });
+  return error;
+}
+
+function isToolchainCanceled(value: unknown) {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as { canceled?: unknown; name?: unknown; code?: unknown };
+  return Boolean(candidate.canceled || candidate.name === 'AbortError' || candidate.code === 'ABORT_ERR');
+}
+
 function getBoardOptionLabel(fqbn: string) {
   return BOARD_OPTIONS.find((option) => option.value === fqbn)?.label ?? fqbn;
 }
@@ -598,6 +622,21 @@ function boardOptionMatchesQuery(option: LocalBoardOption, query: string) {
 
 function localBoardDisplayName(row: Pick<LocalBoardRow, 'name' | 'boardLabel' | 'fqbn' | 'port'>) {
   return row.name || row.boardLabel || getBoardOptionLabel(row.fqbn) || row.port || 'Local board';
+}
+
+function isGenericLocalBoardDisplayName(value: string | null | undefined) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized === 'serial device' ||
+    normalized === 'usb serial device' ||
+    normalized === 'espressif usb serial device' ||
+    normalized === 'arduino-compatible usb device' ||
+    normalized.endsWith(' usb serial adapter')
+  );
 }
 
 function localBoardConfidenceLabel(confidence: number | null | undefined) {
@@ -1409,7 +1448,8 @@ const PLATFORM_DESCRIPTION_COLLAPSED_LINES = 5;
 const AUTO_SAVE_DELAY_MS = 1000;
 const LOCAL_BOARD_AUTO_REFRESH_MS = 5000;
 const LOCAL_BOARD_UPLOAD_SETTLE_MS = 8000;
-const REMOTE_BOARD_AUTO_REFRESH_MS = 120000;
+const REMOTE_BOARD_AUTO_REFRESH_MS = 30000;
+const BOARD_STATUS_RERENDER_MS = 15000;
 const CLOUD_BOARD_HEARTBEAT_POLL_MS = 5000;
 const CLOUD_BOARD_HEARTBEAT_TIMEOUT_MS = 90000;
 const RIGHT_PANEL_HIDDEN_BREAKPOINT = 1080;
@@ -1636,6 +1676,11 @@ type LocalBoardEdit = {
   boardLabel?: string;
   port?: string;
   otaUpdateMode?: OtaUpdateMode;
+  renameCloudBoard?: boolean;
+};
+
+type CloudBoardEdit = {
+  name?: string;
 };
 
 type LocalBoardOption = {
@@ -3009,6 +3054,7 @@ export function IDEWorkspace({
     baudRate: 115200,
   });
   const [boards, setBoards] = useState<BoardDocument[]>([]);
+  const [, setBoardStatusRefreshTick] = useState(0);
   const [boardsLoading, setBoardsLoading] = useState(() => hasRequiredCloudConfiguration());
   const [boardsError, setBoardsError] = useState<string | null>(null);
   const [selectedBoardId, setSelectedBoardId] = useState<string>('');
@@ -3018,6 +3064,7 @@ export function IDEWorkspace({
   const [localBoardAutoScanLoading, setLocalBoardAutoScanLoading] = useState(false);
   const [localBoardsError, setLocalBoardsError] = useState<string | null>(null);
   const [localBoardEdits, setLocalBoardEdits] = useState<Record<string, LocalBoardEdit>>({});
+  const [cloudBoardEdits, setCloudBoardEdits] = useState<Record<string, CloudBoardEdit>>({});
   const [cloudBoardOtaModeEdits, setCloudBoardOtaModeEdits] = useState<Record<string, OtaUpdateMode>>({});
   const [manualLocalBoardKeys, setManualLocalBoardKeys] = useState<string[]>([]);
   const [selectedLocalBoardId, setSelectedLocalBoardId] = useState(() => readStoredSelectedLocalBoardId());
@@ -3032,7 +3079,7 @@ export function IDEWorkspace({
   const [boardsHubLocalFilter, setBoardsHubLocalFilter] = useState<'all' | 'connected' | 'saved'>('all');
   const [boardsHubLocalQuery, setBoardsHubLocalQuery] = useState('');
   const [boardsHubCloudQuery, setBoardsHubCloudQuery] = useState('');
-  const [localBoardPickerOpen, setLocalBoardPickerOpen] = useState<{ rowKey: string; picker: 'board' | 'port' } | null>(null);
+  const [localBoardPickerOpen, setLocalBoardPickerOpen] = useState<{ rowKey: string; picker: 'board' | 'port' | 'cloud' } | null>(null);
   const [cloudLinkLocalPickerOpen, setCloudLinkLocalPickerOpen] = useState(false);
   const [selectedBoardSecrets, setSelectedBoardSecrets] = useState<BoardSecret | null>(null);
   const [firmwareHistory, setFirmwareHistory] = useState<FirmwareDocument[]>([]);
@@ -3048,6 +3095,7 @@ export function IDEWorkspace({
     otaUpdateMode: defaultOtaUpdateMode(),
   });
   const [selectedLinkLocalProfileId, setSelectedLinkLocalProfileId] = useState('');
+  const [selectedLinkCloudBoardIds, setSelectedLinkCloudBoardIds] = useState<Record<string, string>>({});
   const [pendingSelectedLocalCloudLink, setPendingSelectedLocalCloudLink] = useState<{ profileId: string; boardId: string } | null>(null);
   const [pendingCloudRuntimeInstall, setPendingCloudRuntimeInstall] = useState<{ profileId: string; boardId: string } | null>(null);
   const [usbWifiModalOpen, setUsbWifiModalOpen] = useState(false);
@@ -3059,6 +3107,8 @@ export function IDEWorkspace({
   const [releaseVersion, setReleaseVersion] = useState('1.0.1');
   const [releaseNotes, setReleaseNotes] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [activeToolchainStop, setActiveToolchainStopState] = useState<ToolchainStopOperation | null>(null);
+  const [toolchainStopBusy, setToolchainStopBusy] = useState(false);
   const [libraryQuery, setLibraryQuery] = useState('');
   const [libraryManagerTab, setLibraryManagerTab] = useState<LibraryManagerTab>('all');
   const [libraryDetailTab, setLibraryDetailTab] = useState<LibraryDetailTab>('overview');
@@ -3102,6 +3152,9 @@ export function IDEWorkspace({
   const localBoardReconnectScanSignatureRef = useRef('');
   const localBoardUploadInProgressRef = useRef(false);
   const localBoardUploadProgressRef = useRef<UsbUploadProgressTask | null>(null);
+  const activeToolchainStopRef = useRef<ToolchainStopOperation | null>(null);
+  const toolchainStopBusyRef = useRef(false);
+  const firmwareReleaseCancelRequestedRef = useRef(false);
   const invalidCloudLinkRepairRef = useRef(false);
   const firmwareReleaseUploadInProgressRef = useRef(false);
   const boardsRealtimeFallbackTimerRef = useRef<number | null>(null);
@@ -3323,29 +3376,64 @@ export function IDEWorkspace({
       (selectedEditorCloudBoard && selectedEditorCloudStatus === 'online'),
   );
   const editorUploadBusy = isLocalUploadBusyAction(busyAction) || busyAction === 'upload';
+  const editorUploadCanStop = Boolean(
+    activeToolchainStop &&
+      (busyAction === 'verify-before-upload' || busyAction === 'prepare-upload' || busyAction === 'upload-local' || busyAction === 'upload'),
+  );
+  const verifyCanStop = Boolean(activeToolchainStop && busyAction === 'compile');
   const editorUploadDisabled = !activeTab ||
-    busyAction === 'compile' ||
-    editorUploadBusy ||
+    (busyAction === 'compile' && !editorUploadCanStop) ||
+    (editorUploadBusy && !editorUploadCanStop) ||
+    (editorUploadCanStop && toolchainStopBusy) ||
     (selectedEditorCloudBoard ? false : !canAttemptLocalUpload(selectedEditorLocalBoard));
   const releaseUploadBusy = busyAction === 'verify-before-upload' || busyAction === 'upload';
-  const releaseUploadLabel = busyAction === 'verify-before-upload'
-    ? 'Verifying...'
-    : busyAction === 'upload'
-      ? 'Uploading...'
-      : 'Upload release';
-  const editorUploadLabel = selectedEditorCloudBoard
-    ? busyAction === 'verify-before-upload'
-      ? 'Verifying...'
-      : busyAction === 'upload'
-        ? 'Uploading OTA...'
-        : 'Upload OTA'
+  const releaseUploadLabel = toolchainStopBusy && releaseUploadBusy
+    ? 'Stopping...'
     : busyAction === 'verify-before-upload'
-      ? 'Verifying...'
-      : busyAction === 'prepare-upload'
-        ? 'Preparing...'
-        : busyAction === 'upload-local'
-          ? 'Uploading...'
-          : 'Upload';
+      ? 'Stop verify'
+      : busyAction === 'upload'
+        ? 'Stop upload'
+        : 'Upload release';
+  const editorUploadLabel = toolchainStopBusy && editorUploadCanStop
+    ? 'Stopping...'
+    : selectedEditorCloudBoard
+      ? busyAction === 'verify-before-upload'
+        ? 'Stop verify'
+        : busyAction === 'upload'
+          ? 'Stop OTA'
+          : 'Upload OTA'
+      : busyAction === 'verify-before-upload'
+        ? 'Stop verify'
+        : busyAction === 'prepare-upload'
+          ? 'Preparing...'
+          : busyAction === 'upload-local'
+            ? 'Stop upload'
+            : 'Upload';
+  const verifyButtonLabel = toolchainStopBusy && verifyCanStop
+    ? 'Stopping...'
+    : verifyCanStop
+      ? 'Stop verify'
+      : 'Verify';
+  const verifyButtonDisabled = !activeTab ||
+    (busyAction === 'compile' ? !verifyCanStop : Boolean(busyAction === 'verify-before-upload' || editorUploadBusy));
+  const releaseUploadDisabled = releaseUploadBusy ? !activeToolchainStop || toolchainStopBusy : false;
+  const releaseUploadIcon = releaseUploadBusy
+    ? toolchainStopBusy
+      ? <LoaderCircle size={13} className="spin" />
+      : <CircleStop size={14} />
+    : null;
+  const editorUploadIcon = editorUploadCanStop
+    ? (toolchainStopBusy ? <LoaderCircle size={13} className="spin" /> : <CircleStop size={14} />)
+    : editorUploadBusy
+      ? <LoaderCircle size={13} className="spin" />
+      : selectedEditorCloudBoard
+        ? <Wifi size={14} />
+        : <HardDriveUpload size={14} />;
+  const verifyButtonIcon = verifyCanStop
+    ? (toolchainStopBusy ? <LoaderCircle size={13} className="spin" /> : <CircleStop size={14} />)
+    : busyAction === 'compile' || busyAction === 'verify-before-upload'
+      ? <LoaderCircle size={13} className="spin" />
+      : <CheckCircle2 size={14} />;
   const usbWifiTargetRow = usbWifiProfileId
     ? localBoardRows.find((row) => row.profileId === usbWifiProfileId) ?? null
     : null;
@@ -4007,6 +4095,117 @@ export function IDEWorkspace({
     }
 
     return task;
+  }
+
+  function setActiveToolchainStopOperation(operation: ToolchainStopOperation | null) {
+    activeToolchainStopRef.current = operation;
+    setActiveToolchainStopState(operation);
+  }
+
+  function clearActiveToolchainStopOperation(operation: ToolchainStopOperation | null) {
+    if (operation && activeToolchainStopRef.current !== operation) {
+      return;
+    }
+    setActiveToolchainStopOperation(null);
+  }
+
+  function throwIfFirmwareReleaseCanceled() {
+    if (firmwareReleaseCancelRequestedRef.current) {
+      throw createToolchainCanceledError('Firmware upload stopped.');
+    }
+  }
+
+  function finishCanceledFirmwareRelease(
+    notificationId: string,
+    toastId: number,
+    boardName: string,
+    boardId: string,
+    boardType: string,
+    version: string,
+    filename?: string,
+  ) {
+    const detail = 'Firmware upload stopped.';
+    const canceledProgressTask = finishFirmwareReleaseProgressTask(notificationId, { detail }, 'canceled');
+    persistToolchainNotification({
+      id: notificationId,
+      kind: 'firmware-upload',
+      title: `Stopped ${boardName} ${version}`,
+      detail,
+      status: 'canceled',
+      phase: 'canceled',
+      progress: canceledProgressTask?.progress ?? null,
+      name: boardName,
+      version,
+      target: boardName,
+      metadata: {
+        boardId,
+        boardType,
+        filename,
+      },
+    });
+    finishToast(toastId, {
+      message: 'Firmware upload stopped',
+      detail,
+      tone: 'info',
+      progress: canceledProgressTask?.progress ?? null,
+    });
+    pushConsole(detail, 'info');
+  }
+
+  async function stopActiveToolchainOperation() {
+    const operation = activeToolchainStopRef.current;
+    if (!operation || toolchainStopBusyRef.current) {
+      return;
+    }
+
+    const confirmed = await confirm({
+      title: operation.kind === 'verify'
+        ? 'Stop verification?'
+        : operation.kind === 'usb-upload'
+          ? 'Stop USB upload?'
+          : 'Stop OTA upload?',
+      message: `Stop ${operation.label}?`,
+      detail: operation.kind === 'verify'
+        ? 'The Arduino CLI verify process will be stopped and its temporary build files will be cleaned up.'
+        : 'The current upload process will be stopped and temporary build files will be cleaned up.',
+      tone: 'warning',
+      confirmLabel: operation.kind === 'verify' ? 'Stop verify' : 'Stop upload',
+      cancelLabel: 'Keep running',
+    });
+
+    if (!confirmed) {
+      return;
+    }
+    if (activeToolchainStopRef.current !== operation) {
+      return;
+    }
+
+    if (operation.kind === 'firmware-upload') {
+      firmwareReleaseCancelRequestedRef.current = true;
+    }
+
+    toolchainStopBusyRef.current = true;
+    setToolchainStopBusy(true);
+    try {
+      const cancellations: Array<Promise<unknown>> = [];
+      if (operation.compileId) {
+        cancellations.push(window.tantalum.toolchain.cancelCompile({ compileId: operation.compileId }));
+      }
+      if (operation.uploadId) {
+        cancellations.push(window.tantalum.toolchain.cancelLocalUpload({ uploadId: operation.uploadId }));
+      }
+      if (operation.storageProgressId) {
+        cancellations.push(window.tantalum.cloud.storage.cancelUpload({ progressId: operation.storageProgressId }));
+      }
+
+      if (cancellations.length > 0) {
+        await Promise.all(cancellations.map((request) => request.catch(() => null)));
+      }
+      pushToast('Stopping current task...', 'info');
+    } finally {
+      toolchainStopBusyRef.current = false;
+      setToolchainStopBusy(false);
+    }
   }
 
   const refreshGitChangeIndicator = useCallback(async (targetWorkspacePath = workspacePath) => {
@@ -5480,11 +5679,13 @@ export function IDEWorkspace({
           usedExistingProfileIds.add(existingProfile.id);
         }
         const detectedFqbn = normalizeUploadableBoardFqbn(detectedBoard.fqbn);
+        const detectedBoardLabel = detectedBoard.boardLabel || (detectedFqbn ? getBoardOptionLabel(detectedFqbn) : 'Local board');
+        const existingName = reuseExistingProfile ? existingProfile?.name || '' : '';
         return {
           id: reuseExistingProfile ? existingProfile?.id : undefined,
-          name: reuseExistingProfile ? existingProfile?.name || '' : '',
+          name: isGenericLocalBoardDisplayName(existingName) ? detectedBoardLabel : existingName,
           fqbn: detectedFqbn,
-          boardLabel: detectedBoard.boardLabel || (detectedFqbn ? getBoardOptionLabel(detectedFqbn) : 'Local board'),
+          boardLabel: detectedBoardLabel,
           port: detectedBoard.port,
           protocol: detectedBoard.protocol,
           protocolLabel: detectedBoard.protocolLabel,
@@ -5546,6 +5747,28 @@ export function IDEWorkspace({
       return next;
     });
     setLocalBoardCatalogQuery('');
+  }
+
+  function updateCloudBoardEdit(boardId: string, patch: CloudBoardEdit) {
+    setCloudBoardEdits((current) => ({
+      ...current,
+      [boardId]: {
+        ...(current[boardId] ?? {}),
+        ...patch,
+      },
+    }));
+  }
+
+  function cloudBoardDraftName(board: BoardDocument) {
+    return cloudBoardEdits[board.$id]?.name ?? board.name;
+  }
+
+  function clearCloudBoardEdit(boardId: string) {
+    setCloudBoardEdits((current) => {
+      const next = { ...current };
+      delete next[boardId];
+      return next;
+    });
   }
 
   async function refreshInstalledLibraries() {
@@ -6808,7 +7031,7 @@ export function IDEWorkspace({
     };
   }
 
-  async function runVerifySketch(options: { board: string; busyAction: string; title: string; detail: string; successMessage?: string }) {
+  async function runVerifySketch(options: { board: string; busyAction: string; title: string; detail: string; successMessage?: string; stopLabel?: string }) {
     if (!activeTab && !workspacePath) {
       return false;
     }
@@ -6828,6 +7051,13 @@ export function IDEWorkspace({
     const compileSubject = sketchSource.kind === 'workspace'
       ? `Project Space ${sketchSource.entryFileName || WORKSPACE_MAIN_SKETCH_FILE}`
       : activeTab?.name || 'current file';
+    const compileId = createToolchainTaskId('verify');
+    const stopOperation: ToolchainStopOperation = {
+      kind: 'verify',
+      label: options.stopLabel || `verification for ${compileSubject}`,
+      compileId,
+    };
+    setActiveToolchainStopOperation(stopOperation);
     pushConsole(`Compiling ${compileSubject} for ${getBoardOptionLabel(options.board)}...`);
     const toastId = pushToast(options.title, 'info', undefined, {
       detail: options.detail,
@@ -6840,9 +7070,20 @@ export function IDEWorkspace({
         code: editorValue,
         board: options.board,
         sketchSource,
+        compileId,
       });
 
       if (!result.success) {
+        if ('canceled' in result && result.canceled) {
+          pushConsole('Verification stopped.', 'info');
+          finishToast(toastId, {
+            message: 'Verification stopped',
+            detail: 'Arduino CLI verify was stopped.',
+            tone: 'info',
+            progress: null,
+          });
+          return false;
+        }
         pushConsole(result.error, 'error');
         finishToast(toastId, {
           message: 'Verification failed',
@@ -6863,6 +7104,16 @@ export function IDEWorkspace({
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to verify Project.';
+      if (isToolchainCanceled(error)) {
+        pushConsole('Verification stopped.', 'info');
+        finishToast(toastId, {
+          message: 'Verification stopped',
+          detail: 'Arduino CLI verify was stopped.',
+          tone: 'info',
+          progress: null,
+        });
+        return false;
+      }
       pushConsole(message, 'error');
       finishToast(toastId, {
         message: 'Verification failed',
@@ -6872,6 +7123,7 @@ export function IDEWorkspace({
       });
       return false;
     } finally {
+      clearActiveToolchainStopOperation(stopOperation);
       verifyInProgressRef.current = false;
       setBusyAction(null);
     }
@@ -6965,6 +7217,46 @@ export function IDEWorkspace({
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to update board code visibility.';
       pushToast('Unable to update code visibility.', 'error', undefined, { detail: message });
+      pushConsole(message, 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function renameCloudBoard(board: BoardDocument, name: string) {
+    const nextName = name.trim();
+    if (!nextName) {
+      throw new Error('Cloud board name is required.');
+    }
+
+    if (nextName === board.name) {
+      return board;
+    }
+
+    const updatedBoard = await updateBoard(board.$id, {
+      name: nextName,
+      updatedAt: new Date().toISOString(),
+    });
+    setBoards((current) => current.map((entry) => (entry.$id === updatedBoard.$id ? updatedBoard : entry)));
+    return updatedBoard;
+  }
+
+  async function handleSaveCloudBoardName(board: BoardDocument) {
+    const nextName = cloudBoardDraftName(board).trim();
+    if (!nextName) {
+      pushToast('Cloud board name is required.', 'error');
+      return;
+    }
+
+    setBusyAction(`rename-cloud-board:${board.$id}`);
+    try {
+      const updatedBoard = await renameCloudBoard(board, nextName);
+      clearCloudBoardEdit(board.$id);
+      await refreshBoardsList({ silent: true, bypassCache: true });
+      pushToast(`Renamed cloud board to ${updatedBoard.name}.`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to rename cloud board.';
+      pushToast('Unable to rename cloud board.', 'error', undefined, { detail: message });
       pushConsole(message, 'error');
     } finally {
       setBusyAction(null);
@@ -7305,6 +7597,7 @@ export function IDEWorkspace({
         title: `Verifying ${activeTab?.name || projectIntegrity.entryFile || 'Project'}`,
         detail: `Checking ${activeTab?.name || projectIntegrity.entryFile || 'Project'} before uploading to ${boardName}...`,
         successMessage: 'Verification passed',
+        stopLabel: `verification before USB upload to ${boardName}`,
       });
 
       if (!verified) {
@@ -7491,9 +7784,16 @@ export function IDEWorkspace({
     setBusyAction('upload-local');
     openConsolePanel('output');
     pushConsole(`Uploading ${uploadSubject} to ${boardName} on ${uploadBoard.port}...`);
+    const stopOperation: ToolchainStopOperation = {
+      kind: 'usb-upload',
+      label: `USB upload to ${boardName}`,
+      uploadId: notificationId,
+      notificationId,
+    };
 
     let sourceSnapshot: BoardCodeSourceSnapshotInput | null = null;
     let sourceRestoreMarker: SourceRestoreMarker | null = null;
+    let lastUploadProgress: number | null = null;
     const sourceSnapshotsEnabled = uiPreferences.sourceSnapshotsEnabled !== false;
     if (sourceSnapshotsEnabled) {
       try {
@@ -7525,6 +7825,7 @@ export function IDEWorkspace({
           uploadId: notificationId,
         });
       }
+      setActiveToolchainStopOperation(stopOperation);
       result = await window.tantalum.toolchain.uploadLocalSketch({
         code: editorValue,
         board: uploadBoard.fqbn,
@@ -7602,23 +7903,54 @@ export function IDEWorkspace({
       result = {
         success: false as const,
         error: error instanceof Error ? error.message : 'Unable to upload Project.',
+        ...(isToolchainCanceled(error) ? { canceled: true as const } : {}),
       };
     } finally {
       if (sourceRestoreMarker && result && !result.success) {
         await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker }).catch(() => undefined);
       }
       if (localBoardUploadProgressRef.current?.uploadId === notificationId) {
+        lastUploadProgress = localBoardUploadProgressRef.current.lastProgress;
         const bufferedLine = localBoardUploadProgressRef.current.lineBuffer.trim();
         if (bufferedLine) {
           pushConsole(bufferedLine, 'info');
         }
         localBoardUploadProgressRef.current = null;
       }
+      clearActiveToolchainStopOperation(stopOperation);
       setBusyAction(null);
       resumeLocalBoardMonitoringSoon();
     }
 
     if (!result.success) {
+      const wasCanceled = 'canceled' in result && Boolean(result.canceled);
+      if (wasCanceled) {
+        const detail = 'USB upload stopped.';
+        pushConsole(detail, 'info');
+        persistToolchainNotification({
+          id: notificationId,
+          kind: 'usb-upload',
+          title: `Stopped upload to ${boardName}`,
+          detail,
+          status: 'canceled',
+          phase: 'canceled',
+          progress: lastUploadProgress,
+          name: boardName,
+          target: uploadBoard.port,
+          metadata: {
+            board: uploadBoard.fqbn,
+            port: uploadBoard.port,
+            fileName: uploadFileName,
+          },
+        });
+        finishToast(toastId, {
+          message: 'USB upload stopped',
+          detail,
+          tone: 'info',
+          progress: null,
+        });
+        return;
+      }
       const blockerActions: Toast['actions'] | undefined = isLocalBoardUploadRecoverableSerialError(result.error) && uploadBoard.port
         ? [{
             label: 'Find blockers',
@@ -7754,6 +8086,7 @@ export function IDEWorkspace({
         title: `Verifying ${activeTab?.name || projectIntegrity.entryFile || 'Project'}`,
         detail: `Checking ${activeTab?.name || projectIntegrity.entryFile || 'Project'} before OTA upload to ${targetBoard.name}...`,
         successMessage: 'Verification passed',
+        stopLabel: `verification before OTA upload to ${targetBoard.name}`,
       });
 
       if (!verified) {
@@ -7766,11 +8099,19 @@ export function IDEWorkspace({
       return;
     }
 
+    firmwareReleaseCancelRequestedRef.current = false;
     const boardName = targetBoard.name;
     const notificationId = createToolchainTaskId('firmware-upload');
     const firmwareId = `fw_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
     const deploymentId = `dep_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
     const uploadProgressId = `${notificationId}:storage`;
+    const stopOperation: ToolchainStopOperation = {
+      kind: 'firmware-upload',
+      label: `OTA upload for ${boardName}`,
+      compileId: notificationId,
+      storageProgressId: uploadProgressId,
+      notificationId,
+    };
     const initialProgress = FIRMWARE_RELEASE_PHASE_CONFIG.prepare.start;
     const initialDetail = FIRMWARE_RELEASE_PHASE_CONFIG.prepare.fallbackDetail;
     const startedAt = currentTimestampMs();
@@ -7811,6 +8152,7 @@ export function IDEWorkspace({
       compileEventCount: 0,
       uploadProgressId,
     });
+    setActiveToolchainStopOperation(stopOperation);
 
     setBusyAction('upload');
     pushConsole(`Building ${targetBoard.name} firmware release ${releaseVersion}...`);
@@ -7841,6 +8183,7 @@ export function IDEWorkspace({
     const secretResult = await window.tantalum.secrets.getBoardSecrets(targetBoard.$id);
     if (!secretResult.success || !secretResult.secrets?.apiToken || !secretResult.secrets?.commandSecret || !secretResult.secrets?.mqttTopic || !secretResult.secrets?.provisioningPop) {
       setBusyAction(null);
+      clearActiveToolchainStopOperation(stopOperation);
       const message = 'Local board secrets are missing. Rotate the board token, then install Tantalum Cloud again.';
       pushConsole(message, 'error');
       const failedProgressTask = finishFirmwareReleaseProgressTask(notificationId, {
@@ -7852,6 +8195,12 @@ export function IDEWorkspace({
         tone: 'error',
         progress: failedProgressTask?.progress ?? initialProgress,
       });
+      return;
+    }
+    if (firmwareReleaseCancelRequestedRef.current) {
+      setBusyAction(null);
+      clearActiveToolchainStopOperation(stopOperation);
+      finishCanceledFirmwareRelease(notificationId, toastId, boardName, targetBoard.$id, targetBoard.boardType, releaseVersion);
       return;
     }
 
@@ -7883,6 +8232,7 @@ export function IDEWorkspace({
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unable to prepare cloud source restore marker.';
         setBusyAction(null);
+        clearActiveToolchainStopOperation(stopOperation);
         pushConsole(message, 'error');
         const failedProgressTask = finishFirmwareReleaseProgressTask(notificationId, {
           detail: message,
@@ -7895,6 +8245,15 @@ export function IDEWorkspace({
         });
         return;
       }
+    }
+    if (firmwareReleaseCancelRequestedRef.current) {
+      if (releaseSourceRestoreMarker) {
+        await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
+      }
+      setBusyAction(null);
+      clearActiveToolchainStopOperation(stopOperation);
+      finishCanceledFirmwareRelease(notificationId, toastId, boardName, targetBoard.$id, targetBoard.boardType, releaseVersion);
+      return;
     }
 
     let compileResult;
@@ -7935,6 +8294,7 @@ export function IDEWorkspace({
       compileResult = {
         success: false as const,
         error: error instanceof Error ? error.message : 'Firmware build failed.',
+        ...(isToolchainCanceled(error) ? { canceled: true as const } : {}),
       };
     }
 
@@ -7943,6 +8303,11 @@ export function IDEWorkspace({
         await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
       }
       setBusyAction(null);
+      clearActiveToolchainStopOperation(stopOperation);
+      if ('canceled' in compileResult && compileResult.canceled) {
+        finishCanceledFirmwareRelease(notificationId, toastId, boardName, targetBoard.$id, targetBoard.boardType, releaseVersion);
+        return;
+      }
       pushConsole(compileResult.error, 'error');
       const failedProgressTask = finishFirmwareReleaseProgressTask(notificationId, {
         detail: compileResult.error,
@@ -7971,6 +8336,15 @@ export function IDEWorkspace({
       });
       return;
     }
+    if (firmwareReleaseCancelRequestedRef.current) {
+      if (releaseSourceRestoreMarker) {
+        await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
+      }
+      setBusyAction(null);
+      clearActiveToolchainStopOperation(stopOperation);
+      finishCanceledFirmwareRelease(notificationId, toastId, boardName, targetBoard.$id, targetBoard.boardType, releaseVersion);
+      return;
+    }
 
     const releaseSourceRestoreDetail = releaseSourceRestoreMarker && compileResult.sourceRestoreMarkerEmbedded
       ? 'Source restore marker embedded for View Code.'
@@ -7986,6 +8360,7 @@ export function IDEWorkspace({
     });
 
     try {
+      throwIfFirmwareReleaseCanceled();
       persistToolchainNotification({
         id: notificationId,
         kind: 'firmware-upload',
@@ -8062,6 +8437,7 @@ export function IDEWorkspace({
         version: releaseVersion,
         notes: releaseNotes,
         sourceSnapshot: uploadedSourceSnapshot,
+        isCanceled: () => firmwareReleaseCancelRequestedRef.current,
         compileResult: {
           filename: compileResult.filename,
           binData: compileResult.binData,
@@ -8133,6 +8509,10 @@ export function IDEWorkspace({
       if (releaseSourceRestoreMarker) {
         await window.tantalum.toolchain.discardSourceRestoreMarker({ sourceRestoreMarker: releaseSourceRestoreMarker }).catch(() => undefined);
       }
+      if (isToolchainCanceled(error)) {
+        finishCanceledFirmwareRelease(notificationId, toastId, boardName, targetBoard.$id, targetBoard.boardType, releaseVersion, compileResult.filename);
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Firmware upload failed.';
       pushConsole(message, 'error');
       pushToast('Firmware upload failed.', 'error', undefined, { detail: message });
@@ -8163,6 +8543,7 @@ export function IDEWorkspace({
         progress: failedProgressTask?.progress ?? null,
       });
     } finally {
+      clearActiveToolchainStopOperation(stopOperation);
       setBusyAction(null);
     }
   }
@@ -8479,6 +8860,7 @@ export function IDEWorkspace({
       const provisionedAt = new Date().toISOString();
       await updateBoard(runtimeBoard.$id, {
         status: 'pending',
+        lastSeen: null,
         provisioningStatus: 'pending',
         otaUpdateMode,
         lastProvisionedAt: provisionedAt,
@@ -8832,6 +9214,15 @@ export function IDEWorkspace({
         throw new Error(result.error);
       }
 
+      if (cloudBoardChanged) {
+        const relinkedBoard = await updateBoard(board.$id, {
+          status: 'pending',
+          lastSeen: null,
+          updatedAt: new Date().toISOString(),
+        });
+        setBoards((current) => current.map((entry) => (entry.$id === relinkedBoard.$id ? relinkedBoard : entry)));
+      }
+
       await refreshLocalBoardProfiles();
       setSelectedLocalBoardId(result.profile.id);
       setSelectedBoardId(board.$id);
@@ -8920,6 +9311,29 @@ export function IDEWorkspace({
     }
 
     await linkLocalBoardToCloud(row, selectedBoard);
+  }
+
+  async function handleLinkLocalBoardToSelectedCloud(row: LocalBoardRow) {
+    const boardId = selectedLinkCloudBoardIds[row.key] || '';
+    if (!boardId) {
+      pushToast('Choose a cloud board to link.', 'info');
+      return;
+    }
+
+    const board = boards.find((entry) => entry.$id === boardId) ?? null;
+    if (!board) {
+      pushToast('Choose a cloud board to link.', 'info');
+      return;
+    }
+
+    const linkedProfile = await linkLocalBoardToCloud(row, board);
+    if (linkedProfile) {
+      setSelectedLinkCloudBoardIds((current) => {
+        const next = { ...current };
+        delete next[row.key];
+        return next;
+      });
+    }
   }
 
   async function handleUnlinkSelectedCloudBoardFromLocal() {
@@ -9088,12 +9502,23 @@ export function IDEWorkspace({
         password: usbWifiForm.password,
       });
 
+      if (!result.success) {
+        const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];
+        setUsbWifiForm((current) => ({ ...current, password: '' }));
+        setUsbWifiPasswordVisible(false);
+        pushConsole(`USB WiFi provisioning failed: ${result.error}`, 'error');
+        if (diagnostics.length > 0 && !result.error.includes('Board diagnostics:')) {
+          pushConsole(`Board WiFi diagnostics:\n${diagnostics.join('\n')}`, 'info');
+        }
+        pushToast('USB WiFi provisioning failed.', 'error', undefined, {
+          detail: result.error,
+          persistent: diagnostics.length > 0,
+        });
+        return;
+      }
+
       setUsbWifiForm({ ssid: '', password: '' });
       setUsbWifiPasswordVisible(false);
-
-      if (!result.success) {
-        throw new Error(result.error);
-      }
 
       if (usbWifiTargetRow.profile) {
         await window.tantalum.toolchain.saveLocalBoardProfile({
@@ -9111,7 +9536,9 @@ export function IDEWorkspace({
     } catch (error) {
       setUsbWifiForm((current) => ({ ...current, password: '' }));
       setUsbWifiPasswordVisible(false);
-      pushToast(error instanceof Error ? error.message : 'USB WiFi provisioning failed.', 'error');
+      const message = error instanceof Error ? error.message : 'USB WiFi provisioning failed.';
+      pushConsole(message, 'error');
+      pushToast(message, 'error');
     } finally {
       setBusyAction(null);
     }
@@ -9218,6 +9645,8 @@ export function IDEWorkspace({
     try {
       const cloudLink = resolveLocalBoardCloudLink(row, boards, { boardsResolved: cloudBoardLinksResolved });
       const keepCloudLink = cloudLink.valid || cloudLink.status === 'unresolved';
+      const linkedCloudBoard = cloudLink.valid ? cloudLink.board : null;
+      const shouldRenameLinkedCloudBoard = Boolean(localBoardEdits[row.key]?.renameCloudBoard && linkedCloudBoard && name && name !== linkedCloudBoard.name);
       const result = await window.tantalum.toolchain.saveLocalBoardProfile({
         id: row.profileId,
         name,
@@ -9245,6 +9674,12 @@ export function IDEWorkspace({
         throw new Error(result.error);
       }
 
+      if (shouldRenameLinkedCloudBoard && linkedCloudBoard) {
+        await renameCloudBoard(linkedCloudBoard, name);
+        clearCloudBoardEdit(linkedCloudBoard.$id);
+        await refreshBoardsList({ silent: true, bypassCache: true });
+      }
+
       setLocalBoardEdits((current) => {
         const next = { ...current };
         delete next[row.key];
@@ -9264,7 +9699,9 @@ export function IDEWorkspace({
       selectLocalBoardInspector(localBoardProfileKey(result.profile.id));
       setSelectedLocalBoardId(result.profile.id);
       await refreshLocalBoardProfiles();
-      pushToast(`Saved ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}`, 'success');
+      pushToast(`Saved ${result.profile.name || result.profile.boardLabel || result.profile.fqbn}`, 'success', undefined, {
+        detail: shouldRenameLinkedCloudBoard ? 'Linked cloud board name updated too.' : undefined,
+      });
     } catch (error) {
       pushToast(error instanceof Error ? error.message : 'Unable to save local board.', 'error');
     } finally {
@@ -10802,7 +11239,7 @@ export function IDEWorkspace({
   });
 
   const refreshRemoteBoardsSilently = useEffectEvent(() => {
-    void refreshBoardsList({ silent: true });
+    void refreshBoardsList({ silent: true, bypassCache: true });
   });
 
   useEffect(() => {
@@ -12081,6 +12518,29 @@ export function IDEWorkspace({
   }, [active]);
 
   useEffect(() => {
+    if (!active || boards.length === 0) {
+      return;
+    }
+
+    const refreshStatusAge = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      setBoardStatusRefreshTick((current) => (current + 1) % 1000000);
+    };
+
+    const refreshInterval = window.setInterval(refreshStatusAge, BOARD_STATUS_RERENDER_MS);
+    window.addEventListener('focus', refreshStatusAge);
+    document.addEventListener('visibilitychange', refreshStatusAge);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.removeEventListener('focus', refreshStatusAge);
+      document.removeEventListener('visibilitychange', refreshStatusAge);
+    };
+  }, [active, boards.length]);
+
+  useEffect(() => {
     if (!autoScrollLogs || !consoleOutputRef.current) {
       return;
     }
@@ -12408,6 +12868,10 @@ export function IDEWorkspace({
     const selectedOtaUpdateMode = selectedCloudBoardOtaMode(selectedBoard);
     const persistedOtaUpdateMode = boardOtaUpdateMode(selectedBoard);
     const otaUpdateModePending = selectedOtaUpdateMode !== persistedOtaUpdateMode;
+    const selectedCloudName = cloudBoardDraftName(selectedBoard);
+    const selectedCloudNameTrimmed = selectedCloudName.trim();
+    const cloudNamePending = selectedCloudNameTrimmed !== selectedBoard.name;
+    const cloudRenameBusy = busyAction === `rename-cloud-board:${selectedBoard.$id}`;
     const cloudInspectorMeta = [
       selectedBoardLinkedLocalRow ? 'Local linked' : 'No local link',
       selectedBoard.sourceCodeVisibility === 'public' ? 'Public code' : 'Private code',
@@ -12419,7 +12883,7 @@ export function IDEWorkspace({
       <section className="boards-inspector" aria-label={`${selectedBoard.name} details`}>
         <header className="boards-inspector-header">
           <div className="boards-inspector-headline">
-            <h3>{selectedBoard.name}</h3>
+            <h3>{selectedCloudNameTrimmed || selectedBoard.name}</h3>
           </div>
           <p className="boards-inspector-subtitle boards-inspector-subtitle-mono">{selectedBoard.boardType}</p>
           <div className="boards-inspector-meta">
@@ -12444,6 +12908,31 @@ export function IDEWorkspace({
           ) : null}
           {!selectedBoardLinkedLocalRow ? <div className="boards-hub-note">Link a local board to enable runtime firmware install.</div> : null}
           {!canOpenRemoteWifiSetup ? <div className="boards-hub-note">Board is offline. Use USB WiFi setup from a linked local board.</div> : null}
+
+          <section className="boards-inspector-block">
+            <h4 className="boards-inspector-block-title">Configuration</h4>
+            <div className="boards-inspector-fields">
+              <label className="boards-hub-field">
+                <span>Name</span>
+                <input
+                  value={selectedCloudName}
+                  onChange={(event) => updateCloudBoardEdit(selectedBoard.$id, { name: event.target.value })}
+                  placeholder="Cloud board name"
+                />
+              </label>
+            </div>
+            <div className="boards-inspector-action-stack">
+              <button
+                className="boards-hub-btn boards-hub-btn-primary"
+                type="button"
+                onClick={() => void handleSaveCloudBoardName(selectedBoard)}
+                disabled={cloudRenameBusy || !selectedCloudNameTrimmed || !cloudNamePending}
+              >
+                {cloudRenameBusy ? <LoaderCircle size={14} className="spin" /> : <PencilLine size={14} />}
+                {cloudRenameBusy ? 'Renaming...' : 'Save name'}
+              </button>
+            </div>
+          </section>
 
           <section className="boards-inspector-block">
             <h4 className="boards-inspector-block-title">Actions</h4>
@@ -12772,6 +13261,28 @@ export function IDEWorkspace({
         boardOtaUpdateMode(linkedCloudBoard),
       )
       : normalizeOtaUpdateMode(localBoardEdits[row.key]?.otaUpdateMode ?? row.otaUpdateMode, defaultOtaUpdateMode());
+    const renameLinkedCloudBoard = Boolean(localBoardEdits[row.key]?.renameCloudBoard);
+    const localBoardNameTrimmed = row.name.trim();
+    const selectedLinkCloudBoardId = selectedLinkCloudBoardIds[row.key] || '';
+    const linkableCloudBoards = boards
+      .filter((board) => normalizeCloudLinkFqbn(board.boardType) === normalizeCloudLinkFqbn(row.fqbn))
+      .sort((left, right) => {
+        if (likelyCloudBoard?.$id === left.$id) {
+          return -1;
+        }
+        if (likelyCloudBoard?.$id === right.$id) {
+          return 1;
+        }
+        return left.name.localeCompare(right.name);
+      });
+    const linkCloudBoardOptions: BoardsHubSelectOption[] = [
+      { value: '', label: 'Select a cloud board' },
+      ...linkableCloudBoards.map((board) => ({
+        value: board.$id,
+        label: `${board.name} (${board.boardType})`,
+        group: likelyCloudBoard?.$id === board.$id ? 'Suggested' : 'Compatible cloud boards',
+      })),
+    ];
 
     const boardTypeOptions: BoardsHubSelectOption[] = [
       ...commonBoardOptions.map((option) => ({ ...option, group: 'Common boards' })),
@@ -12805,9 +13316,6 @@ export function IDEWorkspace({
         : null,
       linkedCloudBoard && !validRuntimeInstalled
         ? { tone: 'default' as const, text: 'Runtime firmware install needed for OTA and WiFi provisioning.' }
-        : null,
-      likelyCloudBoard
-        ? { tone: 'default' as const, text: `Possible existing cloud board: ${likelyCloudBoard.name}.` }
         : null,
       !linkedCloudBoard && isCloudCapableBoardFqbn(row.fqbn) && (!row.connected || !row.port)
         ? { tone: 'default' as const, text: 'Connect and save this board over USB before enabling cloud.' }
@@ -12859,6 +13367,15 @@ export function IDEWorkspace({
                 <span>Name</span>
                 <input value={row.name} onChange={(event) => updateLocalBoardEdit(row.key, { name: event.target.value })} placeholder={row.boardLabel || 'Workbench board'} />
               </label>
+              {linkedCloudBoard ? (
+                <BoardsHubToggle
+                  checked={renameLinkedCloudBoard}
+                  label="Rename linked cloud board"
+                  description={`Use this local name for ${linkedCloudBoard.name} when saving.`}
+                  disabled={!localBoardNameTrimmed || saveBusy}
+                  onChange={(checked) => updateLocalBoardEdit(row.key, { renameCloudBoard: checked })}
+                />
+              ) : null}
               <label className="boards-hub-field">
                 <span>Port</span>
                 {fullPortOptions.length > 0 ? (
@@ -12960,19 +13477,50 @@ export function IDEWorkspace({
                   },
                   disabled: makeCloudBusy || installCloudBusy,
                 })}
+                {!linkedCloudBoard ? (
+                  <div className="boards-hub-field">
+                    <span>Cloud board</span>
+                    <BoardsHubSelect
+                      value={selectedLinkCloudBoardId}
+                      options={linkCloudBoardOptions}
+                      placeholder="Select a cloud board"
+                      open={localBoardPickerOpen?.rowKey === row.key && localBoardPickerOpen.picker === 'cloud'}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          setCloudLinkLocalPickerOpen(false);
+                          setLocalBoardPickerOpen({ rowKey: row.key, picker: 'cloud' });
+                          return;
+                        }
+                        setLocalBoardPickerOpen((current) => (current?.rowKey === row.key && current.picker === 'cloud' ? null : current));
+                      }}
+                      onChange={(boardId) => {
+                        setSelectedLinkCloudBoardIds((current) => ({
+                          ...current,
+                          [row.key]: boardId,
+                        }));
+                      }}
+                    />
+                  </div>
+                ) : null}
               </div>
               {linkedCloudBoard && localOtaUpdateMode !== boardOtaUpdateMode(linkedCloudBoard) ? (
                 <div className="boards-hub-note">Reinstall runtime firmware to apply {formatOtaUpdateMode(localOtaUpdateMode)} updates on the board.</div>
               ) : null}
+              {!linkedCloudBoard && linkableCloudBoards.length === 0 ? (
+                <div className="boards-hub-note">No compatible cloud boards found for {row.fqbn}. Enable cloud to create one.</div>
+              ) : null}
               <div className="boards-inspector-action-stack">
                 {!linkedCloudBoard ? (
                   <>
-                    {likelyCloudBoard ? (
-                    <button className="boards-hub-btn" type="button" onClick={() => void linkLocalBoardToCloud(row, likelyCloudBoard)} disabled={linkCloudBusy}>
+                    <button
+                      className="boards-hub-btn"
+                      type="button"
+                      onClick={() => void handleLinkLocalBoardToSelectedCloud(row)}
+                      disabled={linkCloudBusy || !selectedLinkCloudBoardId}
+                    >
                       {linkCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Link2 size={13} />}
                       Link cloud board
-                      </button>
-                    ) : null}
+                    </button>
                     <button className="boards-hub-btn" type="button" onClick={() => void handleMakeLocalBoardCloud(row)} disabled={makeCloudBusy || !canEnableTantalumCloud}>
                       {makeCloudBusy ? <LoaderCircle size={13} className="spin" /> : <Cloud size={13} />}
                       Enable cloud
@@ -16001,19 +16549,19 @@ export function IDEWorkspace({
               <button
                 className="secondary-button compact"
                 type="button"
-                onClick={() => void handleCompile()}
-                disabled={!activeTab || busyAction === 'compile' || editorUploadBusy}
+                onClick={() => verifyCanStop ? void stopActiveToolchainOperation() : void handleCompile()}
+                disabled={verifyButtonDisabled || toolchainStopBusy}
               >
-                {busyAction === 'compile' || busyAction === 'verify-before-upload' ? <LoaderCircle size={13} className="spin" /> : <CheckCircle2 size={14} />}
-                Verify
+                {verifyButtonIcon}
+                {verifyButtonLabel}
               </button>
               <button
                 className="primary-button compact"
                 type="button"
-                onClick={() => void handleUploadEditorBoard()}
+                onClick={() => editorUploadCanStop ? void stopActiveToolchainOperation() : void handleUploadEditorBoard()}
                 disabled={editorUploadDisabled}
               >
-                {editorUploadBusy ? <LoaderCircle size={13} className="spin" /> : selectedEditorCloudBoard ? <Wifi size={14} /> : <HardDriveUpload size={14} />}
+                {editorUploadIcon}
                 {editorUploadLabel}
               </button>
             </div>
@@ -16619,7 +17167,13 @@ export function IDEWorkspace({
             <button className="secondary-button" type="button" onClick={() => setReleaseModalOpen(false)}>
               Cancel
             </button>
-            <button className="primary-button" type="button" onClick={() => void handleUploadRelease()} disabled={releaseUploadBusy}>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => releaseUploadBusy ? void stopActiveToolchainOperation() : void handleUploadRelease()}
+              disabled={releaseUploadDisabled}
+            >
+              {releaseUploadIcon}
               {releaseUploadLabel}
             </button>
           </div>

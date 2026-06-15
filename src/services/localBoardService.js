@@ -9,7 +9,9 @@ const { getArduinoCliEnv, getCliPath } = require("../../arduinoHandler");
 const HIGH_CONFIDENCE = 0.9;
 const MEDIUM_CONFIDENCE = 0.55;
 const LOW_CONFIDENCE = 0.25;
-const ESPTOOL_PROBE_TIMEOUT_MS = 8000;
+const ESPTOOL_PROBE_TIMEOUT_MS = 25000;
+const ESPTOOL_PROBE_RETRY_DELAY_MS = 750;
+const ESPTOOL_PROBE_ATTEMPTS = 2;
 const ESP_CHIP_TARGETS = {
   "ESP32-C2": { fqbn: "esp32:esp32:esp32c2", label: "ESP32-C2 Dev Module" },
   "ESP32-C3": { fqbn: "esp32:esp32:esp32c3", label: "ESP32-C3 Dev Module" },
@@ -84,12 +86,49 @@ function getPortPath(port) {
   return normalizeString(port.address || port.path || port.port || port.name || port.label);
 }
 
+function darwinCalloutPortPath(portPath) {
+  const normalized = normalizeString(portPath);
+  if (process.platform !== "darwin" || !normalized.startsWith("/dev/tty.")) {
+    return normalized;
+  }
+
+  const calloutPath = `/dev/cu.${normalized.slice("/dev/tty.".length)}`;
+  return fs.existsSync(calloutPath) ? calloutPath : normalized;
+}
+
+function physicalPortPathKey(portPath) {
+  const normalized = normalizeString(portPath).toLowerCase();
+  if (process.platform === "darwin") {
+    return normalized.replace(/^\/dev\/(?:cu|tty)\./, "/dev/serial.");
+  }
+
+  return normalized;
+}
+
+function portLookupKeys(portPath) {
+  const keys = new Set();
+  const rawPath = normalizeString(portPath);
+  const uploadPath = darwinCalloutPortPath(rawPath);
+
+  for (const key of [rawPath, uploadPath, physicalPortPathKey(rawPath), physicalPortPathKey(uploadPath)]) {
+    const normalized = normalizeId(key);
+    if (normalized) {
+      keys.add(normalized);
+    }
+  }
+
+  return Array.from(keys);
+}
+
 function normalizeSerialPort(port) {
   const properties = port?.properties && typeof port.properties === "object" ? port.properties : {};
-  const path = getPortPath(port);
+  const rawPath = getPortPath(port);
+  const path = darwinCalloutPortPath(rawPath);
+  const rawLabel = normalizeString(port.label || port.friendlyName || rawPath || path);
+  const label = rawLabel && rawLabel !== rawPath ? rawLabel : path;
   return {
     path,
-    label: normalizeString(port.label || port.friendlyName || path),
+    label,
     protocol: normalizeString(port.protocol || "serial") || "serial",
     protocolLabel: normalizeString(port.protocol_label || port.protocolLabel || "Serial"),
     manufacturer: normalizeString(port.manufacturer || port.friendlyName),
@@ -99,6 +138,32 @@ function normalizeSerialPort(port) {
     pnpId: normalizeString(port.pnpId || port.pnpID),
     locationId: normalizeString(port.locationId),
   };
+}
+
+function buildSerialPortMap(serialPorts) {
+  const serialPortMap = new Map();
+
+  for (const serialPort of serialPorts) {
+    const normalized = normalizeSerialPort(serialPort);
+    for (const key of [...portLookupKeys(getPortPath(serialPort)), ...portLookupKeys(normalized.path)]) {
+      if (!serialPortMap.has(key)) {
+        serialPortMap.set(key, normalized);
+      }
+    }
+  }
+
+  return serialPortMap;
+}
+
+function findSerialPortMetadata(serialPortMap, portPath) {
+  for (const key of portLookupKeys(portPath)) {
+    const metadata = serialPortMap.get(key);
+    if (metadata) {
+      return metadata;
+    }
+  }
+
+  return {};
 }
 
 function normalizeMatchingBoard(board) {
@@ -240,6 +305,10 @@ function parseEspChipTarget(output) {
   return null;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function shouldProbeEspChip(candidate) {
   if (!candidate?.port) {
     return false;
@@ -276,10 +345,10 @@ function shouldProbeEspChip(candidate) {
   );
 }
 
-function runEspToolProbe(port) {
+function runEspToolProbeOnce(port) {
   const esptoolPath = findEspToolExecutable();
   if (!esptoolPath) {
-    return Promise.resolve(null);
+    return Promise.resolve({ chipTarget: null, timedOut: false });
   }
 
   return new Promise((resolve) => {
@@ -291,17 +360,34 @@ function runEspToolProbe(port) {
         const output = `${stdout || ""}\n${stderr || ""}`;
         const chipTarget = parseEspChipTarget(output);
         if (error || !chipTarget) {
-          resolve(null);
+          const message = String(error?.message || "");
+          resolve({ chipTarget: null, timedOut: Boolean(error?.killed || error?.signal || /timed out/i.test(message)) });
           return;
         }
 
         resolve({
-          ...chipTarget,
-          output,
+          chipTarget: {
+            ...chipTarget,
+            output,
+          },
+          timedOut: false,
         });
       },
     );
   });
+}
+
+async function runEspToolProbe(port) {
+  for (let attempt = 0; attempt < ESPTOOL_PROBE_ATTEMPTS; attempt += 1) {
+    const result = await runEspToolProbeOnce(port);
+    if (result.chipTarget || result.timedOut || attempt === ESPTOOL_PROBE_ATTEMPTS - 1) {
+      return result.chipTarget;
+    }
+
+    await delay(ESPTOOL_PROBE_RETRY_DELAY_MS);
+  }
+
+  return null;
 }
 
 async function applyEspChipProbe(candidate) {
@@ -337,21 +423,28 @@ async function applyEspChipProbe(candidate) {
   };
 }
 
-function candidateFingerprint(port) {
-  const stable = [
-    port.serialNumber,
-    port.vendorId,
-    port.productId,
-    port.pnpId,
-    port.locationId,
-    port.manufacturer,
-    port.path,
-  ]
-    .map(normalizeString)
-    .filter(Boolean)
-    .join("|")
-    .toLowerCase();
+function candidateHardwareKey(port) {
+  const serialNumber = normalizeId(port?.serialNumber);
+  const vendorId = normalizeId(port?.vendorId);
+  if (serialNumber) {
+    return ["usb-serial", vendorId, serialNumber].filter(Boolean).join(":");
+  }
 
+  const pnpId = normalizeId(port?.pnpId);
+  if (pnpId) {
+    return `pnp:${pnpId}`;
+  }
+
+  const locationId = normalizeId(port?.locationId);
+  if (locationId) {
+    return ["usb-location", vendorId, normalizeId(port?.productId), locationId].filter(Boolean).join(":");
+  }
+
+  return physicalPortPathKey(port?.path || port?.port);
+}
+
+function candidateFingerprint(port) {
+  const stable = candidateHardwareKey(port);
   return crypto.createHash("sha256").update(stable || port.path || crypto.randomUUID()).digest("hex");
 }
 
@@ -393,7 +486,7 @@ function confidenceFor(matches) {
 function buildCandidate(rawDetectedPort, serialPortMap) {
   const cliPort = normalizeSerialPort(rawDetectedPort?.port || rawDetectedPort);
   const path = cliPort.path;
-  const serialPort = serialPortMap.get(normalizeId(path)) || {};
+  const serialPort = findSerialPortMetadata(serialPortMap, path);
   const mergedPort = {
     ...cliPort,
     manufacturer: normalizeString(cliPort.manufacturer || serialPort.manufacturer),
@@ -435,6 +528,115 @@ function buildCandidate(rawDetectedPort, serialPortMap) {
     connected: true,
     ai: null,
   };
+}
+
+function isKnownText(value) {
+  const normalized = normalizeString(value);
+  return Boolean(normalized && normalized.toLowerCase() !== "unknown");
+}
+
+function preferKnownText(primary, fallback) {
+  return isKnownText(primary) ? normalizeString(primary) : normalizeString(fallback || primary);
+}
+
+function sourceRank(source) {
+  switch (source) {
+    case "esptool-chip-probe":
+      return 5;
+    case "board-detection-ai":
+      return 4;
+    case "arduino-cli":
+      return 3;
+    case "arduino-cli-candidates":
+      return 2;
+    case "serialport":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function boardCandidateScore(candidate) {
+  return (
+    Number(candidate?.confidence || 0) * 100 +
+    (candidate?.fqbn ? 100 : 0) +
+    sourceRank(candidate?.detectionSource) * 10 +
+    (candidate?.matchingBoards?.length || 0)
+  );
+}
+
+function portCandidateScore(candidate) {
+  const path = normalizeString(candidate?.path || candidate?.port).toLowerCase();
+  return (
+    (process.platform === "darwin" && path.startsWith("/dev/cu.") ? 100 : 0) +
+    (normalizeString(candidate?.protocolLabel).toLowerCase().includes("usb") ? 20 : 0) +
+    (isKnownText(candidate?.manufacturer) ? 10 : 0) +
+    (candidate?.serialNumber ? 8 : 0) +
+    (candidate?.vendorId ? 4 : 0) +
+    (candidate?.productId ? 4 : 0) +
+    (candidate?.locationId ? 2 : 0)
+  );
+}
+
+function mergeMatchingBoards(leftBoards = [], rightBoards = []) {
+  const byKey = new Map();
+  for (const board of [...leftBoards, ...rightBoards]) {
+    const normalized = normalizeMatchingBoard(board);
+    if (!normalized) {
+      continue;
+    }
+
+    const key = normalizeId(normalized.fqbn || normalized.name);
+    if (!byKey.has(key)) {
+      byKey.set(key, normalized);
+    }
+  }
+
+  return Array.from(byKey.values());
+}
+
+function mergeBoardCandidates(left, right) {
+  const boardPrimary = boardCandidateScore(right) > boardCandidateScore(left) ? right : left;
+  const boardSecondary = boardPrimary === left ? right : left;
+  const portPrimary = portCandidateScore(right) > portCandidateScore(left) ? right : left;
+  const portSecondary = portPrimary === left ? right : left;
+  const matchingBoards = mergeMatchingBoards(left.matchingBoards, right.matchingBoards);
+  const confidence = Math.max(Number(left.confidence || 0), Number(right.confidence || 0));
+  const merged = {
+    ...boardPrimary,
+    path: portPrimary.path || boardPrimary.path,
+    port: portPrimary.port || portPrimary.path || boardPrimary.port,
+    label: portPrimary.label || portPrimary.path || boardPrimary.label,
+    protocol: portPrimary.protocol || portSecondary.protocol || "serial",
+    protocolLabel: portPrimary.protocolLabel || portSecondary.protocolLabel || "Serial",
+    manufacturer: preferKnownText(left.manufacturer, right.manufacturer) || "Unknown",
+    vendorId: left.vendorId || right.vendorId || null,
+    productId: left.productId || right.productId || null,
+    serialNumber: left.serialNumber || right.serialNumber || null,
+    pnpId: left.pnpId || right.pnpId || null,
+    locationId: left.locationId || right.locationId || null,
+    boardLabel: boardPrimary.boardLabel || boardSecondary.boardLabel,
+    fqbn: boardPrimary.fqbn || boardSecondary.fqbn || "",
+    matchingBoards,
+    confidence,
+    confidenceLabel: confidence >= HIGH_CONFIDENCE ? "high" : confidence >= MEDIUM_CONFIDENCE ? "medium" : "low",
+    detectionSource: boardPrimary.detectionSource || boardSecondary.detectionSource,
+    connected: true,
+    ai: boardPrimary.ai || boardSecondary.ai || null,
+  };
+  merged.fingerprint = candidateFingerprint(merged);
+  merged.id = `detected:${merged.fingerprint}`;
+  return merged;
+}
+
+function rememberCandidate(candidateMap, candidate) {
+  if (!candidate.path || !isLikelyBoardPort(candidate)) {
+    return;
+  }
+
+  const key = candidateHardwareKey(candidate) || normalizeId(candidate.path);
+  const existing = candidateMap.get(key);
+  candidateMap.set(key, existing ? mergeBoardCandidates(existing, candidate) : candidate);
 }
 
 function isLikelyBoardPort(candidate) {
@@ -531,10 +733,9 @@ async function detectLocalBoardsDeterministic(options = {}) {
     readArduinoBoardList().catch(() => ({ detected_ports: [] })),
     listSerialPorts(),
   ]);
-  const serialPortMap = new Map(serialPorts.map((port) => [normalizeId(getPortPath(port)), normalizeSerialPort(port)]));
-  const seen = new Set();
+  const serialPortMap = buildSerialPortMap(serialPorts);
   const seenPorts = new Set();
-  const candidates = [];
+  const candidateMap = new Map();
   const ports = [];
 
   function rememberPort(candidate) {
@@ -550,35 +751,22 @@ async function detectLocalBoardsDeterministic(options = {}) {
   for (const detectedPort of getDetectedPorts(cliPayload)) {
     const candidate = buildCandidate(detectedPort, serialPortMap);
     rememberPort(candidate);
-    if (!candidate.path || seen.has(normalizeId(candidate.path)) || !isLikelyBoardPort(candidate)) {
-      continue;
-    }
-
-    seen.add(normalizeId(candidate.path));
-    candidates.push(candidate);
+    rememberCandidate(candidateMap, candidate);
   }
 
   for (const serialPort of serialPorts) {
     const normalized = normalizeSerialPort(serialPort);
-    if (!normalized.path || seen.has(normalizeId(normalized.path))) {
-      if (normalized.path) {
-        rememberPort(buildCandidate({ port: normalized, matching_boards: [] }, serialPortMap));
-      }
+    if (!normalized.path) {
       continue;
     }
 
     const candidate = buildCandidate({ port: normalized, matching_boards: [] }, serialPortMap);
     rememberPort(candidate);
-    if (!isLikelyBoardPort(candidate)) {
-      continue;
-    }
-
-    seen.add(normalizeId(normalized.path));
-    candidates.push(candidate);
+    rememberCandidate(candidateMap, candidate);
   }
 
   const boards = [];
-  for (const candidate of candidates) {
+  for (const candidate of candidateMap.values()) {
     boards.push(options.probeEsp ? await applyEspChipProbe(candidate) : candidate);
   }
 

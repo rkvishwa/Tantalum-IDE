@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld("tantalum", {
     },
     storage: {
       createFile: (payload) => ipcRenderer.invoke("cloud:storage:create-file", payload),
+      cancelUpload: (payload) => ipcRenderer.invoke("cloud:storage:cancel-upload", payload),
       deleteFile: (payload) => ipcRenderer.invoke("cloud:storage:delete-file", payload),
       onUploadProgress: (callback) => subscribe("cloud:storage-upload-progress", callback)
     },
@@ -179,15 +180,17 @@ contextBridge.exposeInMainWorld("tantalum", {
     setBoardSecrets: (payload) => ipcRenderer.invoke("secrets:set-board", payload),
     getBoardSecrets: (boardId) => ipcRenderer.invoke("secrets:get-board", boardId),
     deleteBoardSecrets: (boardId) => ipcRenderer.invoke("secrets:delete-board", boardId)
-  },
-  toolchain: {
+    },
+    toolchain: {
     compile: (payload) => ipcRenderer.invoke("toolchain:compile", payload),
+    cancelCompile: (payload) => ipcRenderer.invoke("toolchain:cancel-compile", payload),
     detectLocalBoards: (payload) => ipcRenderer.invoke("toolchain:detect-local-boards", payload),
     listLocalBoardProfiles: () => ipcRenderer.invoke("toolchain:list-local-board-profiles"),
     saveLocalBoardProfile: (payload) => ipcRenderer.invoke("toolchain:save-local-board-profile", payload),
     deleteLocalBoardProfile: (profileId) => ipcRenderer.invoke("toolchain:delete-local-board-profile", profileId),
     replaceLocalBoardProfiles: (profiles) => ipcRenderer.invoke("toolchain:replace-local-board-profiles", profiles),
     uploadLocalSketch: (payload) => ipcRenderer.invoke("toolchain:upload-local-sketch", payload),
+    cancelLocalUpload: (payload) => ipcRenderer.invoke("toolchain:cancel-local-upload", payload),
     createSourceSnapshot: (payload) => ipcRenderer.invoke("toolchain:create-source-snapshot", payload),
     prepareSourceRestoreMarker: (payload) => ipcRenderer.invoke("toolchain:prepare-source-restore-marker", payload),
     promoteSourceRestoreMarker: (payload) => ipcRenderer.invoke("toolchain:promote-source-restore-marker", payload),

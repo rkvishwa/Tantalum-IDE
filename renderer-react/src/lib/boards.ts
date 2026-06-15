@@ -190,6 +190,9 @@ export async function rotateBoardToken(boardId: string) {
       apiToken: '',
       tokenHash,
       tokenPreview: apiToken.slice(-6),
+      status: 'pending',
+      lastSeen: null,
+      provisioningStatus: 'pending',
       updatedAt: new Date().toISOString(),
     },
   );

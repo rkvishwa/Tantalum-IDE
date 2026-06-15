@@ -41,8 +41,12 @@ export function nextSemver(version: string) {
   return `${major}.${minor}.${patch + 1}`;
 }
 
+const BOARD_ONLINE_GRACE_MS = 150 * 1000;
+const BOARD_FUTURE_CLOCK_SKEW_MS = 30 * 1000;
+
 export function calculateBoardStatus(lastSeen: string | null | undefined, persistedStatus: string) {
-  if (persistedStatus === 'pending' && !lastSeen) {
+  const normalizedStatus = String(persistedStatus || '').trim().toLowerCase();
+  if (normalizedStatus === 'pending') {
     return 'pending';
   }
 
@@ -50,8 +54,17 @@ export function calculateBoardStatus(lastSeen: string | null | undefined, persis
     return 'offline';
   }
 
-  const ageInMinutes = (Date.now() - new Date(lastSeen).getTime()) / 60000;
-  return ageInMinutes <= 5 ? 'online' : 'offline';
+  const lastSeenAt = new Date(lastSeen).getTime();
+  if (!Number.isFinite(lastSeenAt)) {
+    return 'offline';
+  }
+
+  const ageMs = Date.now() - lastSeenAt;
+  if (ageMs < -BOARD_FUTURE_CLOCK_SKEW_MS) {
+    return 'offline';
+  }
+
+  return ageMs <= BOARD_ONLINE_GRACE_MS ? 'online' : 'offline';
 }
 
 export function fileNameFromPath(filePath: string) {

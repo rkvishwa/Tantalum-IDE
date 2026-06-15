@@ -67,6 +67,8 @@ if ($LASTEXITCODE -ne 0) { throw "healthcheck.sh upload failed." }
 if ($LASTEXITCODE -ne 0) { throw "tantalum-monitor.sh upload failed." }
 & scp @sshArgs (Join-Path $selfhostRoot "scripts\repair-functions-runtime.sh") "${sshTarget}:/srv/tantalum/bin/repair-functions-runtime.sh"
 if ($LASTEXITCODE -ne 0) { throw "repair-functions-runtime.sh upload failed." }
+& scp @sshArgs (Join-Path $selfhostRoot "scripts\renew-rsa-tls-cert.sh") "${sshTarget}:/srv/tantalum/bin/renew-rsa-tls-cert.sh"
+if ($LASTEXITCODE -ne 0) { throw "renew-rsa-tls-cert.sh upload failed." }
 
 $remoteBootstrap = @"
 set -euo pipefail
@@ -100,8 +102,31 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+sudo tee /etc/systemd/system/tantalum-rsa-tls-cert-renew.service >/dev/null <<'EOF'
+[Unit]
+Description=Renew Appwrite RSA TLS certificate for embedded clients
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/tantalum/bin/renew-rsa-tls-cert.sh
+EOF
+sudo tee /etc/systemd/system/tantalum-rsa-tls-cert-renew.timer >/dev/null <<'EOF'
+[Unit]
+Description=Check Appwrite RSA TLS certificate renewal daily
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now tantalum-monitor.timer
+sudo systemctl enable --now tantalum-rsa-tls-cert-renew.timer
 "@
 & ssh @sshArgs $sshTarget $remoteBootstrap
 if ($LASTEXITCODE -ne 0) { throw "Remote bootstrap failed." }

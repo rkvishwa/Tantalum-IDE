@@ -141,7 +141,9 @@
 
 static const unsigned long TANTALUM_DEFAULT_UPDATE_CHECK_MS = 5UL * 60UL * 1000UL;
 static const unsigned long TANTALUM_HEARTBEAT_MS = 60UL * 1000UL;
-static const unsigned long TANTALUM_WIFI_CONNECT_TIMEOUT_MS = 20000UL;
+static const unsigned long TANTALUM_WIFI_CONNECT_TIMEOUT_MS = 30000UL;
+static const unsigned long TANTALUM_WIFI_CONNECT_RETRY_DELAY_MS = 1500UL;
+static const uint8_t TANTALUM_WIFI_CONNECT_ATTEMPTS = 3;
 static const unsigned long TANTALUM_MQTT_RETRY_MS = 15000UL;
 static const unsigned long TANTALUM_MQTT_COMMAND_MAX_AGE_SECONDS = 5UL * 60UL;
 static const uint16_t TANTALUM_MQTT_KEEPALIVE_SECONDS = 60;
@@ -340,6 +342,17 @@ public:
   }
 
 private:
+  struct TantalumWifiTarget {
+    bool found = false;
+    int32_t channel = 0;
+    int32_t rssi = -1000;
+    int authMode = -1;
+#if defined(ESP32)
+    bool hasBssid = false;
+    uint8_t bssid[6] = {0, 0, 0, 0, 0, 0};
+#endif
+  };
+
   bool otaModeIs(const char* expected) {
     return strcmp(TANTALUM_OTA_UPDATE_MODE, expected) == 0;
   }
@@ -788,9 +801,32 @@ private:
 #endif
   }
 
-  void printWifiScanForSsid(const char* targetSsid) {
-    if (targetSsid == nullptr || strlen(targetSsid) == 0) {
+  void printWifiBssid(const uint8_t* bssid) {
+#if defined(ESP32)
+    if (bssid == nullptr) {
+      Serial.print("(none)");
       return;
+    }
+
+    for (uint8_t index = 0; index < 6; index++) {
+      if (index > 0) {
+        Serial.print(":");
+      }
+      if (bssid[index] < 16) {
+        Serial.print("0");
+      }
+      Serial.print(bssid[index], HEX);
+    }
+#else
+    (void)bssid;
+    Serial.print("(unavailable)");
+#endif
+  }
+
+  TantalumWifiTarget printWifiScanForSsid(const char* targetSsid) {
+    TantalumWifiTarget bestTarget;
+    if (targetSsid == nullptr || strlen(targetSsid) == 0) {
+      return bestTarget;
     }
 
     String target = String(targetSsid);
@@ -807,7 +843,7 @@ private:
     if (networkCount < 0) {
       Serial.print("  WiFi scan failed: ");
       Serial.println(networkCount);
-      return;
+      return bestTarget;
     }
 
     int matchCount = 0;
@@ -817,28 +853,59 @@ private:
       }
 
       matchCount++;
+      int32_t rssi = WiFi.RSSI(index);
       Serial.print("  SSID match ");
       Serial.print(matchCount);
       Serial.print(": RSSI ");
-      Serial.print(WiFi.RSSI(index));
+      Serial.print(rssi);
 #if defined(ESP32)
+      int32_t channel = WiFi.channel(index);
       Serial.print(", channel ");
-      Serial.print(WiFi.channel(index));
+      Serial.print(channel);
       int authMode = static_cast<int>(WiFi.encryptionType(index));
       Serial.print(", auth ");
       Serial.print(authMode);
       Serial.print(" ");
       Serial.print(wifiAuthModeName(authMode));
+      Serial.print(", bssid ");
+      uint8_t* bssid = WiFi.BSSID(index);
+      printWifiBssid(bssid);
 #endif
       Serial.println();
+
+      if (!bestTarget.found || rssi > bestTarget.rssi) {
+        bestTarget.found = true;
+        bestTarget.rssi = rssi;
+#if defined(ESP32)
+        bestTarget.channel = channel;
+        bestTarget.authMode = authMode;
+        if (bssid != nullptr) {
+          memcpy(bestTarget.bssid, bssid, sizeof(bestTarget.bssid));
+          bestTarget.hasBssid = true;
+        }
+#endif
+      }
     }
 
     if (matchCount == 0) {
       Serial.print("  SSID was not found. Networks visible: ");
       Serial.println(networkCount);
+    } else {
+      Serial.print("  Strongest SSID match RSSI ");
+      Serial.print(bestTarget.rssi);
+#if defined(ESP32)
+      Serial.print(", channel ");
+      Serial.print(bestTarget.channel);
+      if (bestTarget.hasBssid) {
+        Serial.print(", bssid ");
+        printWifiBssid(bestTarget.bssid);
+      }
+#endif
+      Serial.println();
     }
 
     WiFi.scanDelete();
+    return bestTarget;
   }
 
   void printWifiConnectionFailure(const char* context, const char* targetSsid = nullptr) {
@@ -871,6 +938,42 @@ private:
     WiFi.setHostname(TANTALUM_WIFI_HOSTNAME);
 #elif defined(ESP8266)
     WiFi.hostname(TANTALUM_WIFI_HOSTNAME);
+#endif
+  }
+
+  void clearStoredTantalumWifiCredentials(const char* reason) {
+#if defined(ESP32)
+    preferences.remove("wifi_ssid");
+    preferences.remove("wifi_password");
+    preferences.remove("wifi_board_id");
+    preferences.remove("sdk_wifi_board_id");
+    Serial.print("Cleared stored Tantalum WiFi credentials");
+    if (reason != nullptr && strlen(reason) > 0) {
+      Serial.print(": ");
+      Serial.print(reason);
+    }
+    Serial.println();
+#else
+    (void)reason;
+#endif
+  }
+
+  void ensureStoredWifiCredentialsMatchBoard() {
+#if defined(ESP32)
+    String savedSsid = preferences.getString("wifi_ssid", "");
+    if (savedSsid.length() == 0) {
+      return;
+    }
+
+    String savedBoardId = preferences.getString("wifi_board_id", "");
+    if (savedBoardId.length() == 0) {
+      clearStoredTantalumWifiCredentials("credentials were created before board identity scoping");
+      return;
+    }
+
+    if (savedBoardId != TANTALUM_BOARD_ID) {
+      clearStoredTantalumWifiCredentials("credentials belong to a different cloud board");
+    }
 #endif
   }
 
@@ -968,33 +1071,89 @@ private:
   }
 
   bool applyWifiCredentials(const char* ssid, const char* password) {
-#if defined(ESP32)
-    preferences.putString("wifi_ssid", ssid);
-    preferences.putString("wifi_password", password);
-#endif
-
     WiFi.disconnect(true);
     delay(250);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
+#if defined(ESP32)
+    WiFi.setAutoReconnect(false);
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+#endif
     configureWifiStationIdentity();
     Serial.println("USB provisioning WiFi connect attempt starting.");
-    printWifiScanForSsid(ssid);
+    TantalumWifiTarget wifiTarget = printWifiScanForSsid(ssid);
 #if defined(ESP8266)
     WiFi.persistent(true);
 #endif
-    WiFi.begin(ssid, password);
 
-    unsigned long startedAt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startedAt < TANTALUM_WIFI_CONNECT_TIMEOUT_MS) {
-      delay(250);
+    for (uint8_t attempt = 1; attempt <= TANTALUM_WIFI_CONNECT_ATTEMPTS; attempt++) {
+#if defined(ESP32)
+      tantalumLastWifiDisconnectReason = 0;
+#endif
+      Serial.print("USB provisioning WiFi connect attempt ");
+      Serial.print(attempt);
+      Serial.print("/");
+      Serial.println(TANTALUM_WIFI_CONNECT_ATTEMPTS);
+      WiFi.disconnect(false);
+      delay(500);
+#if defined(ESP32)
+      if (attempt == 1 && wifiTarget.found && wifiTarget.channel > 0 && wifiTarget.hasBssid) {
+        Serial.print("  Connecting to scanned AP on channel ");
+        Serial.print(wifiTarget.channel);
+        Serial.print(", bssid ");
+        printWifiBssid(wifiTarget.bssid);
+        Serial.println();
+        WiFi.begin(ssid, password, wifiTarget.channel, wifiTarget.bssid);
+      } else if (attempt == 2 && wifiTarget.found && wifiTarget.channel > 0) {
+        Serial.print("  Connecting on scanned channel ");
+        Serial.print(wifiTarget.channel);
+        Serial.println(" without BSSID lock.");
+        WiFi.begin(ssid, password, wifiTarget.channel, nullptr);
+      } else {
+        Serial.println("  Connecting with generic SSID scan.");
+        WiFi.begin(ssid, password);
+      }
+#else
+      WiFi.begin(ssid, password);
+#endif
+
+      unsigned long startedAt = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - startedAt < TANTALUM_WIFI_CONNECT_TIMEOUT_MS) {
+        delay(250);
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+#if defined(ESP32)
+        preferences.putString("wifi_ssid", ssid);
+        preferences.putString("wifi_password", password);
+        preferences.putString("wifi_board_id", TANTALUM_BOARD_ID);
+        preferences.putString("sdk_wifi_board_id", TANTALUM_BOARD_ID);
+#endif
+        provisioningActive = false;
+        return true;
+      }
+
+      Serial.print("  Attempt status: ");
+      Serial.print(static_cast<int>(WiFi.status()));
+      Serial.print(" ");
+      Serial.println(wifiStatusName(WiFi.status()));
+#if defined(ESP32)
+      if (tantalumLastWifiDisconnectReason > 0) {
+        Serial.print("  Attempt disconnect reason: ");
+        Serial.print(tantalumLastWifiDisconnectReason);
+        Serial.print(" ");
+        Serial.println(WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(tantalumLastWifiDisconnectReason)));
+      }
+#endif
+      if (attempt < TANTALUM_WIFI_CONNECT_ATTEMPTS) {
+        Serial.println("  Retrying WiFi association...");
+        delay(TANTALUM_WIFI_CONNECT_RETRY_DELAY_MS);
+      }
     }
 
     provisioningActive = false;
-    if (WiFi.status() == WL_CONNECTED) {
-      return true;
-    }
-
     printWifiConnectionFailure("USB provisioning", ssid);
     return false;
   }
@@ -1008,6 +1167,7 @@ private:
     WiFi.setSleep(false);
     configureWifiStationIdentity();
 #if defined(ESP32)
+    ensureStoredWifiCredentialsMatchBoard();
     String savedSsid = preferences.getString("wifi_ssid", "");
     String savedPassword = preferences.getString("wifi_password", "");
     if (savedSsid.length() > 0) {
@@ -1015,8 +1175,16 @@ private:
       printWifiScanForSsid(savedSsid.c_str());
       WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
     } else {
-      Serial.println("No USB-provisioned WiFi SSID is stored; trying SDK-stored WiFi credentials.");
-      WiFi.begin();
+      String sdkWifiBoardId = preferences.getString("sdk_wifi_board_id", "");
+      if (sdkWifiBoardId == TANTALUM_BOARD_ID) {
+        Serial.println("Using mobile-provisioned WiFi credentials for this cloud board.");
+        WiFi.begin();
+      } else {
+        Serial.println("No Tantalum-provisioned WiFi credentials are stored for this cloud board.");
+        WiFi.disconnect(true);
+        startProvisioning("wifi-required");
+        return false;
+      }
     }
 #else
     WiFi.begin();
@@ -1055,6 +1223,7 @@ private:
 
 #if defined(ESP32)
 #if TANTALUM_HAS_ESP_WIFI_PROV
+    preferences.putString("sdk_wifi_board_id", TANTALUM_BOARD_ID);
     const bool resetProvisioned = true;
     const char* serviceKey = nullptr;
 #if defined(CONFIG_IDF_TARGET_ESP32S2)

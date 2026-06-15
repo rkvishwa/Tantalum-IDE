@@ -2553,7 +2553,7 @@ class LocalOpenAiBridge {
         `${modelName} via ${this.source === "custom" ? "custom credentials" : "managed gateway"}${wantsStream ? " (stream requested)" : ""}.`,
       );
 
-      const gatewayRequest = this.#buildGatewayRequest(body, wantsStream);
+      const gatewayRequest = this.#buildGatewayRequest(body, wantsStream, url.pathname);
       let completion;
       try {
         completion = await this.executeGatewayRequest({
@@ -2586,7 +2586,7 @@ class LocalOpenAiBridge {
     }
   }
 
-  #buildGatewayRequest(body, wantsStream) {
+  #buildGatewayRequest(body, wantsStream, apiPath = "") {
     const request = { ...(body || {}) };
 
     if (wantsStream) {
@@ -2600,6 +2600,16 @@ class LocalOpenAiBridge {
 
     if (this.source === "managed" && this.mode === "power") {
       delete request.temperature;
+
+      if (
+        String(apiPath).endsWith("/chat/completions") &&
+        Object.prototype.hasOwnProperty.call(request, "max_tokens")
+      ) {
+        if (!Object.prototype.hasOwnProperty.call(request, "max_completion_tokens")) {
+          request.max_completion_tokens = request.max_tokens;
+        }
+        delete request.max_tokens;
+      }
     }
 
     return request;

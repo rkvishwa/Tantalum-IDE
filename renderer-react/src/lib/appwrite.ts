@@ -3,7 +3,11 @@ import type { Models } from 'appwrite';
 
 function unwrapResult<T extends object>(result: ({ success: true } & T) | { success: false; error: string }) {
   if (!result.success) {
-    throw new Error(result.error);
+    const error = new Error(result.error);
+    if ('canceled' in result && result.canceled) {
+      Object.assign(error, { canceled: true, name: 'AbortError', code: 'ABORT_ERR' });
+    }
+    throw error;
   }
 
   return result;
@@ -148,6 +152,9 @@ export const storage = {
     }));
 
     return result.file as Models.File;
+  },
+  async cancelUpload(progressId: string) {
+    unwrapResult(await getDesktopCloudApi().storage.cancelUpload({ progressId }));
   },
   async deleteFile(bucketId: string, fileId: string) {
     unwrapResult(await getDesktopCloudApi().storage.deleteFile({ bucketId, fileId }));

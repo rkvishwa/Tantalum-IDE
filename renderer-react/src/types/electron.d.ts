@@ -2,7 +2,7 @@ import type { Models } from 'appwrite';
 
 export type Result<T = Record<string, never>> =
   | ({ success: true } & T)
-  | ({ success: false; error: string; canceled?: boolean });
+  | ({ success: false; error: string; canceled?: boolean; diagnostics?: string[] });
 
 export type CloudRealtimeSubscribeRequest = {
   channels: string[];
@@ -1165,6 +1165,7 @@ export type DesktopApi = {
     };
     storage: {
       createFile: (payload: { bucketId: string; fileId: string; filename: string; base64: string; contentType?: string; permissions?: string[]; progressId?: string }) => Promise<Result<{ file: Record<string, unknown> }>>;
+      cancelUpload: (payload: { progressId: string }) => Promise<Result<{ canceled: boolean; alreadyStopped?: boolean; progressId: string }>>;
       deleteFile: (payload: { bucketId: string; fileId: string }) => Promise<Result>;
       onUploadProgress: (callback: (event: StorageUploadProgressEvent) => void) => () => void;
     };
@@ -1291,12 +1292,14 @@ export type DesktopApi = {
   };
   toolchain: {
     compile: (payload: { code?: string; board: string; sketchSource?: ToolchainSketchSource | null; cloudRuntime?: Record<string, unknown> | null; sourceRestoreMarker?: SourceRestoreMarker | null; compileId?: string }) => Promise<Result<{ filename: string; binData: string; binSize: number; board: string; output: string; cloudRuntime?: boolean; sourceRestoreMarkerEmbedded?: boolean; sourceRestoreMarkerWarning?: string }>>;
+    cancelCompile: (payload: { compileId: string }) => Promise<Result<{ canceled: boolean; alreadyStopped?: boolean; compileId: string }>>;
     detectLocalBoards: (payload?: { portsOnly?: boolean; probeEsp?: boolean; aiFallback?: boolean }) => Promise<Result<{ boards: LocalBoardDetection[]; ports?: LocalBoardPort[]; detectedAt: string }>>;
     listLocalBoardProfiles: () => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     saveLocalBoardProfile: (payload: Partial<LocalBoardProfile>) => Promise<Result<{ profile: LocalBoardProfile }>>;
     deleteLocalBoardProfile: (profileId: string) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     replaceLocalBoardProfiles: (profiles: Array<Partial<LocalBoardProfile>>) => Promise<Result<{ profiles: LocalBoardProfile[] }>>;
     uploadLocalSketch: (payload: { code?: string; board: string; port: string; sketchSource?: ToolchainSketchSource | null; uploadId?: string; cloudRuntime?: Record<string, unknown> | null; sourceSnapshot?: BoardCodeSourceSnapshotInput; sourceIdentity?: Record<string, unknown>; sourceRestoreMarker?: SourceRestoreMarker | null }) => Promise<Result<{ message?: string; output?: string; board: string; port: string; cloudRuntime?: boolean; sourceRestoreMarkerEmbedded?: boolean; sourceRestoreMarkerWarning?: string }>>;
+    cancelLocalUpload: (payload: { uploadId?: string; port?: string }) => Promise<Result<{ canceled: boolean; alreadyStopped?: boolean; uploadId: string }>>;
     createSourceSnapshot: (payload: { sourceSnapshot: BoardCodeSourceSnapshotInput; metadata?: Record<string, unknown> }) => Promise<Result<{ fileId: string; checksum: string; manifest: Record<string, unknown>; createdAt: string }>>;
     prepareSourceRestoreMarker: (payload: { sourceSnapshot: BoardCodeSourceSnapshotInput; identity?: Record<string, unknown>; board?: Record<string, unknown>; metadata?: Record<string, unknown>; uploadId?: string; firmwareId?: string; operation?: string }) => Promise<Result<SourceRestoreMarker & { sourceSnapshotChecksum?: string; sourceSnapshotManifest?: Record<string, unknown>; createdAt?: string; status?: string; document?: Record<string, unknown> }>>;
     promoteSourceRestoreMarker: (payload: { markerId?: string; sourceRestoreMarker?: SourceRestoreMarker | null; firmwareId?: string }) => Promise<Result<{ promoted?: boolean; markerId?: string; appliedAt?: string }>>;

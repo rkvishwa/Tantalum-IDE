@@ -173,7 +173,12 @@ class BoardService {
                 databaseId,
                 collections.boards,
                 boardId,
-                { apiToken: newToken }
+                {
+                    apiToken: newToken,
+                    status: 'pending',
+                    lastSeen: null,
+                    provisioningStatus: 'pending'
+                }
             );
 
             return { success: true, apiToken: newToken };
@@ -229,13 +234,13 @@ class BoardService {
         if (board.status === 'pending') return 'pending';
         if (!board.lastSeen) return 'offline';
 
-        const lastSeen = new Date(board.lastSeen);
-        const now = new Date();
-        const diffMinutes = (now - lastSeen) / (1000 * 60);
+        const lastSeen = new Date(board.lastSeen).getTime();
+        if (!Number.isFinite(lastSeen)) return 'offline';
 
-        // Match the renderer grace period so transient WiFi or gateway delays do not
-        // make the same board disagree between local services and the UI.
-        return diffMinutes <= 5 ? 'online' : 'offline';
+        const ageMs = Date.now() - lastSeen;
+        if (ageMs < -30000) return 'offline';
+
+        return ageMs <= 150000 ? 'online' : 'offline';
     }
 }
 

@@ -24,6 +24,55 @@ const OTA_UPDATE_MODES = new Set(["polling", "mqtt", "both"]);
 const CLOUD_RUNTIME_BASE_LIBRARIES = ["ArduinoJson"];
 const CLOUD_RUNTIME_MQTT_LIBRARIES = ["PubSubClient"];
 
+function normalizeSerialPortPath(value) {
+  return String(value || "").trim();
+}
+
+function darwinCalloutPortPath(portPath) {
+  const normalized = normalizeSerialPortPath(portPath);
+  if (process.platform !== "darwin" || !normalized.startsWith("/dev/tty.")) {
+    return normalized;
+  }
+
+  const calloutPath = `/dev/cu.${normalized.slice("/dev/tty.".length)}`;
+  return fs.existsSync(calloutPath) ? calloutPath : normalized;
+}
+
+function physicalSerialPortKey(portPath) {
+  const normalized = normalizeSerialPortPath(portPath).toLowerCase();
+  if (process.platform === "darwin") {
+    return normalized.replace(/^\/dev\/(?:cu|tty)\./, "/dev/serial.");
+  }
+
+  return normalized;
+}
+
+function serialPortPathsMatch(left, right) {
+  const leftKey = physicalSerialPortKey(left);
+  const rightKey = physicalSerialPortKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function resolveUploadSerialPortPath(requestedPort, availablePort = "") {
+  const normalizedRequested = normalizeSerialPortPath(requestedPort);
+  const requestedCallout = darwinCalloutPortPath(normalizedRequested);
+  if (requestedCallout && requestedCallout !== normalizedRequested && fs.existsSync(requestedCallout)) {
+    return requestedCallout;
+  }
+
+  if (normalizedRequested && fs.existsSync(normalizedRequested)) {
+    return normalizedRequested;
+  }
+
+  if (requestedCallout && fs.existsSync(requestedCallout)) {
+    return requestedCallout;
+  }
+
+  const normalizedAvailable = normalizeSerialPortPath(availablePort);
+  const availableCallout = darwinCalloutPortPath(normalizedAvailable);
+  return availableCallout || normalizedAvailable || normalizedRequested;
+}
+
 function normalizeOtaUpdateMode(value, fallback = "polling") {
   const mode = String(value || "").trim().toLowerCase();
   return OTA_UPDATE_MODES.has(mode) ? mode : fallback;
@@ -82,6 +131,62 @@ function formatUsbWifiSerialError(error, port) {
   return message;
 }
 
+function validateWifiPassphrase(password) {
+  const value = String(password ?? "");
+  if (value.length === 0) {
+    return null;
+  }
+
+  if (value.length < 8 || value.length > 63) {
+    return "WPA/WPA2 WiFi passwords must be 8-63 printable ASCII characters. Use an empty password only for open networks.";
+  }
+
+  if (!/^[\x20-\x7e]+$/.test(value)) {
+    return "WPA/WPA2 WiFi passwords must use printable ASCII characters only.";
+  }
+
+  return null;
+}
+
+function appendUsbWifiDiagnostic(diagnostics, rawLine) {
+  const line = String(rawLine || "").trim().replace(/\s+/g, " ");
+  if (!line || line.startsWith("{")) {
+    return;
+  }
+
+  if (!/(wifi|ssid|disconnect|connected|provision|scan|rssi|auth|status|reason|ip|mqtt|heartbeat|cloud|tls|gateway|dns|tcp|failed|error)/i.test(line)) {
+    return;
+  }
+
+  const safeLine = line.length > 240 ? `${line.slice(0, 237)}...` : line;
+  if (diagnostics[diagnostics.length - 1] === safeLine) {
+    return;
+  }
+
+  diagnostics.push(safeLine);
+  if (diagnostics.length > 20) {
+    diagnostics.shift();
+  }
+}
+
+function formatUsbWifiProvisioningFailure(error, diagnostics) {
+  const message = String(error || "The board could not connect to WiFi with the provided credentials.").trim();
+  const details = diagnostics
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+
+  if (details.length === 0) {
+    return message;
+  }
+
+  const diagnosticText = details.join("\n").toLowerCase();
+  const hint = /reason:\s*39\b|timeout|status:\s*6\b/.test(diagnosticText)
+    ? "\n\nHint: the board can see this SSID, but WiFi association timed out. For a phone hotspot, enable 2.4 GHz or compatibility mode, disable WPA3-only or required protected management frames, verify the password, and check hotspot client limits or blocked-device lists."
+    : "";
+
+  return `${message}\n\nBoard diagnostics:\n${details.map((line) => `- ${line}`).join("\n")}${hint}`;
+}
+
 function isEsp32NativeUsbCdcBoardId(boardId) {
   const normalized = String(boardId || "").trim().toLowerCase();
   return ESP32_NATIVE_USB_CDC_BOARD_MARKERS.some((marker) => normalized === marker || normalized.includes(marker));
@@ -109,8 +214,8 @@ function withEsp32CloudRuntimeUploadOptions(fqbn) {
     optionList.push("CDCOnBoot=cdc");
   }
 
-  optionList.push("EraseFlash=all");
-  return `${baseFqbn}:${optionList.join(",")}`;
+  // Preserve NVS/Preferences so stored WiFi credentials survive runtime reinstalls.
+  return optionList.length > 0 ? `${baseFqbn}:${optionList.join(",")}` : baseFqbn;
 }
 
 class ProvisioningService {
@@ -306,6 +411,7 @@ class ProvisioningService {
         const portPath = (port.path || "").toLowerCase();
 
         return (
+          manufacturer.includes("espressif") ||
           manufacturer.includes("silicon") ||
           manufacturer.includes("ftdi") ||
           manufacturer.includes("ch340") ||
@@ -315,15 +421,27 @@ class ProvisioningService {
           portPath.includes("tty")
         );
       });
+      const seen = new Set();
+      const normalizedPorts = [];
+      for (const port of filteredPorts) {
+        const portPath = resolveUploadSerialPortPath(port.path);
+        const key = physicalSerialPortKey(portPath);
+        if (!portPath || seen.has(key)) {
+          continue;
+        }
 
-      return {
-        success: true,
-        ports: filteredPorts.map((port) => ({
-          path: port.path,
+        seen.add(key);
+        normalizedPorts.push({
+          path: portPath,
           manufacturer: port.manufacturer || "Unknown",
           vendorId: port.vendorId,
           productId: port.productId,
-        })),
+        });
+      }
+
+      return {
+        success: true,
+        ports: normalizedPorts,
       };
     } catch (error) {
       console.error("List ports error:", error);
@@ -332,9 +450,13 @@ class ProvisioningService {
   }
 
   async validatePortAvailable(port) {
-    const normalizedPort = String(port || "").trim();
+    const normalizedPort = resolveUploadSerialPortPath(port);
     if (!normalizedPort) {
       return { success: false, error: "Select a USB port before installing runtime firmware." };
+    }
+
+    if (fs.existsSync(normalizedPort)) {
+      return { success: true, port: normalizedPort };
     }
 
     const portsResult = await this.listPorts();
@@ -343,8 +465,8 @@ class ProvisioningService {
     }
 
     const availablePorts = portsResult.ports || [];
-    const portExists = availablePorts.some((entry) => String(entry.path || "").trim().toLowerCase() === normalizedPort.toLowerCase());
-    if (!portExists) {
+    const matchingPort = availablePorts.find((entry) => serialPortPathsMatch(entry.path, normalizedPort));
+    if (!matchingPort) {
       const availableText = availablePorts.map((entry) => entry.path).filter(Boolean).join(", ");
       return {
         success: false,
@@ -352,7 +474,7 @@ class ProvisioningService {
       };
     }
 
-    return { success: true };
+    return { success: true, port: resolveUploadSerialPortPath(normalizedPort, matchingPort.path) };
   }
 
   async uploadToBoard(sketchDir, port, boardType = "esp32:esp32:esp32", onProgress) {
@@ -360,6 +482,7 @@ class ProvisioningService {
     if (!portCheck.success) {
       return portCheck;
     }
+    const uploadPort = portCheck.port || port;
 
     const arduinoDirectory = await getArduinoLibraryDirectory();
     const { configDir, configFile } = createArduinoCliConfig(arduinoDirectory.userDir);
@@ -367,9 +490,9 @@ class ProvisioningService {
 
     try {
       const uploadBoardType = withEsp32CloudRuntimeUploadOptions(boardType);
-      const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", uploadBoardType, "--port", port, sketchDir];
+      const uploadArgs = ["--config-file", configFile, "compile", "--upload", "--fqbn", uploadBoardType, "--port", uploadPort, sketchDir];
       if (uploadBoardType !== String(boardType || "").trim()) {
-        onProgress?.("Erasing ESP32 flash before installing runtime firmware so stale OTA slots cannot boot old firmware.\n", "stdout");
+        onProgress?.("Applying ESP32 upload options while preserving stored WiFi credentials.\n", "stdout");
       }
 
       result = await this.runCliCommand(
@@ -413,6 +536,7 @@ class ProvisioningService {
       if (!portCheck.success) {
         return portCheck;
       }
+      const uploadPort = portCheck.port || port;
 
       const runtimeConfig = {
         boardId: board.$id,
@@ -442,10 +566,10 @@ class ProvisioningService {
         return firmwareResult;
       }
 
-      onProgress?.(`Uploading runtime firmware to ${port}...\n`, "stdout");
+      onProgress?.(`Uploading runtime firmware to ${uploadPort}...\n`, "stdout");
       const uploadResult = await this.uploadToBoard(
         firmwareResult.sketchDir,
-        port,
+        uploadPort,
         board.boardType,
         onProgress
       );
@@ -474,6 +598,7 @@ class ProvisioningService {
     const normalizedBoardId = String(boardId || "").trim();
     const normalizedPort = String(port || "").trim();
     const normalizedSsid = String(ssid || "").trim();
+    const normalizedPassword = String(password ?? "");
 
     if (!normalizedBoardId) {
       return { success: false, error: "A cloud board ID is required." };
@@ -491,9 +616,15 @@ class ProvisioningService {
     if (!portCheck.success) {
       return portCheck;
     }
+    const serialPortPath = portCheck.port || normalizedPort;
 
     if (!normalizedSsid) {
       return { success: false, error: "WiFi SSID is required." };
+    }
+
+    const passphraseError = validateWifiPassphrase(normalizedPassword);
+    if (passphraseError) {
+      return { success: false, error: passphraseError };
     }
 
     let SerialPort;
@@ -508,24 +639,25 @@ class ProvisioningService {
       type: "wifi-provision",
       boardId: normalizedBoardId,
       ssid: normalizedSsid,
-      password: String(password || ""),
+      password: normalizedPassword,
       nonce,
       signature: this.signWifiProvisioningCommand({
         boardId: normalizedBoardId,
         ssid: normalizedSsid,
-        password: String(password || ""),
+        password: normalizedPassword,
         nonce,
         commandSecret,
       }),
     };
 
     return await new Promise((resolve) => {
-      const serial = new SerialPort({ path: normalizedPort, baudRate: 115200, autoOpen: false });
+      const serial = new SerialPort({ path: serialPortPath, baudRate: 115200, autoOpen: false });
       let settled = false;
       let lineBuffer = "";
       let sendIntervalId = null;
       let sendDelayId = null;
       let timeoutId = null;
+      const diagnostics = [];
       const requestLine = `${JSON.stringify(request)}\n`;
       request.password = "";
 
@@ -556,9 +688,13 @@ class ProvisioningService {
       timeoutId = setTimeout(() => {
         settle({
           success: false,
-          error: "The board did not confirm WiFi provisioning over USB. Make sure runtime firmware is flashed, Serial Monitor is closed, and ESP32-S3/C3 boards were installed with USB CDC On Boot enabled.",
+          error: formatUsbWifiProvisioningFailure(
+            "The board did not confirm WiFi provisioning over USB. Make sure runtime firmware is flashed, Serial Monitor is closed, and ESP32-S3/C3 boards were installed with USB CDC On Boot enabled.",
+            diagnostics
+          ),
+          diagnostics,
         });
-      }, 60000);
+      }, 150000);
 
       serial.on("error", (error) => {
         if (settled) {
@@ -578,6 +714,7 @@ class ProvisioningService {
 
         for (const rawLine of lines) {
           const line = rawLine.trim();
+          appendUsbWifiDiagnostic(diagnostics, line);
           if (!line.startsWith("{")) {
             continue;
           }
@@ -594,6 +731,7 @@ class ProvisioningService {
           }
 
           if (message.status === "accepted") {
+            appendUsbWifiDiagnostic(diagnostics, "Board accepted USB WiFi provisioning command.");
             if (sendIntervalId) {
               clearInterval(sendIntervalId);
               sendIntervalId = null;
@@ -612,9 +750,15 @@ class ProvisioningService {
             return;
           }
 
+          const messageDiagnostics = Array.isArray(message.diagnostics) ? message.diagnostics.map((entry) => String(entry || "").trim()).filter(Boolean) : [];
+          for (const entry of messageDiagnostics) {
+            appendUsbWifiDiagnostic(diagnostics, entry);
+          }
+
           settle({
             success: false,
-            error: String(message.error || "The board could not connect to WiFi with the provided credentials."),
+            error: formatUsbWifiProvisioningFailure(message.error, diagnostics),
+            diagnostics,
           });
         }
       });
@@ -712,6 +856,9 @@ class ProvisioningService {
 
 const provisioningService = new ProvisioningService();
 provisioningService._test = {
+  physicalSerialPortKey,
+  serialPortPathsMatch,
+  validateWifiPassphrase,
   withEsp32CloudRuntimeUploadOptions,
 };
 

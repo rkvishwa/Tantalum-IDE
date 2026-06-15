@@ -13,4 +13,27 @@ function createTemperatureRetryRequestBody(requestBody) {
   return retryBody;
 }
 
-export { createTemperatureRetryRequestBody, isDefaultOnlyTemperatureError };
+function isUnsupportedMaxTokensError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /max_tokens/i.test(message) && /(unsupported|not supported|use ['"]?max_completion_tokens|instead)/i.test(message);
+}
+
+function createMaxCompletionTokensRetryRequestBody(requestBody) {
+  if (!requestBody || typeof requestBody !== 'object' || !Object.prototype.hasOwnProperty.call(requestBody, 'max_tokens')) {
+    return null;
+  }
+
+  const retryBody = { ...requestBody };
+  if (!Object.prototype.hasOwnProperty.call(retryBody, 'max_completion_tokens')) {
+    retryBody.max_completion_tokens = retryBody.max_tokens;
+  }
+  delete retryBody.max_tokens;
+  return retryBody;
+}
+
+export {
+  createMaxCompletionTokensRetryRequestBody,
+  createTemperatureRetryRequestBody,
+  isDefaultOnlyTemperatureError,
+  isUnsupportedMaxTokensError,
+};

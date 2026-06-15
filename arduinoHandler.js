@@ -2574,8 +2574,17 @@ function runArduinoCli(args, options = {}) {
   const cliPath = getCliPath();
 
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(createCanceledError());
+      return;
+    }
+
     execFile(cliPath, args, withArduinoCliEnv({ maxBuffer: ARDUINO_CLI_OUTPUT_MAX_BUFFER, ...options }), (error, stdout, stderr) => {
       if (error) {
+        if (options.signal?.aborted || isCanceledError(error)) {
+          reject(createCanceledError());
+          return;
+        }
         reject(createArduinoCliError(error, stdout, stderr));
         return;
       }

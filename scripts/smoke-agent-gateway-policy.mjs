@@ -9,8 +9,10 @@ import {
   normalizeAgentOutputStyle,
 } from '../functions/agent-gateway/src/outputPolicy.js';
 import {
+  createMaxCompletionTokensRetryRequestBody,
   createTemperatureRetryRequestBody,
   isDefaultOnlyTemperatureError,
+  isUnsupportedMaxTokensError,
 } from '../functions/agent-gateway/src/requestPolicy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -132,12 +134,40 @@ function runTemperatureRetryPolicySmoke() {
   assert.equal(createTemperatureRetryRequestBody({ model: 'openai/tantalum-fast' }), null);
 }
 
+function runMaxCompletionTokensRetryPolicySmoke() {
+  const unsupported = new Error("Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.");
+  assert.equal(isUnsupportedMaxTokensError(unsupported), true);
+  assert.equal(isUnsupportedMaxTokensError(new Error('Provider request failed.')), false);
+
+  const original = {
+    model: 'openai/tantalum-power',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: 'Hello' }],
+  };
+  const retry = createMaxCompletionTokensRetryRequestBody(original);
+  assert.ok(retry);
+  assert.equal(Object.prototype.hasOwnProperty.call(retry, 'max_tokens'), false);
+  assert.equal(retry.max_completion_tokens, 2048);
+  assert.equal(retry.model, original.model);
+  assert.equal(original.max_tokens, 2048);
+
+  const existing = createMaxCompletionTokensRetryRequestBody({
+    model: 'openai/tantalum-power',
+    max_tokens: 2048,
+    max_completion_tokens: 1024,
+  });
+  assert.equal(existing.max_completion_tokens, 1024);
+  assert.equal(Object.prototype.hasOwnProperty.call(existing, 'max_tokens'), false);
+  assert.equal(createMaxCompletionTokensRetryRequestBody({ model: 'openai/tantalum-fast' }), null);
+}
+
 async function runPowerModeSourceSmoke() {
   const source = await fs.readFile(path.join(__dirname, '..', 'functions', 'agent-gateway', 'src', 'main.js'), 'utf8');
   assert.match(source, /value === 'power' \|\| value === 'plan' \? 'power' : 'fast'/);
   assert.match(source, /alias === 'tantalum-power-editor'/);
   assert.match(source, /mode === 'power' \? 'Power' : 'Fast'/);
   assert.match(source, /source === 'managed' && mode === 'power' \? 2 : 1/);
+  assert.match(source, /useMaxCompletionTokens: mode === 'power'/);
   assert.match(source, /openai\/tantalum-power/);
 }
 
@@ -147,6 +177,7 @@ runResponsesPolicySmoke();
 runCompletionsPolicySmoke();
 runStyleNormalizationSmoke();
 runTemperatureRetryPolicySmoke();
+runMaxCompletionTokensRetryPolicySmoke();
 await runPowerModeSourceSmoke();
 
 console.log('agent gateway output policy smoke checks passed');
