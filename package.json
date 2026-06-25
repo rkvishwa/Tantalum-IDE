@@ -24,6 +24,7 @@
     "smoke:agent-gateway": "node scripts/smoke-agent-gateway-policy.mjs",
     "smoke:board-code": "node scripts/smoke-board-code-service.js",
     "smoke:provisioning": "node scripts/smoke-provisioning-service.js",
+    "smoke:desktop-auth": "node scripts/smoke-desktop-auth.mjs",
     "smoke:device-gateway-ota-url": "node scripts/smoke-device-gateway-ota-url.mjs",
     "smoke:device-gateway-telemetry": "node scripts/smoke-device-gateway-telemetry.mjs",
     "smoke:firmware-checksum": "node scripts/smoke-firmware-checksum.mjs",
@@ -84,21 +85,30 @@
       "**/*",
       "!resources/arduino-cli/**/*"
     ],
-    "extraResources": [
-      {
-        "from": "resources/arduino-cli/",
-        "to": "arduino-cli",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "mac": {
       "target": "zip",
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "extraResources": [
+        {
+          "from": "resources/macos/",
+          "to": "macos",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        {
+          "from": "resources/windows/",
+          "to": "windows",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "linux": {
       "target": [

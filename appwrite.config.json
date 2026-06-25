@@ -347,6 +347,10 @@
                 {
                     "key": "TANTALUM_DESKTOP_CALLBACK_SCHEME",
                     "value": "tantalum"
+                },
+                {
+                    "key": "TANTALUM_ALLOWED_AUTH_CALLBACK_SCHEMES",
+                    "value": "tantalum,tantalum-mobile"
                 }
             ]
         },
@@ -363,7 +367,7 @@
             "logging": true,
             "events": [],
             "schedule": "",
-            "timeout": 30,
+            "timeout": 120,
             "commands": "npm install",
             "scopes": [
                 "databases.read",
@@ -371,7 +375,12 @@
                 "documents.read",
                 "documents.write",
                 "users.read",
-                "users.write"
+                "users.write",
+                "functions.read",
+                "execution.read",
+                "execution.write",
+                "buckets.read",
+                "files.read"
             ],
             "variables": [
                 {
@@ -409,8 +418,150 @@
                 {
                     "key": "ADMIN_LABEL",
                     "value": "admin"
+                },
+                {
+                    "key": "APPWRITE_UTILITY_AI_MODEL_POOL_COLLECTION_ID",
+                    "value": "utility_ai_model_pool"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECTS_COLLECTION_ID",
+                    "value": "cloud_projects"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECT_DEVICES_COLLECTION_ID",
+                    "value": "cloud_project_devices"
+                },
+                {
+                    "key": "APPWRITE_CLOUD_PROJECT_SYNC_EVENTS_COLLECTION_ID",
+                    "value": "cloud_project_sync_events"
+                },
+                {
+                    "key": "APPWRITE_SUPPORT_TICKETS_COLLECTION_ID",
+                    "value": "support_tickets"
+                },
+                {
+                    "key": "APPWRITE_ADMIN_OPERATION_RUNS_COLLECTION_ID",
+                    "value": "admin_operation_runs"
+                },
+                {
+                    "key": "APPWRITE_ADMIN_AUDIT_EVENTS_COLLECTION_ID",
+                    "value": "admin_audit_events"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_BUCKET_ID",
+                    "value": "firmware_bucket"
+                },
+                {
+                    "key": "APPWRITE_FIRMWARE_SOURCE_BUCKET_ID",
+                    "value": "firmware_source_snapshots"
+                },
+                {
+                    "key": "APPWRITE_AGENT_SETTINGS_FUNCTION_ID",
+                    "value": "agent-settings"
+                },
+                {
+                    "key": "APPWRITE_BOARD_ADMIN_FUNCTION_ID",
+                    "value": "board-admin"
+                },
+                {
+                    "key": "APPWRITE_DEVICE_GATEWAY_FUNCTION_ID",
+                    "value": "device-gateway"
+                },
+                {
+                    "key": "APPWRITE_AGENT_GATEWAY_FUNCTION_ID",
+                    "value": "agent-gateway"
+                },
+                {
+                    "key": "APPWRITE_BOARD_DETECTION_FUNCTION_ID",
+                    "value": "board-detection"
+                },
+                {
+                    "key": "APPWRITE_PROJECT_SYNC_FUNCTION_ID",
+                    "value": "project-sync"
+                },
+                {
+                    "key": "APPWRITE_DESKTOP_AUTH_FUNCTION_ID",
+                    "value": "desktop-auth"
+                },
+                {
+                    "key": "AZURE_SUBSCRIPTION_ID",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_TENANT_ID",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_CLIENT_ID",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_CLIENT_SECRET",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_APPWRITE_RESOURCE_GROUP",
+                    "value": "rg-tantalum-appwrite-prod"
+                },
+                {
+                    "key": "AZURE_APPWRITE_VM_NAME",
+                    "value": "vm-tantalum-appwrite-prod"
+                },
+                {
+                    "key": "AZURE_GITEA_RESOURCE_GROUP",
+                    "value": "rg-tantalum-git-prod"
+                },
+                {
+                    "key": "AZURE_GITEA_VM_NAME",
+                    "value": "vm-tantalum-git-prod"
+                },
+                {
+                    "key": "AZURE_LOG_ANALYTICS_WORKSPACE_ID",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_LOG_ANALYTICS_RESOURCE_GROUP",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_LOG_ANALYTICS_WORKSPACE_NAME",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_BACKUP_STORAGE_ACCOUNT",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_BACKUP_CONTAINER",
+                    "value": "appwrite-backups"
+                },
+                {
+                    "key": "AZURE_BACKUP_PREFIX",
+                    "value": "scheduled/"
+                },
+                {
+                    "key": "AZURE_GITEA_BACKUP_STORAGE_ACCOUNT",
+                    "value": ""
+                },
+                {
+                    "key": "AZURE_GITEA_BACKUP_CONTAINER",
+                    "value": "git-backups"
+                },
+                {
+                    "key": "AZURE_GITEA_BACKUP_PREFIX",
+                    "value": "scheduled/"
+                },
+                {
+                    "key": "TANTALUM_SECRET_KEK_V1",
+                    "value": ""
+                },
+                {
+                    "key": "TANTALUM_SECRET_ACTIVE_KEK_VERSION",
+                    "value": "v1"
                 }
-            ]
+            ],
+            "runtimeSpecification": "s-8vcpu-8gb",
+            "buildSpecification": "s-8vcpu-8gb"
         },
         {
             "$id": "project-sync",
@@ -3477,6 +3628,248 @@
                         "status"
                     ],
                     "orders": []
+                }
+            ]
+        },
+        {
+            "$id": "admin_operation_runs",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Admin Operation Runs",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "actorUserId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "operation",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "target",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "preflightJson",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "resultJson",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "error",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "updatedAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                },
+                {
+                    "key": "completedAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "admin_ops_actor_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "actorUserId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "admin_ops_status_updated",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status",
+                        "updatedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "admin_ops_operation_updated",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "operation",
+                        "updatedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "admin_audit_events",
+            "$permissions": [],
+            "databaseId": "697b8f660033fffde4be",
+            "name": "Admin Audit Events",
+            "enabled": true,
+            "rowSecurity": true,
+            "columns": [
+                {
+                    "key": "actorUserId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "action",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 128,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "target",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 255,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "status",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 32,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "message",
+                    "type": "text",
+                    "required": true,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "metadataJson",
+                    "type": "text",
+                    "required": false,
+                    "array": false,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "createdAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "default": null
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "admin_audit_actor_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "actorUserId",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "admin_audit_action_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "action",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "admin_audit_status_created",
+                    "type": "key",
+                    "status": "available",
+                    "columns": [
+                        "status",
+                        "createdAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
                 }
             ]
         }

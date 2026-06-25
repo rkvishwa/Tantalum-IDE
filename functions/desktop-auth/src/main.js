@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 
 import { Account, Client, Databases, Users } from 'node-appwrite';
+import {
+  ALLOWED_CALLBACK_SCHEMES,
+  normalizeScheme,
+  sha256Base64Url,
+  validateExchangeInput,
+  validateGrantInput,
+} from './authPolicy.js';
 
 const {
   APPWRITE_FUNCTION_API_ENDPOINT,
@@ -9,12 +16,10 @@ const {
   APPWRITE_DESKTOP_AUTH_GRANTS_COLLECTION_ID = 'desktop_auth_grants',
   TANTALUM_DESKTOP_AUTH_GRANT_TTL_SECONDS = '180',
   TANTALUM_DESKTOP_AUTH_TOKEN_TTL_SECONDS = '120',
-  TANTALUM_DESKTOP_CALLBACK_SCHEME = 'tantalum',
 } = process.env;
 
 const GRANT_TTL_MS = Math.max(30, Number.parseInt(TANTALUM_DESKTOP_AUTH_GRANT_TTL_SECONDS, 10) || 180) * 1000;
 const TOKEN_TTL_SECONDS = Math.max(30, Number.parseInt(TANTALUM_DESKTOP_AUTH_TOKEN_TTL_SECONDS, 10) || 120);
-const BASE64URL_RE = /^[A-Za-z0-9_-]{16,256}$/;
 
 function json(res, status, payload) {
   return res.json(payload, status);
@@ -89,36 +94,8 @@ async function resolveUser(req) {
   return account.get();
 }
 
-function sha256Base64Url(value) {
-  return crypto.createHash('sha256').update(String(value), 'utf8').digest('base64url');
-}
-
 function generateGrantId() {
   return `dg_${crypto.randomBytes(18).toString('hex')}`;
-}
-
-function normalizeScheme(value) {
-  const scheme = String(value || TANTALUM_DESKTOP_CALLBACK_SCHEME || 'tantalum').trim().toLowerCase();
-  return /^[a-z][a-z0-9+.-]{1,31}$/.test(scheme) ? scheme : 'tantalum';
-}
-
-function validateGrantInput(payload) {
-  const state = String(payload.state || '').trim();
-  const codeChallenge = String(payload.codeChallenge || '').trim();
-
-  if (!BASE64URL_RE.test(state)) {
-    throw Object.assign(new Error('Invalid desktop login state.'), { statusCode: 400 });
-  }
-
-  if (!BASE64URL_RE.test(codeChallenge)) {
-    throw Object.assign(new Error('Invalid desktop login challenge.'), { statusCode: 400 });
-  }
-
-  return {
-    state,
-    codeChallenge,
-    callbackScheme: normalizeScheme(payload.callbackScheme),
-  };
 }
 
 async function createGrant(req, res) {
@@ -128,7 +105,7 @@ async function createGrant(req, res) {
 
   const user = await resolveUser(req);
   if (!user.emailVerification) {
-    return fail(res, 403, 'Verify your email address before signing in to the desktop app.');
+    return fail(res, 403, 'Verify your email address before signing in to the app.');
   }
 
   const payload = validateGrantInput(readPayload(req));
@@ -155,22 +132,6 @@ async function createGrant(req, res) {
   }, 201);
 }
 
-function validateExchangeInput(payload) {
-  const grantId = String(payload.grantId || payload.grant || '').trim();
-  const state = String(payload.state || '').trim();
-  const codeVerifier = String(payload.codeVerifier || '').trim();
-
-  if (!/^dg_[a-f0-9]{36}$/.test(grantId)) {
-    throw Object.assign(new Error('Invalid desktop login grant.'), { statusCode: 400 });
-  }
-
-  if (!BASE64URL_RE.test(state) || !BASE64URL_RE.test(codeVerifier)) {
-    throw Object.assign(new Error('Invalid desktop login proof.'), { statusCode: 400 });
-  }
-
-  return { grantId, state, codeVerifier };
-}
-
 async function exchangeGrant(req, res) {
   if (!APPWRITE_DATABASE_ID || !APPWRITE_DESKTOP_AUTH_GRANTS_COLLECTION_ID) {
     return fail(res, 500, 'Desktop auth storage is not configured.');
@@ -184,29 +145,29 @@ async function exchangeGrant(req, res) {
   const now = new Date();
 
   if (grant.consumedAt) {
-    return fail(res, 409, 'This desktop login grant has already been used.');
+    return fail(res, 409, 'This app login grant has already been used.');
   }
 
   if (new Date(grant.expiresAt).getTime() <= now.getTime()) {
-    return fail(res, 410, 'This desktop login grant has expired.');
+    return fail(res, 410, 'This app login grant has expired.');
   }
 
   if (grant.stateHash !== sha256Base64Url(payload.state)) {
-    return fail(res, 400, 'Desktop login state did not match.');
+    return fail(res, 400, 'App login state did not match.');
   }
 
   if (grant.codeChallenge !== sha256Base64Url(payload.codeVerifier)) {
-    return fail(res, 400, 'Desktop login proof did not match.');
+    return fail(res, 400, 'App login proof did not match.');
   }
 
   const user = await users.get(grant.userId);
   if (!user.emailVerification) {
-    return fail(res, 403, 'Verify your email address before signing in to the desktop app.');
+    return fail(res, 403, 'Verify your email address before signing in to the app.');
   }
 
   const token = await users.createToken(user.$id, 64, TOKEN_TTL_SECONDS);
   if (!token?.secret) {
-    return fail(res, 500, 'Unable to create desktop login token.');
+    return fail(res, 500, 'Unable to create app login token.');
   }
 
   await databases.updateDocument(APPWRITE_DATABASE_ID, APPWRITE_DESKTOP_AUTH_GRANTS_COLLECTION_ID, grant.$id, {
@@ -222,18 +183,23 @@ async function exchangeGrant(req, res) {
 }
 
 function errorResponse(caughtError) {
-  const rawMessage = caughtError instanceof Error ? caughtError.message : 'Unexpected desktop auth failure.';
+  const rawMessage = caughtError instanceof Error ? caughtError.message : 'Unexpected app auth failure.';
   const statusCode = Number(caughtError?.statusCode || caughtError?.code || 0);
   return {
     status: statusCode >= 400 && statusCode < 600 ? statusCode : 500,
-    error: statusCode >= 500 ? 'Desktop login failed. Try again.' : rawMessage,
+    error: statusCode >= 500 ? 'App login failed. Try again.' : rawMessage,
   };
 }
 
 export default async function ({ req, res, error }) {
   try {
     if (req.path === '/health' || req.path === '/warm') {
-      return ok(res, { service: 'desktop-auth', status: 'ok', timestamp: new Date().toISOString() });
+      return ok(res, {
+        service: 'desktop-auth',
+        status: 'ok',
+        allowedCallbackSchemes: [...ALLOWED_CALLBACK_SCHEMES],
+        timestamp: new Date().toISOString(),
+      });
     }
 
     if (req.path === '/grant') {
@@ -251,3 +217,11 @@ export default async function ({ req, res, error }) {
     return fail(res, response.status, response.error);
   }
 }
+
+export const _test = {
+  ALLOWED_CALLBACK_SCHEMES,
+  normalizeScheme,
+  validateExchangeInput,
+  validateGrantInput,
+  sha256Base64Url,
+};
