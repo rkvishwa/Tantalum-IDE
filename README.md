@@ -18,6 +18,16 @@ Tantalum IDE is a desktop application built with Electron, React, and TypeScript
 
 ---
 
+## 🌐 The Tantalum Ecosystem
+
+Tantalum is composed of three interconnected open-source projects that work together to provide a complete hardware development and deployment platform:
+
+1. **[Tantalum IDE](https://github.com/rkvishwa/Tantalum-IDE)**: The core desktop application. It provides the code editor, local workspace management, firmware compilation (via Arduino CLI), OTA deployment orchestration, and the Agentic AI coding assistant.
+2. **[Tantalum Web](https://github.com/rkvishwa/Tantalum-Web)**: The cloud portal and admin dashboard. It handles user authentication, cloud board management, firmware version tracking, AI agent settings, and administrative oversight.
+3. **[Tantalum Mobile](https://github.com/rkvishwa/Tantalum-Mobile)**: The companion Android app. Used for securely provisioning WiFi credentials to IoT boards in the field via BLE or SoftAP, bridging physical hardware to your cloud account without exposing credentials.
+
+---
+
 ## ✨ Features
 
 - **Arduino Sketch Editing:** Full-featured code editor powered by Monaco Editor, tuned for C/C++.
@@ -85,9 +95,17 @@ Here are the primary scripts available in `package.json`:
 
 Tantalum IDE uses Appwrite as its backend for OTA firmware updates, authentication, and cloud synchronization. Follow these steps to self-host the Appwrite backend.
 
-### 1. Appwrite CLI Setup
+### 1. Appwrite CLI Setup & VPS Infrastructure
 
-For the self-hosted Azure deployment path, use `docs/azure-selfhost-appwrite.md` (if available). That runbook provisions the Azure VM, mounts a 256 GB Appwrite data disk, installs backup/restore scripts, updates the app target, and seeds only the important clean-environment config.
+Tantalum IDE uses Azure Virtual Machines for its cloud backend. We employ a **Vertical Scaling strategy** to manage costs effectively.
+
+For the Appwrite backend, use the provided `docs/azure-selfhost-appwrite.md` runbook. It provisions an Azure VM (starting at `Standard_B2s_v2` for the baseline MVP), mounts a 256 GB Appwrite data disk, installs backup scripts, and seeds the necessary environment variables.
+
+If your workload increases, use the included PowerShell scaling scripts (e.g., `infra/azure/resize-vm.ps1`) to vertically scale the Appwrite VPS through predefined tiers:
+- **Cost:** `Standard_B2ls_v2` (for light/staging workloads)
+- **Baseline:** `Standard_B2s_v2` (Current MVP)
+- **Growth:** `Standard_B4s_v2` (First upgrade step)
+- **Surge:** `Standard_B8s_v2` (For high-load periods)
 
 The Appwrite CLI for production should target:
 - **endpoint:** `https://fra.cloud.appwrite.io/v1`
@@ -162,22 +180,27 @@ Deploy these using the Appwrite CLI. Ensure that function variables are set corr
    - `TANTALUM_MQTT_CA_CERT`
 7. Set desktop/runtime build variables: `TANTALUM_MQTT_HOST=mqtt.yourdomain.com`, `TANTALUM_MQTT_PORT=8883`, `TANTALUM_MQTT_DEVICE_USERNAME=tantalum_device`, `TANTALUM_MQTT_DEVICE_PASSWORD`, and `TANTALUM_MQTT_CA_CERT`.
 
-**AI Keys Setup:**
-Generate a Master Key (KEK) for encrypting AI Provider API keys:
-```bash
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
-```
-Set `TANTALUM_SECRET_KEK_V1` in the AI functions (`agent-settings`, `agent-gateway`, `board-detection`).
+**Cloud Sync & Workspace Backup (Gitea VPS):**
+Tantalum uses a dedicated VPS for cloud syncing local workspaces. We use Gitea for this.
+1. Run the `infra/azure/deploy-gitea-vm.ps1` script to deploy the Git VM (default `Standard_B2ls_v2`).
+2. Run `infra/azure/configure-gitea.ps1` to install and set up Gitea.
+3. If your workspace sync volume grows, you can vertically scale this VM using `infra/azure/resize-gitea-vm.ps1`.
 
-API key records now store encrypted `apiKeyEnvelope` values. To migrate or apply manually:
-```bash
-npm run migrate:api-key-envelopes
-npm run migrate:api-key-envelopes -- --apply
-```
-To encrypt API keys manually:
-```bash
-npm run secret:encrypt-api-key
-```
+**Tantalum AI Layer & Keys Setup:**
+Tantalum features a custom AI layer built on top of the OpenCode SDK. To use the AI agent, you must provision API keys.
+1. Generate a Master Key (KEK) for encrypting AI Provider API keys:
+   ```bash
+   node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+   ```
+2. Set `TANTALUM_SECRET_KEK_V1` in the AI functions (`agent-settings`, `agent-gateway`, `board-detection`).
+3. You can provide AI API keys via the Web Portal interface, or migrate them directly in the DB using the provided tools:
+   ```bash
+   npm run migrate:api-key-envelopes
+   ```
+4. To encrypt API keys manually for DB seeding:
+   ```bash
+   npm run secret:encrypt-api-key
+   ```
 </details>
 
 ### 5. Database & Storage Structure
