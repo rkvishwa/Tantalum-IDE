@@ -1,3 +1,9 @@
+---
+layout: default
+title: Azure Self-Hosted Appwrite Runbook
+description: Production-minded Azure VM runbook for self-hosting Appwrite for Tantalum IDE.
+---
+
 # Azure Self-Hosted Appwrite Runbook
 
 This runbook is written for macOS Terminal/zsh. The repo's Azure helper scripts are PowerShell files, so on macOS run them with `pwsh`.

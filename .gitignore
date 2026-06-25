@@ -2,16 +2,38 @@ node_modules
 dist
 backups
 renderer-react/dist
-renderer-react/.env
-renderer-react/.env.local
+
+# Local environment files
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
 infra/selfhost/*.env
 infra/selfhost/*.env.local
 infra/azure/.gitea-*.json
 infra/azure/.gitea-*.txt
+sites/**/.env
+sites/**/.env.local
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local logs
+*.log
+build_log.txt
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
 resources/arduino-cli/linux
 resources/arduino-cli/windows
 resources/arduino-cli/macos
 sites/**/.next
 sites/**/node_modules
-sites/**/.env
-sites/**/.env.local

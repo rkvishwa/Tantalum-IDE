@@ -1,0 +1,7 @@
+title: Tantalum IDE Documentation
+description: Technical documentation for Tantalum IDE, self-hosting, board detection, OTA updates, source recovery, and cloud sync.
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+permalink: pretty
