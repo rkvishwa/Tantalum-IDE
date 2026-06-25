@@ -26,557 +26,842 @@
       <nav id="site-nav" class="site-nav" data-site-nav>
         <a href="#overview">Overview</a>
         <a href="#features">Features</a>
-        <a href="#architecture">How it works</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#workflows">Workflows</a>
         <a href="#self-host">Self-host</a>
+        <a href="#security">Security</a>
         <a href="#developer">Develop</a>
-        <a href="#pages">GitHub Pages</a>
       </nav>
     </header>
 
     <main id="top">
+      <!-- Split Hero Section -->
       <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-inner">
-          <p class="eyebrow">Desktop hardware development platform</p>
-          <h1 id="hero-title">Tantalum IDE</h1>
-          <p class="hero-copy">
-            A local-first Electron IDE for Arduino sketches, board management, firmware builds,
-            over-the-air deployment, source snapshot recovery, workspace cloud sync, and an integrated
-            agentic coding assistant.
-          </p>
-          <div class="hero-actions" aria-label="Primary documentation links">
-            <a class="button primary" href="#self-host">Self-hosting guide</a>
-            <a class="button" href="#architecture">Architecture</a>
-            <a class="button" href="azure-selfhost-appwrite.html">Azure runbook</a>
+        <div class="hero-container">
+          <div class="hero-content">
+            <p class="eyebrow">Desktop hardware development platform</p>
+            <h1 id="hero-title">Tantalum IDE</h1>
+            <p class="hero-copy">
+              A local-first Electron IDE for Arduino sketches, board management, firmware builds,
+              over-the-air deployment, source snapshot recovery, workspace cloud sync, and an integrated
+              agentic coding assistant.
+            </p>
+            <div class="hero-actions" aria-label="Primary documentation links">
+              <a class="button primary" href="#self-host">Self-hosting guide</a>
+              <a class="button" href="#architecture">Architecture</a>
+              <a class="button" href="azure-selfhost-appwrite.html">Azure runbook</a>
+            </div>
+          </div>
+          <div class="hero-visual">
+            <div class="glow-effect"></div>
+            <div class="window-mockup">
+              <div class="window-header">
+                <span class="window-dot red"></span>
+                <span class="window-dot yellow"></span>
+                <span class="window-dot green"></span>
+                <span class="window-title">Tantalum IDE — workspace.ino</span>
+              </div>
+              <div class="window-body">
+                <img src="assets/screenshots/workspace.jpeg" alt="Tantalum IDE workspace and Monaco editor interface" />
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
-      <section id="overview" class="section">
-        <div class="section-heading">
-          <p class="eyebrow">What this project is</p>
-          <h2>Tantalum in one page</h2>
-          <p>
-            Tantalum IDE is the desktop part of a larger hardware deployment platform. It keeps
-            day-to-day editing and toolchain work local, then uses Appwrite, Gitea, and MQTT when
-            a project needs authentication, backup, OTA delivery, telemetry, or AI model access.
-          </p>
-        </div>
+      <!-- Main Docs Wrapper (Two-column layout on Desktop) -->
+      <div class="docs-container">
+        <!-- Sidebar Navigation -->
+        <aside class="docs-sidebar" aria-label="Documentation table of contents">
+          <nav class="sidebar-nav" data-sidebar-nav>
+            <a href="#overview" class="sidebar-link active">Overview</a>
+            <a href="#features" class="sidebar-link">Features</a>
+            <a href="#architecture" class="sidebar-link">System Architecture</a>
+            <a href="#workflows" class="sidebar-link">Workflow Map</a>
+            <a href="#self-host" class="sidebar-link">Self-Host Setup</a>
+            <a href="#security" class="sidebar-link">Security Model</a>
+            <a href="#developer" class="sidebar-link">Local Development</a>
+          </nav>
+        </aside>
 
-        <div class="ecosystem-grid">
-          <article class="info-card">
-            <h3>Tantalum IDE</h3>
-            <p>
-              Electron main process, React renderer, Monaco editor, Arduino CLI orchestration,
-              serial tooling, local board profiles, OTA release creation, and AI agent runtime.
-            </p>
-          </article>
-          <article class="info-card">
-            <h3>Tantalum Web</h3>
-            <p>
-              Cloud portal for authentication, board administration, firmware history, agent
-              settings, entitlements, support, and administrative operations.
-            </p>
-          </article>
-          <article class="info-card">
-            <h3>Tantalum Mobile</h3>
-            <p>
-              Companion provisioning app for sending WiFi credentials to devices through BLE or
-              SoftAP using board proof-of-possession, without exposing WiFi secrets to the cloud.
-            </p>
-          </article>
-        </div>
+        <!-- Document Sections Content -->
+        <div class="docs-content">
+          
+          <!-- Overview Section -->
+          <section id="overview" class="docs-section" aria-labelledby="heading-overview">
+            <div class="section-heading">
+              <p class="eyebrow">Overview</p>
+              <h2 id="heading-overview">Tantalum in one page</h2>
+              <p>
+                Tantalum IDE is the desktop foundation of a distributed hardware deployment ecosystem. It keeps
+                day-to-day editing and compilation local, connecting to Appwrite, Gitea, and MQTT only when
+                a project requires secure authentication, backup, OTA delivery, live telemetry, or AI model access.
+              </p>
+            </div>
 
-        <div class="screenshot-strip" aria-label="Tantalum IDE screenshots">
-          <figure>
-            <img src="assets/screenshots/workspace.jpeg" alt="Tantalum IDE workspace and editor" />
-            <figcaption>Workspace and editor</figcaption>
-          </figure>
-          <figure>
-            <img src="assets/screenshots/ai-assistant.jpeg" alt="Tantalum IDE AI assistant panel" />
-            <figcaption>Agent assistant</figcaption>
-          </figure>
-          <figure>
-            <img src="assets/screenshots/ota-updates.jpeg" alt="Tantalum IDE firmware OTA screen" />
-            <figcaption>OTA updates</figcaption>
-          </figure>
-        </div>
-      </section>
+            <!-- Bento Ecosystem Grid -->
+            <div class="bento-grid-ecosystem">
+              <article class="bento-card highlight">
+                <div class="bento-card-header">
+                  <div class="icon-wrapper accent-sky">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                  </div>
+                  <h3>Tantalum IDE</h3>
+                </div>
+                <p>
+                  Electron main process, React renderer, Monaco editor, Arduino CLI orchestration,
+                  serial tooling, local board profiles, OTA release creation, and AI agent runtime.
+                  The core engine that runs on your local machine.
+                </p>
+              </article>
+              <article class="bento-card">
+                <div class="bento-card-header">
+                  <div class="icon-wrapper accent-rose">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                  </div>
+                  <h3>Tantalum Web</h3>
+                </div>
+                <p>
+                  Cloud portal for authentication, board administration, firmware history, agent
+                  settings, entitlements, support, and administrative operations.
+                </p>
+              </article>
+              <article class="bento-card">
+                <div class="bento-card-header">
+                  <div class="icon-wrapper accent-leaf">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+                  </div>
+                  <h3>Tantalum Mobile</h3>
+                </div>
+                <p>
+                  Companion provisioning app for sending WiFi credentials to devices through BLE or
+                  SoftAP using board proof-of-possession, without exposing WiFi secrets to the cloud.
+                </p>
+              </article>
+            </div>
 
-      <section id="features" class="section section-tinted">
-        <div class="section-heading">
-          <p class="eyebrow">Core features</p>
-          <h2>What the IDE includes</h2>
-        </div>
+            <!-- Premium Screenshot Gallery -->
+            <div class="gallery-grid" aria-label="Tantalum IDE screenshots">
+              <figure class="gallery-item">
+                <div class="gallery-img-container">
+                  <img src="assets/screenshots/workspace.jpeg" alt="Tantalum IDE workspace and editor panel screenshot" />
+                </div>
+                <figcaption>Workspace and editor</figcaption>
+              </figure>
+              <figure class="gallery-item">
+                <div class="gallery-img-container">
+                  <img src="assets/screenshots/ai-assistant.jpeg" alt="Tantalum IDE AI assistant panel with agent options screenshot" />
+                </div>
+                <figcaption>Agent assistant</figcaption>
+              </figure>
+              <figure class="gallery-item">
+                <div class="gallery-img-container">
+                  <img src="assets/screenshots/ota-updates.jpeg" alt="Tantalum IDE firmware OTA screen with revision logs screenshot" />
+                </div>
+                <figcaption>OTA updates</figcaption>
+              </figure>
+            </div>
+          </section>
 
-        <div class="feature-grid">
-          <article class="feature-card">
-            <h3>Arduino editing and builds</h3>
-            <p>
-              Monaco-based sketch editing with Arduino CLI compile/upload, board packages, library
-              installation, streamed build output, and cancellation support.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Auto board detection</h3>
-            <p>
-              Combines Arduino CLI board metadata, USB serial metadata, stable hardware
-              fingerprints, ESP chip probing, and optional AI fallback for ambiguous boards.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Local board profiles</h3>
-            <p>
-              Saves FQBN, port, manufacturer, VID/PID, serial identity, cloud link, OTA mode, and
-              source-code visibility so physical boards can be recognized again after reconnecting.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Tantalum runtime</h3>
-            <p>
-              Injects runtime macros and `TantalumCloudRuntime.h` into temporary builds for
-              heartbeat, OTA polling, MQTT commands, TLS, provisioning, and telemetry.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>OTA firmware delivery</h3>
-            <p>
-              Builds locally, uploads firmware to Appwrite Storage, records metadata and checksums,
-              then queues deployment through polling, MQTT, or both.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>View Code recovery</h3>
-            <p>
-              Restores exact source from Tantalum source snapshots by scanning firmware for an
-              embedded marker and verifying cloud snapshot checksums.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Project cloud sync</h3>
-            <p>
-              Uses a shadow Git repository and Gitea remote so workspace backup does not mutate the
-              user's own Git repository.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Agentic AI assistant</h3>
-            <p>
-              Routes prompts through the Tantalum agent runtime, OpenCode SDK, Appwrite gateway,
-              safe workspace context, restore points, and Arduino/Git tool execution.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3>Serial monitor and plotter</h3>
-            <p>
-              Reads serial output, supports numeric plot parsing, and checks for serial-port
-              blockers before uploads, provisioning, or board-code readback.
-            </p>
-          </article>
-        </div>
-      </section>
+          <!-- Features Section -->
+          <section id="features" class="docs-section docs-section-tinted" aria-labelledby="heading-features">
+            <div class="section-heading">
+              <p class="eyebrow">Core Features</p>
+              <h2 id="heading-features">What the IDE includes</h2>
+            </div>
 
-      <section id="architecture" class="section">
-        <div class="section-heading">
-          <p class="eyebrow">How it works</p>
-          <h2>System architecture</h2>
-          <p>
-            Tantalum keeps privileged operations in Electron main, exposes a narrow IPC surface
-            through preload, and lets the React renderer focus on the user interface.
-          </p>
-        </div>
+            <div class="bento-grid-features">
+              <article class="feature-card highlight-cyan">
+                <div class="icon-wrapper accent-sky">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6M8 6L2 12l6 6"/></svg>
+                </div>
+                <h3>Arduino editing and builds</h3>
+                <p>
+                  Monaco-based sketch editing with Arduino CLI compile/upload, board packages, library
+                  installation, streamed build output, and compilation cancellation support.
+                </p>
+              </article>
+              
+              <article class="feature-card">
+                <div class="icon-wrapper accent-rose">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2v20M2 12h20M12 12l4.5-4.5M12 12L7.5 16.5"/></svg>
+                </div>
+                <h3>Auto board detection</h3>
+                <p>
+                  Combines Arduino CLI board metadata, USB serial metadata, stable hardware
+                  fingerprints, ESP chip probing, and optional AI fallback for ambiguous boards.
+                </p>
+              </article>
 
-        <div class="flow-diagram" aria-label="High level Tantalum architecture">
-          <div class="flow-node">React renderer</div>
-          <div class="flow-link">IPC</div>
-          <div class="flow-node">Electron main</div>
-          <div class="flow-link">tooling</div>
-          <div class="flow-node">Arduino CLI and serial tools</div>
-          <div class="flow-link">cloud</div>
-          <div class="flow-node">Appwrite, Gitea, MQTT</div>
-          <div class="flow-link">runtime</div>
-          <div class="flow-node">IoT boards</div>
-        </div>
+              <article class="feature-card">
+                <div class="icon-wrapper accent-indigo">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19h16M4 15h16M4 11h16M4 7h16M7 3v18M17 3v18"/></svg>
+                </div>
+                <h3>Local board profiles</h3>
+                <p>
+                  Saves FQBN, port, manufacturer, VID/PID, serial identity, cloud link, OTA mode, and
+                  source-code visibility so physical boards are instantly recognized upon reconnection.
+                </p>
+              </article>
 
-        <div class="technical-grid">
-          <article class="technical-card">
-            <h3>Desktop process split</h3>
-            <p>
-              `main.js` owns file system access, Arduino CLI processes, serial ports, Appwrite API
-              calls, cloud sync, toolchain locks, notifications, and agent orchestration. The
-              renderer communicates through explicit preload APIs such as `toolchain.compile`,
-              `toolchain.detectLocalBoards`, and `toolchain.restoreBoardCodeSnapshot`.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>Board detection pipeline</h3>
-            <p>
-              `src/services/localBoardService.js` merges `arduino-cli board list` JSON with
-              `serialport` results, normalizes physical ports, scores confidence, probes ESP chips
-              with `esptool chip_id`, then optionally calls the `board-detection` function for an
-              AI-assisted FQBN suggestion.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>Runtime build injection</h3>
-            <p>
-              `arduinoHandler.js` creates a temporary sketch, wraps user `setup()` and `loop()`,
-              injects runtime macros, copies `TantalumCloudRuntime.h`, installs required libraries,
-              and verifies source markers are still present in compiled artifacts before upload.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>Source snapshot recovery</h3>
-            <p>
-              Before upload, source files are zipped with `tantalum-source-manifest.json`. The build
-              embeds `TANTALUM_SOURCE_SNAPSHOT_V1::&lt;markerId&gt;::&lt;checksum&gt;::END`.
-              View Code reads firmware, finds that marker, downloads the matching snapshot, verifies
-              the checksum, validates identity, and restores files.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>Latest two snapshots</h3>
-            <p>
-              Marker documents start as `pending`. After a successful flash, the new marker becomes
-              `current`, the previous `current` is demoted to `previous`, and older documents in the
-              same retention group are pruned.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>OTA command path</h3>
-            <p>
-              `board-admin` updates desired firmware state and can publish an HMAC-signed MQTT
-              command. `device-gateway` validates board tokens, returns signed OTA commands, records
-              heartbeats, and accepts OTA result telemetry.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>Cloud sync</h3>
-            <p>
-              `cloudSyncService` scans with `.tantalumignore`, copies allowed files into a shadow
-              repo, commits, rebases against Gitea, pushes, and applies remote tracked files back
-              into the Project Space. Existing Git projects are scanned read-only.
-            </p>
-          </article>
-          <article class="technical-card">
-            <h3>AI gateway</h3>
-            <p>
-              `agent-gateway` resolves managed or custom OpenAI-compatible credentials, validates
-              public HTTPS base URLs, applies output policy, retries around provider parameter
-              incompatibilities, debits credits, and writes usage ledger entries.
-            </p>
-          </article>
-        </div>
-      </section>
+              <article class="feature-card">
+                <div class="icon-wrapper accent-leaf">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <h3>Tantalum runtime</h3>
+                <p>
+                  Injects runtime macros and <code>TantalumCloudRuntime.h</code> into temporary builds for
+                  heartbeat, OTA polling, MQTT commands, TLS, provisioning, and telemetry.
+                </p>
+              </article>
 
-      <section class="section section-tinted">
-        <div class="section-heading">
-          <p class="eyebrow">Workflow map</p>
-          <h2>Common paths through the system</h2>
-        </div>
+              <article class="feature-card highlight-teal">
+                <div class="icon-wrapper accent-teal">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v14M19 9l-7 7-7-7M2 20h20"/></svg>
+                </div>
+                <h3>OTA firmware delivery</h3>
+                <p>
+                  Builds locally, uploads firmware to Appwrite Storage, records metadata and checksums,
+                  then queues deployment through polling, MQTT, or both.
+                </p>
+              </article>
 
-        <div class="workflow-list">
-          <article>
-            <span>01</span>
-            <h3>Detect and save a board</h3>
-            <p>
-              Auto detect reads local board metadata, fills candidate FQBN and port details, and
-              saves a profile keyed by trusted hardware identity.
-            </p>
-          </article>
-          <article>
-            <span>02</span>
-            <h3>Enable cloud runtime</h3>
-            <p>
-              `board-admin` creates a cloud board and returns one-time secrets. The desktop injects
-              those secrets into runtime firmware and flashes it over USB.
-            </p>
-          </article>
-          <article>
-            <span>03</span>
-            <h3>Provision WiFi</h3>
-            <p>
-              USB provisioning sends an HMAC-signed JSON command directly over serial. BLE and
-              SoftAP provisioning use the runtime proof-of-possession value.
-            </p>
-          </article>
-          <article>
-            <span>04</span>
-            <h3>Create an OTA release</h3>
-            <p>
-              The IDE compiles locally, embeds a source marker, saves a source snapshot, uploads the
-              firmware artifact, creates a firmware document, and queues deployment.
-            </p>
-          </article>
-          <article>
-            <span>05</span>
-            <h3>Restore source with View Code</h3>
-            <p>
-              The IDE reads firmware, scans for the marker, lists the current and previous matching
-              snapshots, then restores the chosen zip into the current or a new Project Space.
-            </p>
-          </article>
-          <article>
-            <span>06</span>
-            <h3>Sync the workspace</h3>
-            <p>
-              Cloud sync snapshots selected workspace files into a shadow Git repo, pushes to Gitea,
-              and writes sync events for audit and conflict handling.
-            </p>
-          </article>
-        </div>
-      </section>
+              <article class="feature-card">
+                <div class="icon-wrapper accent-green">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                </div>
+                <h3>View Code recovery</h3>
+                <p>
+                  Restores exact source from Tantalum source snapshots by scanning firmware for an
+                  embedded marker and verifying cloud snapshot checksums.
+                </p>
+              </article>
 
-      <section id="self-host" class="section">
-        <div class="section-heading">
-          <p class="eyebrow">Deployment</p>
-          <h2>Self-hosting guide</h2>
-          <p>
-            The default self-hosted shape is Appwrite for auth, database, storage, functions, and
-            sites; Mosquitto for persistent MQTT board commands; and Gitea for cloud workspace sync.
-          </p>
-        </div>
+              <article class="feature-card">
+                <div class="icon-wrapper accent-purple">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                </div>
+                <h3>Project cloud sync</h3>
+                <p>
+                  Uses a shadow Git repository and Gitea remote so workspace backup does not mutate the
+                  user's own active Git repository.
+                </p>
+              </article>
 
-        <div class="callout">
-          <h3>Detailed Azure runbook</h3>
-          <p>
-            The repository still includes the step-by-step Appwrite VM runbook at
-            <a href="azure-selfhost-appwrite.html">Azure Self-Hosted Appwrite Runbook</a>.
-            Use the guide below as the project-wide map, then follow the runbook for exact Azure
-            commands.
-          </p>
-        </div>
+              <article class="feature-card highlight-warm">
+                <div class="icon-wrapper accent-amber">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+                </div>
+                <h3>Agentic AI assistant</h3>
+                <p>
+                  Routes prompts through the Tantalum agent runtime, OpenCode SDK, Appwrite gateway,
+                  safe workspace context, restore points, and Arduino/Git tool execution.
+                </p>
+              </article>
 
-        <div class="setup-grid">
-          <article class="setup-card">
-            <h3>1. Appwrite VPS</h3>
-            <p>
-              Host Appwrite on a VM with persistent data under `/srv/tantalum`. The provided Azure
-              scripts create the VM, data disk, Appwrite host scripts, backups, health checks, and
-              vertical resize path.
-            </p>
-            <pre><code>pwsh ./infra/azure/deploy-appwrite-vm.ps1 \
+              <article class="feature-card">
+                <div class="icon-wrapper accent-rose">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg>
+                </div>
+                <h3>Serial monitor and plotter</h3>
+                <p>
+                  Reads serial output, supports numeric plot parsing, and checks for serial-port
+                  blockers before uploads, provisioning, or board-code readback.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <!-- Architecture Section -->
+          <section id="architecture" class="docs-section" aria-labelledby="heading-architecture">
+            <div class="section-heading">
+              <p class="eyebrow">How it works</p>
+              <h2 id="heading-architecture">System architecture</h2>
+              <p>
+                Tantalum keeps privileged operations in Electron main, exposes a narrow IPC surface
+                through preload, and lets the React renderer focus purely on user interface presentation.
+              </p>
+            </div>
+
+            <!-- Redesigned High-Level Architecture Flow Diagram -->
+            <div class="architecture-flow-container">
+              <div class="flow-tier">
+                <div class="flow-card-node uilayer">
+                  <span class="node-tag">UI Tier</span>
+                  <h4>React Renderer</h4>
+                  <p>Vite React application running Monaco editor & dashboards</p>
+                </div>
+              </div>
+
+              <div class="flow-connector-vertical">
+                <div class="connector-line"></div>
+                <div class="connector-label">IPC Preload Bridge</div>
+                <div class="connector-line"></div>
+              </div>
+
+              <div class="flow-tier">
+                <div class="flow-card-node corelayer">
+                  <span class="node-tag">Core Tier</span>
+                  <h4>Electron Main Process</h4>
+                  <p>Orchestrator, filesystem access, subprocesses & remote clients</p>
+                </div>
+              </div>
+
+              <div class="flow-split-container">
+                <svg class="flow-split-svg" viewBox="0 0 300 60" preserveAspectRatio="none">
+                  <path d="M150,0 C150,30 30,30 30,60 M150,0 L150,60 M150,0 C150,30 270,30 270,60" fill="none" stroke="var(--line)" stroke-width="2" />
+                </svg>
+              </div>
+
+              <div class="flow-sub-tier">
+                <div class="flow-card-node subtier local">
+                  <h5>Local System</h5>
+                  <p>Arduino CLI, Serial Ports, USB/BLE devices</p>
+                </div>
+                <div class="flow-card-node subtier cloud">
+                  <h5>Cloud Layer</h5>
+                  <p>Appwrite DB, Gitea Git, Mosquitto MQTT</p>
+                </div>
+                <div class="flow-card-node subtier devices">
+                  <h5>IoT Firmware</h5>
+                  <p>Physical Boards (Tantalum Runtime)</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Technical Detailed Grid -->
+            <div class="bento-grid-technical">
+              <article class="technical-card">
+                <h3>Desktop process split</h3>
+                <p>
+                  <code>main.js</code> owns file system access, Arduino CLI processes, serial ports, Appwrite API
+                  calls, cloud sync, toolchain locks, notifications, and agent orchestration. The
+                  renderer communicates through explicit preload APIs such as <code>toolchain.compile</code>,
+                  <code>toolchain.detectLocalBoards</code>, and <code>toolchain.restoreBoardCodeSnapshot</code>.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Board detection pipeline</h3>
+                <p>
+                  <code>src/services/localBoardService.js</code> merges <code>arduino-cli board list</code> JSON with
+                  <code>serialport</code> results, normalizes physical ports, scores confidence, probes ESP chips
+                  with <code>esptool chip_id</code>, then optionally calls the <code>board-detection</code> function for an
+                  AI-assisted FQBN suggestion.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Runtime build injection</h3>
+                <p>
+                  <code>arduinoHandler.js</code> creates a temporary sketch, wraps user <code>setup()</code> and <code>loop()</code>,
+                  injects runtime macros, copies <code>TantalumCloudRuntime.h</code>, installs required libraries,
+                  and verifies source markers are still present in compiled artifacts before upload.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Source snapshot recovery</h3>
+                <p>
+                  Before upload, source files are zipped with <code>tantalum-source-manifest.json</code>. The build
+                  embeds <code>TANTALUM_SOURCE_SNAPSHOT_V1::&lt;markerId&gt;::&lt;checksum&gt;::END</code>.
+                  View Code reads firmware, finds that marker, downloads the matching snapshot, verifies
+                  the checksum, validates identity, and restores files.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Latest two snapshots</h3>
+                <p>
+                  Marker documents start as <code>pending</code>. After a successful flash, the new marker becomes
+                  <code>current</code>, the previous <code>current</code> is demoted to <code>previous</code>, and older documents in the
+                  same retention group are pruned.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>OTA command path</h3>
+                <p>
+                  <code>board-admin</code> updates desired firmware state and can publish an HMAC-signed MQTT
+                  command. <code>device-gateway</code> validates board tokens, returns signed OTA commands, records
+                  heartbeats, and accepts OTA result telemetry.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Cloud sync</h3>
+                <p>
+                  <code>cloudSyncService</code> scans with <code>.tantalumignore</code>, copies allowed files into a shadow
+                  repo, commits, rebases against Gitea, pushes, and applies remote tracked files back
+                  into the Project Space. Existing Git projects are scanned read-only.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>AI gateway</h3>
+                <p>
+                  <code>agent-gateway</code> resolves managed or custom OpenAI-compatible credentials, validates
+                  public HTTPS base URLs, applies output policy, retries around provider parameter
+                  incompatibilities, debits credits, and writes usage ledger entries.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <!-- Workflow Map Section -->
+          <section id="workflows" class="docs-section docs-section-tinted" aria-labelledby="heading-workflows">
+            <div class="section-heading">
+              <p class="eyebrow">Workflow Map</p>
+              <h2 id="heading-workflows">Common paths through the system</h2>
+            </div>
+
+            <!-- Redesigned Vertical Timeline layout -->
+            <div class="workflow-timeline">
+              <div class="timeline-line"></div>
+              
+              <div class="timeline-step">
+                <div class="timeline-badge">01</div>
+                <div class="timeline-content">
+                  <h3>Detect and save a board</h3>
+                  <p>
+                    Auto detect reads local board metadata, fills candidate FQBN and port details, and
+                    saves a profile keyed by trusted hardware identity.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">02</div>
+                <div class="timeline-content">
+                  <h3>Enable cloud runtime</h3>
+                  <p>
+                    <code>board-admin</code> creates a cloud board and returns one-time secrets. The desktop injects
+                    those secrets into runtime firmware and flashes it over USB.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">03</div>
+                <div class="timeline-content">
+                  <h3>Provision WiFi</h3>
+                  <p>
+                    USB provisioning sends an HMAC-signed JSON command directly over serial. BLE and
+                    SoftAP provisioning use the runtime proof-of-possession value.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">04</div>
+                <div class="timeline-content">
+                  <h3>Create an OTA release</h3>
+                  <p>
+                    The IDE compiles locally, embeds a source marker, saves a source snapshot, uploads the
+                    firmware artifact, creates a firmware document, and queues deployment.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">05</div>
+                <div class="timeline-content">
+                  <h3>Restore source with View Code</h3>
+                  <p>
+                    The IDE reads firmware, scans for the marker, lists the current and previous matching
+                    snapshots, then restores the chosen zip into the current or a new Project Space.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">06</div>
+                <div class="timeline-content">
+                  <h3>Sync the workspace</h3>
+                  <p>
+                    Cloud sync snapshots selected workspace files into a shadow Git repo, pushes to Gitea,
+                    and writes sync events for audit and conflict handling.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Self-Hosting Section -->
+          <section id="self-host" class="docs-section" aria-labelledby="heading-selfhost">
+            <div class="section-heading">
+              <p class="eyebrow">Deployment</p>
+              <h2 id="heading-selfhost">Self-hosting guide</h2>
+              <p>
+                The default self-hosted ecosystem runs Appwrite for auth, database, storage, functions, and
+                hosting; Mosquitto for persistent MQTT board commands; and Gitea for cloud workspace sync.
+              </p>
+            </div>
+
+            <div class="callout">
+              <div class="callout-icon">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></svg>
+              </div>
+              <div class="callout-body">
+                <h3>Detailed Azure Runbook</h3>
+                <p>
+                  This repository includes a step-by-step Appwrite VM deployment runbook at
+                  <a href="azure-selfhost-appwrite.html">Azure Self-Hosted Appwrite Runbook</a>.
+                  Use the guide below as the project-wide architectural map, then follow the runbook for exact Azure command execution.
+                </p>
+              </div>
+            </div>
+
+            <!-- Split Step-by-Step guide -->
+            <div class="setup-steps-list">
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 1</span>
+                  <h3>Appwrite VPS</h3>
+                  <p>
+                    Host Appwrite on a VM with persistent data under <code>/srv/tantalum</code>. The provided Azure
+                    scripts create the VM, data disk, Appwrite host scripts, backups, health checks, and
+                    vertical resize path.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">PowerShell</span>
+                  </div>
+                  <pre><code>pwsh ./infra/azure/deploy-appwrite-vm.ps1 \
   -SshPublicKeyPath "$HOME/.ssh/tantalum_azure_ed25519.pub" \
   -DataDiskSizeGb 256</code></pre>
-          </article>
-          <article class="setup-card">
-            <h3>2. Appwrite schema and functions</h3>
-            <p>
-              Push tables, buckets, and functions from `appwrite.config.json`. Keep database ID
-              `697b8f660033fffde4be` unless you intentionally migrate all config.
-            </p>
-            <pre><code>appwrite push tables
+                </div>
+              </div>
+
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 2</span>
+                  <h3>Appwrite schema and functions</h3>
+                  <p>
+                    Push database tables, storage buckets, and serverless functions from <code>appwrite.config.json</code>. Keep the database ID
+                    <code>697b8f660033fffde4be</code> unless you intentionally migrate all config.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">Appwrite CLI</span>
+                  </div>
+                  <pre><code>appwrite push tables
 appwrite push buckets
 appwrite push functions</code></pre>
-          </article>
-          <article class="setup-card">
-            <h3>3. Function secrets</h3>
-            <p>
-              Generate KEKs for encrypted API keys and board command secrets. Configure collection,
-              bucket, endpoint, MQTT, and credit variables per function.
-            </p>
-            <pre><code>node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"</code></pre>
-          </article>
-          <article class="setup-card">
-            <h3>4. MQTT VPS</h3>
-            <p>
-              Run Mosquitto over TLS on port `8883`. Appwrite publishes as a publisher user, boards
-              subscribe as a device user, and ACLs restrict access to `tantalum/boards/+/+/cmd`.
-            </p>
-            <pre><code>sudo apt install -y mosquitto mosquitto-clients openssl
+                </div>
+              </div>
+
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 3</span>
+                  <h3>Function secrets</h3>
+                  <p>
+                    Generate Key Encryption Keys (KEKs) for encrypted API keys and board command secrets. Configure collection,
+                    bucket, endpoint, MQTT, and credit variables per function.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">Node.js</span>
+                  </div>
+                  <pre><code>node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"</code></pre>
+                </div>
+              </div>
+
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 4</span>
+                  <h3>MQTT VPS</h3>
+                  <p>
+                    Run Mosquitto over TLS on port <code>8883</code>. Appwrite publishes as a publisher user, boards
+                    subscribe as a device user, and ACLs restrict access to <code>tantalum/boards/+/+/cmd</code>.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">Bash</span>
+                  </div>
+                  <pre><code>sudo apt install -y mosquitto mosquitto-clients openssl
 sudo ufw allow 8883/tcp</code></pre>
-          </article>
-          <article class="setup-card">
-            <h3>5. Gitea VPS</h3>
-            <p>
-              Deploy Gitea for workspace sync. Tantalum devices authenticate with generated SSH keys
-              and sync shadow repos instead of touching the user's own Git history.
-            </p>
-            <pre><code>pwsh ./infra/azure/deploy-gitea-vm.ps1
+                </div>
+              </div>
+
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 5</span>
+                  <h3>Gitea VPS</h3>
+                  <p>
+                    Deploy Gitea to host the remote workspace synchronization. Tantalum desktop processes authenticate with generated SSH keys
+                    and sync shadow Git repositories without touching the user's active history.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">PowerShell</span>
+                  </div>
+                  <pre><code>pwsh ./infra/azure/deploy-gitea-vm.ps1
 pwsh ./infra/azure/configure-gitea.ps1</code></pre>
-          </article>
-          <article class="setup-card">
-            <h3>6. Seed AI and utility config</h3>
-            <p>
-              Seed managed model keys, custom credential defaults, output style, and utility AI
-              models for board detection.
-            </p>
-            <pre><code>npm run selfhost:seed
+                </div>
+              </div>
+
+              <div class="setup-step-row">
+                <div class="setup-step-desc">
+                  <span class="step-num">Step 6</span>
+                  <h3>Seed AI and utility config</h3>
+                  <p>
+                    Seed managed model keys, custom credential defaults, output styles, and utility AI
+                    models for board detection.
+                  </p>
+                </div>
+                <div class="setup-step-terminal">
+                  <div class="terminal-bar">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">npm</span>
+                  </div>
+                  <pre><code>npm run selfhost:seed
 npm run migrate:api-key-envelopes</code></pre>
-          </article>
-        </div>
+                </div>
+              </div>
+            </div>
 
-        <div class="reference-grid">
-          <article>
-            <h3>Required functions</h3>
-            <ul>
-              <li>`board-admin`: board creation, token rotation, deployment, MQTT commands.</li>
-              <li>`device-gateway`: heartbeats, update checks, OTA result telemetry.</li>
-              <li>`agent-settings`: agent preference and credential management.</li>
-              <li>`agent-gateway`: managed/custom model proxy and credit ledger.</li>
-              <li>`board-detection`: AI-assisted board FQBN detection.</li>
-              <li>`project-sync`: Gitea project creation, link, and sync events.</li>
-              <li>`desktop-auth`: desktop login handoff.</li>
-              <li>`web-admin`: administrative operations.</li>
-            </ul>
-          </article>
-          <article>
-            <h3>Core collections</h3>
-            <ul>
-              <li>`boards`, `firmwares`, `board_source_snapshots`, `sketches`.</li>
-              <li>`agent_*` settings, credentials, credits, usage, threads, and async results.</li>
-              <li>`utility_ai_model_pool`, `board_detection_cache`, `board_detection_usage`.</li>
-              <li>`cloud_projects`, `cloud_project_devices`, `cloud_project_sync_events`.</li>
-              <li>`desktop_auth_grants`, `user_entitlements`, support and admin audit tables.</li>
-            </ul>
-          </article>
-          <article>
-            <h3>Storage buckets</h3>
-            <ul>
-              <li>`firmware_bucket`: `.bin`, `.hex`, and `.uf2` firmware artifacts.</li>
-              <li>`firmware_source_bucket`: zipped source snapshots for marker-backed restore.</li>
-            </ul>
-          </article>
-          <article>
-            <h3>Validation scripts</h3>
-            <ul>
-              <li>`npm run smoke:desktop-auth`</li>
-              <li>`npm run smoke:device-gateway-ota-url`</li>
-              <li>`npm run smoke:device-gateway-telemetry`</li>
-              <li>`npm run smoke:firmware-checksum`</li>
-              <li>`npm run smoke:board-code`</li>
-              <li>`npm run smoke:cloud-sync`</li>
-              <li>`npm run smoke:opencode`</li>
-            </ul>
-          </article>
-        </div>
-      </section>
+            <!-- Bento-styled Reference Grids -->
+            <div class="reference-bento-grid">
+              <article class="reference-card">
+                <div class="ref-card-header">
+                  <div class="icon-wrapper accent-sky">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  </div>
+                  <h4>Required Functions</h4>
+                </div>
+                <ul>
+                  <li><strong>board-admin</strong>: board creation, token rotation, deployment, MQTT commands.</li>
+                  <li><strong>device-gateway</strong>: heartbeats, update checks, OTA result telemetry.</li>
+                  <li><strong>agent-settings</strong>: agent preference and credential management.</li>
+                  <li><strong>agent-gateway</strong>: managed/custom model proxy and credit ledger.</li>
+                  <li><strong>board-detection</strong>: AI-assisted board FQBN detection.</li>
+                  <li><strong>project-sync</strong>: Gitea project creation, link, and sync events.</li>
+                  <li><strong>desktop-auth</strong>: desktop login handoff.</li>
+                  <li><strong>web-admin</strong>: administrative operations.</li>
+                </ul>
+              </article>
+              
+              <article class="reference-card">
+                <div class="ref-card-header">
+                  <div class="icon-wrapper accent-indigo">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                  </div>
+                  <h4>Core Collections</h4>
+                </div>
+                <ul>
+                  <li><code>boards</code>, <code>firmwares</code>, <code>board_source_snapshots</code>, <code>sketches</code>.</li>
+                  <li><code>agent_*</code> settings, credentials, credits, usage, threads, and async results.</li>
+                  <li><code>utility_ai_model_pool</code>, <code>board_detection_cache</code>, <code>board_detection_usage</code>.</li>
+                  <li><code>cloud_projects</code>, <code>cloud_project_devices</code>, <code>cloud_project_sync_events</code>.</li>
+                  <li><code>desktop_auth_grants</code>, <code>user_entitlements</code>, support and admin audit tables.</li>
+                </ul>
+              </article>
 
-      <section id="security" class="section section-tinted">
-        <div class="section-heading">
-          <p class="eyebrow">Security model</p>
-          <h2>How secrets and permissions are handled</h2>
-        </div>
+              <article class="reference-card">
+                <div class="ref-card-header">
+                  <div class="icon-wrapper accent-rose">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.21 15.89A10 10 0 1 1 8 2.83M22 12A10 10 0 0 0 12 2v10z"/></svg>
+                  </div>
+                  <h4>Storage Buckets</h4>
+                </div>
+                <ul>
+                  <li><strong>firmware_bucket</strong>: <code>.bin</code>, <code>.hex</code>, and <code>.uf2</code> firmware binaries.</li>
+                  <li><strong>firmware_source_bucket</strong>: zipped source code snapshots for marker-backed snapshot restore.</li>
+                </ul>
+              </article>
 
-        <div class="security-grid">
-          <article>
-            <h3>Board credentials</h3>
-            <p>
-              Cloud boards store token hashes, token previews, MQTT topic suffixes, and encrypted
-              command secret envelopes. The raw API token and command secret are returned only when
-              creating or rotating a board.
-            </p>
-          </article>
-          <article>
-            <h3>WiFi credentials</h3>
-            <p>
-              WiFi SSID and password are sent directly to the board over USB, BLE, or SoftAP. They
-              are not uploaded to Appwrite and are not stored by the desktop.
-            </p>
-          </article>
-          <article>
-            <h3>AI provider keys</h3>
-            <p>
-              Managed and custom provider keys are stored as KEK-encrypted envelopes. The desktop
-              does not need raw keys when using the Appwrite agent gateway.
-            </p>
-          </article>
-          <article>
-            <h3>Source snapshots</h3>
-            <p>
-              Firmware source snapshots are private by default. Public code visibility grants read
-              access to authenticated users while keeping update/delete permissions scoped to the
-              owner.
-            </p>
-          </article>
-          <article>
-            <h3>Agent workspace access</h3>
-            <p>
-              Agent context excludes secrets, keys, credentials, `.env` files, `.git`, and agent
-              artifacts. Restore points can reverse agent file edits inside the active Project Space.
-            </p>
-          </article>
-          <article>
-            <h3>MQTT command integrity</h3>
-            <p>
-              MQTT commands include action, deployment ID, nonce, timestamp, and HMAC signature.
-              Boards reject stale, replayed, or incorrectly signed commands.
-            </p>
-          </article>
-        </div>
-      </section>
+              <article class="reference-card">
+                <div class="ref-card-header">
+                  <div class="icon-wrapper accent-green">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3"/></svg>
+                  </div>
+                  <h4>Validation Scripts</h4>
+                </div>
+                <ul>
+                  <li><code>npm run smoke:desktop-auth</code></li>
+                  <li><code>npm run smoke:device-gateway-ota-url</code></li>
+                  <li><code>npm run smoke:device-gateway-telemetry</code></li>
+                  <li><code>npm run smoke:firmware-checksum</code></li>
+                  <li><code>npm run smoke:board-code</code></li>
+                  <li><code>npm run smoke:cloud-sync</code></li>
+                  <li><code>npm run smoke:opencode</code></li>
+                </ul>
+              </article>
+            </div>
+          </section>
 
-      <section id="developer" class="section">
-        <div class="section-heading">
-          <p class="eyebrow">Local development</p>
-          <h2>Build and test the IDE</h2>
-        </div>
+          <!-- Security Section -->
+          <section id="security" class="docs-section docs-section-tinted" aria-labelledby="heading-security">
+            <div class="section-heading">
+              <p class="eyebrow">Security Model</p>
+              <h2 id="heading-security">How secrets and permissions are handled</h2>
+            </div>
 
-        <div class="command-columns">
-          <article>
-            <h3>Prerequisites</h3>
-            <ul>
-              <li>Node.js 18 or newer.</li>
-              <li>npm 9 or newer.</li>
-              <li>Arduino CLI in PATH or bundled under `resources/`.</li>
-              <li>Appwrite project config when testing cloud features.</li>
-            </ul>
-          </article>
-          <article>
-            <h3>Commands</h3>
-            <pre><code>npm install
-npm run dev
-npm run build:renderer
-npm run dist</code></pre>
-          </article>
-          <article>
-            <h3>Repo map</h3>
-            <ul>
-              <li>`main.js`: Electron main, IPC handlers, cloud calls, notifications.</li>
-              <li>`preload.js`: renderer API allowlist.</li>
-              <li>`renderer-react/`: Vite React UI.</li>
-              <li>`arduinoHandler.js`: Arduino CLI and runtime build pipeline.</li>
-              <li>`src/services/`: board, firmware, provisioning, source restore, cloud sync.</li>
-              <li>`src/agent/`: agent routing, tools, restore points, OpenCode runtime.</li>
-              <li>`functions/`: Appwrite functions.</li>
-              <li>`resources/firmware/`: Tantalum runtime firmware sources.</li>
-            </ul>
-          </article>
-        </div>
-      </section>
+            <div class="security-grid-bento">
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-indigo">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  </div>
+                  <h3>Board credentials</h3>
+                </div>
+                <p>
+                  Cloud boards store token hashes, token previews, MQTT topic suffixes, and encrypted
+                  command secret envelopes. The raw API token and command secret are returned only when
+                  creating or rotating a board.
+                </p>
+              </article>
 
-      <section id="pages" class="section section-tinted">
-        <div class="section-heading">
-          <p class="eyebrow">Publishing</p>
-          <h2>Host this docs site on GitHub Pages</h2>
-          <p>
-            This site is static and requires no build step. It is designed for the GitHub Pages
-            "Deploy from a branch" flow using the `/docs` folder as the source.
-          </p>
-        </div>
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-sky">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+                  </div>
+                  <h3>WiFi credentials</h3>
+                </div>
+                <p>
+                  WiFi SSID and password are sent directly to the board over USB, BLE, or SoftAP. They
+                  are never uploaded to Appwrite database tables and are not stored locally by the desktop process.
+                </p>
+              </article>
 
-        <ol class="host-steps">
-          <li>Push this repository to GitHub.</li>
-          <li>Open repository Settings.</li>
-          <li>Go to Pages.</li>
-          <li>Set Source to "Deploy from a branch".</li>
-          <li>Select the branch you publish from, usually `main`.</li>
-          <li>Set folder to `/docs`.</li>
-          <li>Save. GitHub Pages will serve `docs/index.html` as the documentation home.</li>
-        </ol>
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-rose">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                  </div>
+                  <h3>AI provider keys</h3>
+                </div>
+                <p>
+                  Managed and custom provider keys are stored as strong KEK-encrypted envelopes. The desktop
+                  does not require access to raw developer keys when routing through the Appwrite agent gateway.
+                </p>
+              </article>
 
-        <div class="callout">
-          <h3>What is included in `/docs`</h3>
-          <p>
-            `index.html` contains the complete project website. `assets/` contains the local CSS,
-            JavaScript, icon, and screenshots. `_layouts/default.html` lets GitHub Pages render the
-            existing Markdown runbook with the same visual shell.
-          </p>
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-green">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  </div>
+                  <h3>Source snapshots</h3>
+                </div>
+                <p>
+                  Firmware source snapshots are private by default. Public code visibility grants read
+                  access to authenticated ecosystem users while keeping update/delete permissions scoped exclusively to the owner.
+                </p>
+              </article>
+
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-amber">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  </div>
+                  <h3>Agent workspace access</h3>
+                </div>
+                <p>
+                  Agent context excludes secrets, keys, credentials, <code>.env</code> files, <code>.git</code> data, and agent
+                  artifacts. Restore points can reverse agent file edits inside the active Project Space.
+                </p>
+              </article>
+
+              <article class="security-card">
+                <div class="card-title-row">
+                  <div class="icon-wrapper accent-purple">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3"/></svg>
+                  </div>
+                  <h3>MQTT command integrity</h3>
+                </div>
+                <p>
+                  MQTT commands include action, deployment ID, nonce, timestamp, and HMAC signature.
+                  Boards reject stale, replayed, or incorrectly signed incoming commands.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <!-- Developer Section -->
+          <section id="developer" class="docs-section" aria-labelledby="heading-developer">
+            <div class="section-heading">
+              <p class="eyebrow">Local Development</p>
+              <h2 id="heading-developer">Build and test the IDE</h2>
+            </div>
+
+            <div class="developer-layout-split">
+              <!-- Left side lists -->
+              <div class="developer-info-col">
+                <div class="dev-info-block">
+                  <h3>Prerequisites</h3>
+                  <ul class="prereqs-list">
+                    <li>Node.js 18 or newer</li>
+                    <li>npm 9 or newer</li>
+                    <li>Arduino CLI in PATH or bundled under <code>resources/</code></li>
+                    <li>Appwrite project configuration when testing cloud features</li>
+                  </ul>
+                </div>
+                <div class="dev-info-block">
+                  <h3>Repository structure map</h3>
+                  <ul class="repo-list">
+                    <li><code>main.js</code>: Electron main, IPC handlers, remote calls, notifications</li>
+                    <li><code>preload.js</code>: Secure preload bridge interface definition</li>
+                    <li><code>renderer-react/</code>: Vite-based React renderer interface</li>
+                    <li><code>arduinoHandler.js</code>: Arduino CLI runtime builder pipeline</li>
+                    <li><code>src/services/</code>: Board, snapshot restore, cloud sync services</li>
+                    <li><code>src/agent/</code>: Agent routing tools & OpenCode execution</li>
+                    <li><code>functions/</code>: Self-hosted Appwrite serverless functions</li>
+                    <li><code>resources/firmware/</code>: Tantalum runtime IoT firmware source</li>
+                  </ul>
+                </div>
+              </div>
+              
+              <!-- Right side mock terminal -->
+              <div class="developer-terminal-col">
+                <div class="mock-terminal">
+                  <div class="terminal-header">
+                    <span class="window-dot red"></span>
+                    <span class="window-dot yellow"></span>
+                    <span class="window-dot green"></span>
+                    <span class="terminal-title">bash — ~/projects/tantalum-ide</span>
+                  </div>
+                  <div class="terminal-body">
+                    <div class="terminal-line"><span class="prompt">$</span> npm install</div>
+                    <div class="terminal-text">added 842 packages, and audited 843 packages in 4s</div>
+                    
+                    <div class="terminal-line"><span class="prompt">$</span> npm run dev</div>
+                    <div class="terminal-text">Starting Vite + Electron hot reload environment...</div>
+                    
+                    <div class="terminal-line"><span class="prompt">$</span> npm run build:renderer</div>
+                    <div class="terminal-text">vite v4.3.9 building for production...<br>✓ 482 modules transformed.<br>dist/renderer/index.html 0.45 kB │ gzip: 0.30 kB<br>dist/renderer/assets/index.js 284.11 kB</div>
+                    
+                    <div class="terminal-line"><span class="prompt">$</span> npm run dist</div>
+                    <div class="terminal-text">electron-builder v24.4.0 building Tantalum IDE v1.0.0...<br>Packaging macOS App...<br>Building DMG package...<br>DMG completed successfully.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
         </div>
-      </section>
+      </div>
     </main>
 
     <footer class="site-footer">
-      <div>
+      <div class="footer-brand">
         <img src="assets/images/tantalum-icon.png" width="28" height="28" alt="" />
         <strong>Tantalum IDE</strong>
       </div>

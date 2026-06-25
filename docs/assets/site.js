@@ -32,4 +32,47 @@ window.addEventListener("resize", () => {
   }
 });
 
+// Scrollspy Intersection Observer Implementation
+const setupScrollspy = () => {
+  const sidebarLinks = document.querySelectorAll(".sidebar-link");
+  const sections = document.querySelectorAll(".docs-section");
+  const topNavLinks = document.querySelectorAll(".site-nav a");
+
+  if (!sections.length) return;
+
+  const observerOptions = {
+    root: null,
+    rootMargin: "-25% 0px -55% 0px", // Trigger active state when section enters upper-middle screen
+    threshold: 0
+  };
+
+  const observerCallback = (entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        const activeId = entry.target.getAttribute("id");
+
+        // Highlight active sidebar links
+        sidebarLinks.forEach((link) => {
+          const href = link.getAttribute("href");
+          link.classList.toggle("active", href === `#${activeId}`);
+        });
+
+        // Highlight active top navbar links
+        topNavLinks.forEach((link) => {
+          const href = link.getAttribute("href");
+          link.classList.toggle("active", href === `#${activeId}` || href === `index.html#${activeId}`);
+        });
+      }
+    });
+  };
+
+  const observer = new IntersectionObserver(observerCallback, observerOptions);
+  sections.forEach((section) => observer.observe(section));
+};
+
 updateHeaderState();
+document.addEventListener("DOMContentLoaded", setupScrollspy);
+// Run immediately if page is already loaded
+if (document.readyState === "interactive" || document.readyState === "complete") {
+  setupScrollspy();
+}
