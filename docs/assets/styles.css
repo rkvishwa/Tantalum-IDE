@@ -456,21 +456,11 @@ pre code {
 }
 
 .docs-section-tinted {
-  position: relative;
-}
-
-.docs-section-tinted::before {
-  content: "";
-  position: absolute;
-  left: -20vw;
-  right: -20vw;
-  top: 0;
-  bottom: 0;
   background: var(--panel-soft);
-  z-index: -1;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  pointer-events: none;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--radius);
+  padding: 3rem !important;
+  margin: 3.5rem 0;
 }
 
 .section-heading {
@@ -497,7 +487,7 @@ pre code {
 /* Bento Ecosystem Layout */
 .bento-grid-ecosystem {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1.5rem;
   margin-bottom: 3.5rem;
 }
@@ -569,7 +559,7 @@ pre code {
 /* Gallery layout */
 .gallery-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1.5rem;
 }
 
@@ -614,7 +604,7 @@ pre code {
 /* Bento Features Grid */
 .bento-grid-features {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1.5rem;
 }
 
@@ -779,7 +769,7 @@ pre code {
 
 .flow-sub-tier {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1.5rem;
   width: 100%;
   margin-top: 0.5rem;
@@ -977,7 +967,7 @@ pre code {
 
 .setup-step-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 2.5rem;
   align-items: start;
 }
@@ -1058,7 +1048,7 @@ pre code {
 /* Reference Bento Grid */
 .reference-bento-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.5rem;
 }
 
@@ -1126,7 +1116,7 @@ pre code {
 /* Security Bento Grid */
 .security-grid-bento {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.5rem;
 }
 
@@ -1169,7 +1159,7 @@ pre code {
 /* Local Development Split & Mock Terminal */
 .developer-layout-split {
   display: grid;
-  grid-template-columns: 0.95fr 1.05fr;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   gap: 3rem;
   align-items: start;
 }
