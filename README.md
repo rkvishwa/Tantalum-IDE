@@ -6,7 +6,7 @@
 ![React](https://img.shields.io/badge/React-UI-61dafb)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Ready-3178c6)
 
-Tantalum IDE is a desktop application built with Electron, React, and TypeScript. It provides a robust environment for editing Arduino sketches, managing local workspaces, compiling firmware, and shipping Over-The-Air (OTA) firmware updates via Appwrite. Tantalum IDE also features an integrated **Agentic AI coding assistant** to supercharge your hardware development workflow.
+Tantalum IDE is a desktop application built with Electron, React, and TypeScript. It provides a robust environment for editing Arduino sketches, managing local workspaces, using built-in Git source control, compiling firmware, and shipping Over-The-Air (OTA) firmware updates via Appwrite. Tantalum IDE also features an integrated **Agentic AI coding assistant** to supercharge your hardware development workflow.
 
 ---
 
@@ -32,6 +32,7 @@ Tantalum is composed of three interconnected open-source projects that work toge
 
 - **Arduino Sketch Editing:** Full-featured code editor powered by Monaco Editor, tuned for C/C++.
 - **Local Workspace Management:** Organize your projects, libraries, and sketches easily from an intuitive UI.
+- **Built-In Git Source Control:** Review working-tree changes, inspect diffs, stage/unstage files, discard changes with confirmation, commit, fetch, pull, push, switch/create branches, initialize repositories, and publish new repositories to GitHub or GitLab.
 - **Auto Board Detection:** Detect connected Arduino-compatible boards by combining Arduino CLI metadata, USB serial metadata, ESP chip probing, and an optional AI fallback.
 - **Local Board Profiles:** Save physical boards with stable hardware fingerprints, ports, FQBNs, cloud links, OTA mode, and source-code visibility preferences.
 - **Project Cloud Sync:** Seamlessly sync your local workspaces to the cloud via a dedicated Git backend, ensuring code is backed up and accessible across devices.
@@ -103,9 +104,19 @@ WiFi provisioning is designed so credentials do not pass through Appwrite. For U
 
 Workspace sync uses a shadow Git repository instead of committing directly inside the user's project. `src/services/cloudSyncService.js` scans the workspace, applies `.tantalumignore` and core ignore rules, copies allowed files into the shadow repo, writes `.tantalum-sync/manifest.json`, commits, rebases with the remote Gitea repository, pushes, and then applies remote changes back into the workspace. Existing Git workspaces are scanned read-only so Tantalum does not mutate the user's own Git history.
 
+### Built-In Git Source Control
+
+The IDE also has a direct Git workflow for the active Project Space. This is separate from cloud sync: the source-control panel operates on the user's real repository, while cloud sync uses a shadow repository for backup and device-to-device sync.
+
+`preload.js` exposes a narrow `window.tantalum.git` API for status, diffs, staging, unstaging, discard, commit, fetch, pull, push, branch listing, checkout, branch creation, commit history, remotes, repository initialization, provider publishing, safe-directory repair, and Git configuration. `main.js` implements those IPC handlers by spawning the local `git` CLI with terminal prompts disabled, parsing `git status --porcelain=v2 --branch`, reading staged or working-tree file content for diff views, and classifying common failure modes such as missing Git, unsafe ownership, missing upstream, authentication errors, and conflicts.
+
+The React side is built around `GitWorkspace`, `GitSourceControlPanel`, `GitHistoryPanel`, and `useGitWorkspaceController`. Users can stage individual files or all files, unstage changes, discard tracked or untracked changes after confirmation, write commit messages, commit and push in one action, fetch/pull/push remotes, switch branches, create branches, inspect a decorated commit graph, and open changed files directly in the editor. Settings stores GitHub/GitLab provider preferences and tokens in the desktop secret store, while Git author name and email are written to global Git config.
+
+Publishing creates a GitHub or GitLab repository through the provider API, initializes the workspace repo if needed, creates an initial commit when the repository has no history, sets `origin`, and pushes the active branch using an in-memory authorization header. No provider token is written into the repository remote URL.
+
 ### Agentic AI Layer
 
-The AI assistant routes prompts through the Tantalum agent runtime and Appwrite agent functions. The desktop side manages workspace context, prompt routing, tool execution, command canonicalization, and local restore points. The cloud side resolves managed or user-provided model credentials, validates public HTTPS provider endpoints, injects output policy, tracks credits, and records usage in the agent ledger. Agent tools can verify/upload Arduino sketches, install libraries/platforms, and run Git actions while respecting workspace boundaries and user approvals.
+The AI assistant routes prompts through the Tantalum agent runtime and Appwrite agent functions. The desktop side manages workspace context, prompt routing, tool execution, command canonicalization, and local restore points. The cloud side resolves managed or user-provided model credentials, validates public HTTPS provider endpoints, injects output policy, tracks credits, and records usage in the agent ledger. Agent tools can verify/upload Arduino sketches, install libraries/platforms, and run Git actions through the same guarded workspace-boundary checks used by the built-in source-control panel.
 
 ---
 
@@ -115,6 +126,7 @@ The AI assistant routes prompts through the Tantalum agent runtime and Appwrite 
 
 - [Node.js](https://nodejs.org/) (v18 or higher)
 - [npm](https://www.npmjs.com/) (v9 or higher)
+- [Git](https://git-scm.com/) for built-in source control and repository publishing
 - [Arduino CLI](https://arduino.github.io/arduino-cli/) (installed and accessible in PATH or bundled in `resources/arduino-cli`)
 
 ### Installation & Local Development
@@ -252,7 +264,7 @@ Tantalum requires a dedicated lightweight VPS for handling persistent MQTT conne
 
 ### 5. Project Cloud Sync / Workspace Backup (Dedicated Gitea VPS)
 
-To enable seamless cloud synchronization of user workspaces, Tantalum uses a dedicated VPS running Gitea.
+To enable seamless cloud synchronization of user workspaces, Tantalum uses a dedicated VPS running Gitea. This is only for Tantalum-managed cloud sync; the built-in Git panel can still work with any normal Git repository and existing GitHub, GitLab, or self-hosted remotes.
 1. Run the `infra/azure/deploy-gitea-vm.ps1` script to deploy the Git VM (default `Standard_B2ls_v2`).
 2. Run `infra/azure/configure-gitea.ps1` to install and set up Gitea.
 3. If your workspace sync volume grows (e.g., large codebases or many users), you can vertically scale this VM using `infra/azure/resize-gitea-vm.ps1`.

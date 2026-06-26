@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Technical documentation for Tantalum IDE: Arduino development, board detection, OTA firmware, code recovery, cloud sync, AI agent, and self-hosting."
+      content="Technical documentation for Tantalum IDE: Arduino development, built-in Git source control, board detection, OTA firmware, code recovery, cloud sync, AI agent, and self-hosting."
     />
     <title>Tantalum IDE Documentation</title>
     <link rel="icon" href="assets/images/tantalum-icon.png" />
@@ -26,6 +26,7 @@
       <nav id="site-nav" class="site-nav" data-site-nav>
         <a href="#overview">Overview</a>
         <a href="#features">Features</a>
+        <a href="#git-support">Git</a>
         <a href="#architecture">Architecture</a>
         <a href="#workflows">Workflows</a>
         <a href="#self-host">Self-host</a>
@@ -43,8 +44,8 @@
             <h1 id="hero-title">Tantalum IDE</h1>
             <p class="hero-copy">
               A local-first Electron IDE for Arduino sketches, board management, firmware builds,
-              over-the-air deployment, source snapshot recovery, workspace cloud sync, and an integrated
-              agentic coding assistant.
+              built-in Git source control, over-the-air deployment, source snapshot recovery,
+              workspace cloud sync, and an integrated agentic coding assistant.
             </p>
             <div class="hero-actions" aria-label="Primary documentation links">
               <a class="button primary" href="#self-host">Self-hosting guide</a>
@@ -76,6 +77,7 @@
           <nav class="sidebar-nav" data-sidebar-nav>
             <a href="#overview" class="sidebar-link active">Overview</a>
             <a href="#features" class="sidebar-link">Features</a>
+            <a href="#git-support" class="sidebar-link">Git Support</a>
             <a href="#architecture" class="sidebar-link">System Architecture</a>
             <a href="#workflows" class="sidebar-link">Workflow Map</a>
             <a href="#self-host" class="sidebar-link">Self-Host Setup</a>
@@ -94,8 +96,9 @@
               <h2 id="heading-overview">Tantalum in one page</h2>
               <p>
                 Tantalum IDE is the desktop foundation of a distributed hardware deployment ecosystem. It keeps
-                day-to-day editing and compilation local, connecting to Appwrite, Gitea, and MQTT only when
-                a project requires secure authentication, backup, OTA delivery, live telemetry, or AI model access.
+                day-to-day editing, Git source control, and compilation local, connecting to Appwrite, Gitea,
+                and MQTT only when a project requires secure authentication, backup, OTA delivery, live telemetry,
+                or AI model access.
               </p>
             </div>
 
@@ -110,8 +113,8 @@
                 </div>
                 <p>
                   Electron main process, React renderer, Monaco editor, Arduino CLI orchestration,
-                  serial tooling, local board profiles, OTA release creation, and AI agent runtime.
-                  The core engine that runs on your local machine.
+                  serial tooling, local board profiles, built-in Git source control, OTA release creation,
+                  and AI agent runtime. The core engine that runs on your local machine.
                 </p>
               </article>
               <article class="bento-card">
@@ -248,6 +251,17 @@
                 </p>
               </article>
 
+              <article class="feature-card">
+                <div class="icon-wrapper accent-indigo">
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.59 7.41 15.42 14.24M8.59 16.59 15.42 9.76"/></svg>
+                </div>
+                <h3>Built-in Git source control</h3>
+                <p>
+                  Reviews changes, shows diffs, stages files, commits, fetches, pulls, pushes, manages
+                  branches, initializes repositories, and publishes to GitHub or GitLab.
+                </p>
+              </article>
+
               <article class="feature-card highlight-warm">
                 <div class="icon-wrapper accent-amber">
                   <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
@@ -267,6 +281,69 @@
                 <p>
                   Reads serial output, supports numeric plot parsing, and checks for serial-port
                   blockers before uploads, provisioning, or board-code readback.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <!-- Git Support Section -->
+          <section id="git-support" class="docs-section" aria-labelledby="heading-git-support">
+            <div class="section-heading">
+              <p class="eyebrow">Version Control</p>
+              <h2 id="heading-git-support">Built-in Git support</h2>
+              <p>
+                Tantalum's source-control panel works directly on the active Project Space repository.
+                This is separate from Project Cloud Sync: the Git panel uses the user's real
+                <code>.git</code> folder, while cloud sync uses a shadow repository for managed backup.
+              </p>
+            </div>
+
+            <div class="bento-grid-technical">
+              <article class="technical-card">
+                <h3>Working tree status and diffs</h3>
+                <p>
+                  <code>main.js</code> runs <code>git status --porcelain=v2 --branch</code> and separates staged,
+                  unstaged, untracked, and conflicted files. Diff views pair <code>HEAD</code>, staged objects,
+                  and workspace file content so users can inspect changes before committing.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Source-control actions</h3>
+                <p>
+                  The UI supports stage, unstage, discard, commit, commit-and-push, fetch, fast-forward
+                  pull, push, branch checkout, and branch creation through the guarded
+                  <code>window.tantalum.git</code> preload API.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Repository setup and publishing</h3>
+                <p>
+                  Non-Git Project Spaces can be initialized from the IDE. Publishing creates a GitHub or
+                  GitLab repository, creates an initial commit if needed, sets <code>origin</code>, and pushes
+                  the active branch without writing provider tokens into the remote URL.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Commit history graph</h3>
+                <p>
+                  Tantalum reads <code>git log --all --topo-order --decorate=short --numstat</code> and renders
+                  refs, branch lanes, author metadata, avatars, ahead/behind state, and file-change
+                  statistics inside the Git workspace.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Settings and credentials</h3>
+                <p>
+                  Git author name and email are written through global Git config. GitHub/GitLab usernames,
+                  default provider choice, and personal access tokens live in the desktop secret store.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Safety boundaries</h3>
+                <p>
+                  Git commands run with terminal prompts disabled, file paths are normalized inside the
+                  active Project Space, destructive discards require confirmation, and unsafe repository
+                  ownership can be repaired through an explicit <code>safe.directory</code> action.
                 </p>
               </article>
             </div>
@@ -316,7 +393,7 @@
               <div class="flow-sub-tier">
                 <div class="flow-card-node subtier local">
                   <h5>Local System</h5>
-                  <p>Arduino CLI, Serial Ports, USB/BLE devices</p>
+                  <p>Arduino CLI, Git CLI, Serial Ports, USB/BLE devices</p>
                 </div>
                 <div class="flow-card-node subtier cloud">
                   <h5>Cloud Layer</h5>
@@ -335,9 +412,10 @@
                 <h3>Desktop process split</h3>
                 <p>
                   <code>main.js</code> owns file system access, Arduino CLI processes, serial ports, Appwrite API
-                  calls, cloud sync, toolchain locks, notifications, and agent orchestration. The
+                  calls, Git CLI operations, cloud sync, toolchain locks, notifications, and agent orchestration. The
                   renderer communicates through explicit preload APIs such as <code>toolchain.compile</code>,
-                  <code>toolchain.detectLocalBoards</code>, and <code>toolchain.restoreBoardCodeSnapshot</code>.
+                  <code>toolchain.detectLocalBoards</code>, <code>git.getStatus</code>, and
+                  <code>toolchain.restoreBoardCodeSnapshot</code>.
                 </p>
               </article>
               <article class="technical-card">
@@ -388,6 +466,14 @@
                   <code>cloudSyncService</code> scans with <code>.tantalumignore</code>, copies allowed files into a shadow
                   repo, commits, rebases against Gitea, pushes, and applies remote tracked files back
                   into the Project Space. Existing Git projects are scanned read-only.
+                </p>
+              </article>
+              <article class="technical-card">
+                <h3>Direct Git support</h3>
+                <p>
+                  Built-in source control uses the active workspace repository rather than the cloud-sync
+                  shadow repo. IPC handlers wrap local Git commands for status, diffs, commits, remotes,
+                  branches, history, initialization, publishing, and safe-directory repair.
                 </p>
               </article>
               <article class="technical-card">
@@ -470,6 +556,17 @@
               <div class="timeline-step">
                 <div class="timeline-badge">06</div>
                 <div class="timeline-content">
+                  <h3>Commit through built-in Git</h3>
+                  <p>
+                    Source control reads the active repository, shows changed files and diffs, stages
+                    selected paths, commits locally, and can fetch, pull, push, or create branches.
+                  </p>
+                </div>
+              </div>
+
+              <div class="timeline-step">
+                <div class="timeline-badge">07</div>
+                <div class="timeline-content">
                   <h3>Sync the workspace</h3>
                   <p>
                     Cloud sync snapshots selected workspace files into a shadow Git repo, pushes to Gitea,
@@ -488,6 +585,8 @@
               <p>
                 The default self-hosted ecosystem runs Appwrite for auth, database, storage, functions, and
                 hosting; Mosquitto for persistent MQTT board commands; and Gitea for cloud workspace sync.
+                Built-in Git source control can use any normal Git remote; Gitea is needed only for
+                Tantalum-managed workspace cloud sync.
               </p>
             </div>
 
@@ -769,6 +868,20 @@ npm run migrate:api-key-envelopes</code></pre>
 
               <article class="security-card">
                 <div class="card-title-row">
+                  <div class="icon-wrapper accent-indigo">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.59 7.41 15.42 14.24M8.59 16.59 15.42 9.76"/></svg>
+                  </div>
+                  <h3>Git provider credentials</h3>
+                </div>
+                <p>
+                  GitHub and GitLab publishing tokens are kept in the desktop secret store. Publishing
+                  pushes with a temporary authorization header and does not save provider tokens into
+                  repository remote URLs.
+                </p>
+              </article>
+
+              <article class="security-card">
+                <div class="card-title-row">
                   <div class="icon-wrapper accent-amber">
                     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></svg>
                   </div>
@@ -810,6 +923,7 @@ npm run migrate:api-key-envelopes</code></pre>
                   <ul class="prereqs-list">
                     <li>Node.js 18 or newer</li>
                     <li>npm 9 or newer</li>
+                    <li>Git in PATH for source control and repository publishing</li>
                     <li>Arduino CLI in PATH or bundled under <code>resources/</code></li>
                     <li>Appwrite project configuration when testing cloud features</li>
                   </ul>
@@ -822,6 +936,7 @@ npm run migrate:api-key-envelopes</code></pre>
                     <li><code>renderer-react/</code>: Vite-based React renderer interface</li>
                     <li><code>arduinoHandler.js</code>: Arduino CLI runtime builder pipeline</li>
                     <li><code>src/services/</code>: Board, snapshot restore, cloud sync services</li>
+                    <li><code>renderer-react/src/components/GitWorkspace.tsx</code>: Git source-control UI</li>
                     <li><code>src/agent/</code>: Agent routing tools & OpenCode execution</li>
                     <li><code>functions/</code>: Self-hosted Appwrite serverless functions</li>
                     <li><code>resources/firmware/</code>: Tantalum runtime IoT firmware source</li>

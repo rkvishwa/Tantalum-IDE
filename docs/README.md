@@ -6,7 +6,7 @@ description: Notes for publishing the Tantalum IDE docs folder on GitHub Pages.
 
 # GitHub Pages Docs Source
 
-This folder is a static documentation website for Tantalum IDE. GitHub Pages can serve it directly from the repository by selecting **Settings > Pages > Deploy from a branch > /docs**.
+This folder is a static documentation website for Tantalum IDE. It covers the IDE architecture, built-in Git source control, board detection, OTA updates, source recovery, cloud sync, security, and self-hosting. GitHub Pages can serve it directly from the repository by selecting **Settings > Pages > Deploy from a branch > /docs**.
 
 ## Files
 

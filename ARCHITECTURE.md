@@ -9,6 +9,7 @@ graph TD
     Renderer[React Renderer] <-->|Preload IPC allowlist| Main[Electron Main Process]
     Main <--> Workspace[Local Project Space]
     Main <--> Toolchain[Arduino CLI, serialport, esptool, avrdude]
+    Main <--> GitCLI[Local Git CLI and provider APIs]
     Main <--> ShadowGit[Shadow Git repo for cloud sync]
     Main <--> Appwrite[Appwrite APIs and Functions]
     Appwrite <--> Gitea[Gitea Git remote]
@@ -24,13 +25,15 @@ Tantalum IDE relies on the standard Electron architecture, split into two main p
 - **Main Process (`main.js`):** Runs in a Node.js environment. It handles high-privilege operations such as:
   - Reading/writing local files and managing the user's workspace.
   - Spawning child processes (like the Arduino CLI) via `arduinoHandler.js`.
+  - Spawning Git CLI commands for the active workspace and calling GitHub/GitLab APIs for repository publishing.
   - Handling secure credentials and Appwrite authentication.
   - Communicating directly with the Appwrite cloud via server SDKs where needed.
 - **Renderer Process (`renderer-react/`):** A modern React application built with Vite and TypeScript. It includes:
   - The UI components for workspace management, board tracking, and OTA updates.
   - Monaco Editor for robust C/C++ (Arduino sketch) editing.
+  - Source-control panels for working-tree changes, diffs, commit history, branches, remotes, and repository publishing.
   - Inter-Process Communication (IPC) calls to request file system actions or compilation from the Main process.
-- **Preload Script (`preload.js`):** Acts as a secure bridge between the Main and Renderer processes, exposing only explicitly allowed IPC channels (e.g., `window.api.compileSketch(...)`) to prevent arbitrary Node.js execution in the UI.
+- **Preload Script (`preload.js`):** Acts as a secure bridge between the Main and Renderer processes, exposing only explicitly allowed IPC channels such as `window.tantalum.toolchain.*`, `window.tantalum.cloudSync.*`, and `window.tantalum.git.*` to prevent arbitrary Node.js execution in the UI.
 
 ### 2. Hardware Tooling Integration
 
@@ -153,9 +156,27 @@ Provisioning has two separate stages:
 
 WiFi credentials are not uploaded to Appwrite and are not stored by the desktop.
 
-### 8. Project Cloud Sync
+### 8. Built-In Git Source Control
 
-Cloud sync uses a shadow Git repository to avoid mutating the user's own Git history.
+Tantalum's source-control UI works directly against the active Project Space repository. This is intentionally separate from Project Cloud Sync: source control uses the user's real `.git` folder, while cloud sync uses a shadow repository so backup/sync never rewrites user history.
+
+1. The renderer owns the interaction model through `useGitWorkspaceController`, `GitSourceControlPanel`, `GitWorkspace`, and `GitHistoryPanel`.
+2. The preload bridge exposes `window.tantalum.git` methods for status, diff, stage, unstage, discard, commit, fetch, pull, push, branch listing, checkout, branch creation, log, remotes, safe-directory repair, repository initialization, repository publishing, and configuration.
+3. `main.js` handles the IPC calls by spawning the local `git` executable with `GIT_TERMINAL_PROMPT=0`, so commands fail cleanly instead of hanging on credential prompts.
+4. Status is parsed from `git status --porcelain=v2 --branch --untracked-files=all`, which lets the UI separate staged files, unstaged files, untracked files, conflicts, current branch, upstream, ahead/behind counts, detached HEAD, and active operations such as merge, rebase, cherry-pick, revert, or bisect.
+5. Diff views are built by reading `HEAD` or index objects with `git show` and pairing them with either staged content or workspace file content. File paths are normalized and blocked if they escape the active Project Space.
+6. Mutating actions are narrow wrappers around ordinary Git commands: `git add`, `git restore --staged`, `git restore --worktree`, `git commit -m`, `git fetch --prune`, `git pull --ff-only`, `git push`, `git checkout`, and `git checkout -b`.
+7. Destructive operations are user-confirmed in the UI. Untracked discard removes files from disk only after path normalization confirms they are inside the active Project Space.
+8. Repository health states are surfaced explicitly: no workspace, missing Git, not a repository, unsafe `safe.directory`, no upstream, authentication failure, merge/rebase conflicts, and general Git command failures.
+9. Git configuration is split between global Git config and the desktop secret store. Author name/email are written through `git config --global`; GitHub/GitLab provider selection, usernames, and personal access tokens are stored in the local secret store.
+10. Repository publishing can create a GitHub or GitLab remote through the provider API, initialize the local repository if needed, create an initial commit when no `HEAD` exists, set `origin`, and push the active branch with an in-memory authorization header. Provider tokens are not persisted into the repository remote URL.
+11. Commit history uses `git log --all --topo-order --source --decorate=short --numstat` and the renderer's `gitCommitGraph` helpers to display a branch graph, refs, authors, avatars, and file-change statistics.
+
+Agent Git tools share the same guarded main-process wrappers for diff, stage, commit, branch, pull, and push so AI-assisted Git operations observe the same workspace boundary and command handling rules.
+
+### 9. Project Cloud Sync
+
+Cloud sync uses a shadow Git repository to avoid mutating the user's own Git history. It is a cloud backup/synchronization service, not the same thing as the built-in source-control panel.
 
 1. `cloudSyncService` scans the workspace, applying `.tantalumignore` and built-in exclusions such as `.git`, build outputs, `node_modules`, and Tantalum trash folders.
 2. Existing Git workspaces are scanned read-only; Tantalum does not stage, commit, or rewrite the user's repository.
@@ -163,7 +184,7 @@ Cloud sync uses a shadow Git repository to avoid mutating the user's own Git his
 4. The shadow repo commits changes, rebases against the remote Gitea branch, pushes, and then applies the remote tracked file set back into the Project Space.
 5. Conflicts are detected when linking or rebasing would overwrite differing local files. Sync state and conflict paths are persisted locally and recorded remotely through `cloud_project_sync_events`.
 
-### 9. VPS Infrastructure & Vertical Scaling
+### 10. VPS Infrastructure & Vertical Scaling
 
 Tantalum employs a dual-VPS architecture on Azure to enforce security boundaries and separate heavy operational concerns:
 
@@ -176,7 +197,7 @@ Tantalum employs a dual-VPS architecture on Azure to enforce security boundaries
    - **MQTT Broker:** Runs Mosquitto with TLS on port 8883. Appwrite publishes commands with publisher credentials; boards subscribe with device credentials and ACL-limited topics.
    - **Workspace Cloud Sync:** Hosts Gitea remotes for Project Space backup and device-to-device sync.
 
-### 10. Tantalum AI Layer (Agentic Integration)
+### 11. Tantalum AI Layer (Agentic Integration)
 
 Tantalum features a deeply integrated Agentic AI assistant. While it uses the OpenCode SDK (`@opencode-ai/sdk`) under the hood, the IDE adds a Tantalum-specific runtime in `src/agent/opencodeRuntimeManager.js`:
 
